@@ -21,6 +21,15 @@ Confirmer = Callable[[str], Awaitable[bool]]
 """向人索取一次确认。返回 True 表示放行。"""
 
 
+@runtime_checkable
+class Messenger(Protocol):
+    """把工具层与 Sender 隔开：工具只知道「往谁发一句话」，不知道信封与传输。"""
+
+    async def send(self, *, to: str, body: str, kind: str) -> str:
+        """返回新消息的 id。发不出去抛 AntHillError 的子类。"""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class ToolContext:
     """工具执行时能看到的全部世界。刻意很小 —— 工具不该拿到 sender 或 config 全量。"""
@@ -29,6 +38,8 @@ class ToolContext:
     blackboard: Path
     security: SecuritySection
     thread: str
+    messenger: Messenger | None = None
+    """没接消息通道的 Agent（比如单机跑的工具测试）用 None，send_message 会明确报错。"""
 
     def resolve(self, raw: str) -> Path:
         """把工具参数里的路径解析成绝对路径；越界抛 ValueError。

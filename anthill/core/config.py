@@ -282,14 +282,18 @@ role = "worker"
 # role = "worker"
 # provider = "deepseek"
 # persona = "你写最小可用的代码，改动前先读现状。"
-# tools = ["read_file", "write_file", "list_dir", "run_shell", "finish"]
+# tools = ["read_file", "write_file", "list_dir", "run_shell", "send_message", "finish"]
 # max_steps = 20           # 步数熔断
 # token_budget = 200000    # 费用熔断：单个任务累计 token 上限
 #
 # [agents.reviewer]        # 最小权限示范：审查者只读，不能写、不能跑命令
 # role = "reviewer"
 # provider = "deepseek"
-# tools = ["read_file", "list_dir", "finish"]
+# tools = ["read_file", "list_dir", "send_message", "finish"]
+
+# 给上面的 coordinator 配一个 provider，它就会拆解任务、按依赖派活、汇总结果：
+#   anthill run "给 utils/date.py 补单测，并让 reviewer 过一遍"
+# 编排用强模型、干活用便宜模型是常见配法。
 
 # ---- 跨机 peer（M5 SSH 阶段启用）----
 # [peers.lab-server]

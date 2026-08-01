@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 
 from anthill.core.config import Config
-from anthill.core.envelope import Address, Envelope
+from anthill.core.envelope import BROADCAST, ROLE_PREFIX, Address, Envelope
 from anthill.core.errors import HopLimitExceeded, UnknownRecipient
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
@@ -27,6 +27,21 @@ def extract_mentions(text: str) -> tuple[str, ...]:
     for name in MENTION_RE.findall(text):
         seen.setdefault(name, None)
     return tuple(seen)
+
+
+def parse_address(raw: str, *, default_node: str) -> Address:
+    """把人写的收件人字符串解析成 Address。
+
+    支持 `coder` / `role:reviewer` / `all` / `node:agent` / `node:role:x` 五种写法。
+    `role:` 里也带冒号，所以不能简单按第一个冒号切 —— 先认已知前缀。
+    """
+    text = raw.strip()
+    if not text:
+        raise UnknownRecipient("收件人不能为空")
+    if text.startswith(ROLE_PREFIX) or text == BROADCAST or ":" not in text:
+        return Address(node=default_node, agent=text)
+    node, _, agent = text.partition(":")
+    return Address(node=node, agent=agent)
 
 
 class Router:

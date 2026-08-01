@@ -60,3 +60,11 @@ class ToolError(AntHillError):
 
 class BudgetExceeded(AntHillError):
     """单次任务的步数或 token 预算耗尽（03-tech-design §4 双熔断）。"""
+
+
+class PlanError(AntHillError):
+    """计划生成失败：模型不给 JSON、schema 不合法、把活派给不存在的 Agent。"""
+
+
+class OrchestrationError(AntHillError):
+    """编排过程本身出错（状态损坏、找不到对应步骤等）。"""

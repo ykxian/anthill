@@ -2,6 +2,7 @@
 
 anthill init            初始化工作区
 anthill agent start/list 守护进程
+anthill run             把任务交给 coordinator，多 Agent 协同完成
 anthill send            投递消息
 anthill status          节点总览
 anthill log             结构化日志
@@ -17,6 +18,7 @@ from anthill.cli.common import console
 from anthill.cli.init_cmd import init_command
 from anthill.cli.log_cmd import log_command
 from anthill.cli.msg_cmd import send_command
+from anthill.cli.run_cmd import run_command
 from anthill.cli.status_cmd import status_command
 
 app = typer.Typer(
@@ -27,6 +29,7 @@ app = typer.Typer(
 )
 
 app.command("init")(init_command)
+app.command("run")(run_command)
 app.command("send")(send_command)
 app.command("status")(status_command)
 app.command("log")(log_command)

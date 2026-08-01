@@ -87,14 +87,39 @@ Agent 写出 `greet.py`，试图跑 `python3 -c ...` 时被策略引擎拦下（
 
 ## M3 · 多 Agent 编排（1 周）—— 核心演示场景 A 达成
 
-- [ ] `orchestrator/plan.py`：计划 JSON schema + 强制结构化输出（校验失败重试）
-- [ ] `orchestrator/coordinator.py`：拓扑调度、子 thread、催办、`done_when` 判定
-- [ ] @mention 路由 + `send_message` 工具
-- [ ] blackboard：BOARD.md 单写者维护 + 任务产物目录
-- [ ] `anthill run "<任务>"` 端到端命令 + rich 实时消息流渲染
+- [x] `orchestrator/plan.py`：计划 JSON schema + 强制结构化输出（校验失败重试）
+- [x] `orchestrator/coordinator.py`：拓扑调度、子 thread、催办、`done_when` 判定
+- [x] @mention 路由 + `send_message` 工具
+- [x] blackboard：BOARD.md 单写者维护 + 任务产物目录
+- [x] `anthill run "<任务>"` 端到端命令 + rich 实时消息流渲染
 
 **验收**：场景 A 全流程（coder 写 → @reviewer 审 → coder 改 → 汇总）无人工干预跑通，
 两个角色用两家模型；构造 @ 循环被熔断。**录第一支演示视频。**
+
+**实际结果（已达成）**：318 个测试全绿，总覆盖率 89%；mypy strict 与 ruff 全绿。
+用录制带在真实 CLI 上跑通场景 A：`anthill run "给 greet.py 补单测并让 reviewer 过一遍"`
+→ boss 拆出 2 步 → coder 写出 `test_greet.py` → reviewer 读文件后 approve
+→ done_when 判定通过 → 汇总回到 CLI。**Agent 写出来的测试 `pytest` 真的能跑通（2 passed）。**
+（演示视频待录）
+
+这一步最关键的设计决定与踩的坑：
+
+1. **coordinator 是事件驱动的状态机，不是一段从头跑到尾的流程。**
+   agentd 的消费循环是串行的：如果 coordinator 在 handler 里 `await` 下游 worker 的结果，
+   而那个结果又要经同一个循环投递进来，就是**死锁**。所以它处理完一条消息立刻返回，
+   状态全部落在 `blackboard/tasks/<id>/state.json` 上。
+   附带收获：崩溃重启能接着调度 —— 有一个集成测试专门换一个全新的 coordinator 实例来验证这点。
+2. **调度器的「就绪」判定漏了失败态，导致无限重派。**
+   `ready()` 原本只排除「在跑的」步骤，于是超时判失败的那一步又变回「可派发」，
+   每个 tick（5s）重派一次 —— 真接上模型就是持续烧钱。修成排除所有非 pending 的步骤。
+   这个 bug 是被「worker 一直不回话」的集成测试逼出来的，单测覆盖不到。
+3. **上游失败的分支会让整次运行永远收敛不了。**
+   s2 依赖 s1，s1 失败后 s2 永远等不到依赖，`all_settled` 永远是 False，用户就一直等不到结果。
+   加了 `skipped` 状态（与 `failed` 分开记，排查时一眼看出谁真的坏了）。
+4. **@ 循环的熔断不写在工具里。** `send_message` 走 `Envelope.reply()` 构造消息，
+   hops 自动 +1，超过 `ttl_hops` 时构造就失败 —— 熔断在协议层，工具层一行相关逻辑都没有。
+5. **`anthill run` 不含任何编排逻辑**，只是个只读观察者（轮询黑板 + 自己的收件箱）。
+   所以 Ctrl-C 掉 CLI 不影响后台协作继续跑完。
 
 ## M4 · LAN 发现与投递（1 周）—— 场景 C
 

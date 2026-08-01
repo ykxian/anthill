@@ -36,6 +36,7 @@ from anthill.transport.registry import TransportRegistry
 
 COORDINATOR_ROLE = "coordinator"
 STATUS_FILE = "runtime.json"
+DEFAULT_TICK_INTERVAL = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +64,7 @@ class AgentRuntime:
         mode: TapeMode = TapeMode.LIVE,
         tape: Path | None = None,
         confirm: Confirmer | None = None,
+        tick_interval: float = DEFAULT_TICK_INTERVAL,
     ) -> None:
         # fail fast，别等收到消息才发现没配好；回放模式不连上游，也就不需要 API key
         check_runtime(
@@ -72,6 +74,7 @@ class AgentRuntime:
         self.layout = layout
         self.config = config
         self.agent_name = agent_name
+        self.tick_interval = tick_interval
         self.agent_config = config.agent(agent_name)
         self.identity = Address(node=config.node.name, agent=agent_name)
         self.mailbox = Mailbox(layout.mailbox_dir(agent_name)).ensure()
@@ -141,6 +144,9 @@ class AgentRuntime:
             asyncio.create_task(self._consume(queue), name="consume"),
             asyncio.create_task(self.sender.run_retry_loop(stop), name="retry"),
         ]
+        if hasattr(self.handler, "tick"):
+            # 只有需要「时间驱动」的 handler（coordinator 的催办与超时）才起这个任务
+            workers.append(asyncio.create_task(self._tick_loop(stop), name="tick"))
         stopper = asyncio.create_task(stop.wait(), name="stop")
         try:
             # 任一 worker 意外退出也要唤醒主流程，不能傻等 stop
@@ -170,6 +176,22 @@ class AgentRuntime:
         while True:
             path = await queue.get()
             await self._process(path)
+
+    async def _tick_loop(self, stop: asyncio.Event) -> None:
+        """定时唤醒 handler。tick 抛错只记日志 —— 一次扫描失败不该杀掉整个 agentd。"""
+        tick = getattr(self.handler, "tick", None)
+        if tick is None:
+            return
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=self.tick_interval)
+                return  # stop 被 set，正常退出
+            except TimeoutError:
+                pass
+            try:
+                await tick(self._ctx)
+            except Exception as exc:
+                self.log.error("tick.failed", error=f"{type(exc).__name__}: {exc}")
 
     def _startup_recovery(self) -> None:
         """崩溃恢复：cur 里没处理完的退回 new，tmp 里的半成品清掉，seen.db 滚动清理。"""

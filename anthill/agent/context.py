@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from anthill.agent.tools.base import Tool
@@ -70,6 +71,8 @@ class ContextBuilder:
     node: str
     tools: list[Tool]
     context_window: int = 128_000
+    board_summary: Callable[[], str] | None = None
+    """黑板快照的取数函数。用回调而不是直接持有 Blackboard，免得上下文层依赖编排层。"""
 
     @property
     def budget(self) -> int:
@@ -87,9 +90,22 @@ class ContextBuilder:
         )
 
     def build(self, env: Envelope, *, history: list[Msg]) -> list[Msg]:
-        """system + 历史 + 本次来件。返回新列表，不修改 history。"""
-        messages = [Msg.system(self.system_prompt()), *history, self.incoming(env)]
+        """system + 黑板 + 历史 + 本次来件。返回新列表，不修改 history。"""
+        head = [Msg.system(self.system_prompt())]
+        board = self._board()
+        if board:
+            head.append(Msg.system(f"## 团队当前状态（共享黑板）\n{board}"))
+        messages = [*head, *history, self.incoming(env)]
         return fit_to_budget(messages, budget=self.budget)
+
+    def _board(self) -> str:
+        """黑板读不到就当没有 —— 它是协作的辅助信息，不该成为单点故障。"""
+        if self.board_summary is None:
+            return ""
+        try:
+            return self.board_summary().strip()
+        except OSError:
+            return ""
 
     def incoming(self, env: Envelope) -> Msg:
         return Msg.user(untrusted_wrap(render_payload(env), source=str(env.from_)))

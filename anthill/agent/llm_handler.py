@@ -17,12 +17,51 @@ from anthill.core.payloads import (
     ChatPayload,
     MessageType,
     TaskErrorPayload,
+    TaskRequestPayload,
     TaskResultPayload,
 )
+from anthill.core.router import parse_address
 from anthill.providers.base import ChatProvider
 from anthill.security.policy import PolicyEngine, TrustLevel, trust_of
 
 MAX_SUMMARY_CHARS = 32_000
+MAX_MENTION_BODY = 30_000
+
+
+class EnvelopeMessenger:
+    """把 send_message 工具的一句话变成一封挂在当前 thread 上的信。
+
+    走 `env.reply()` 而不是 `send_new()`，是为了继承 thread 与 hops ——
+    A@B、B@A 的死循环因此止于协议层，工具这边一行熔断逻辑都不用写。
+    """
+
+    def __init__(self, source: Envelope, ctx: HandlerContext) -> None:
+        self._source = source
+        self._ctx = ctx
+
+    async def send(self, *, to: str, body: str, kind: str) -> str:
+        recipient = parse_address(to, default_node=self._ctx.identity.node)
+        payload = (
+            TaskRequestPayload(title=_clip(body), body=body[:MAX_MENTION_BODY])
+            if kind == "task"
+            else ChatPayload(body=body[:MAX_MENTION_BODY])
+        )
+        env = self._source.reply(
+            type=MessageType.TASK_REQUEST if kind == "task" else MessageType.CHAT,
+            payload=payload,
+            sender=self._ctx.identity,
+            recipient=recipient,
+        )
+        await self._ctx.sender.send(env)
+        self._ctx.log.info(
+            "msg.sent_by_agent", msg=env.id, to=str(recipient), kind=kind, thread=env.thread
+        )
+        return env.id
+
+
+def _clip(text: str, limit: int = 60) -> str:
+    flat = " ".join(text.split())
+    return (flat[:limit] if len(flat) > limit else flat) or "消息"
 
 
 class LlmHandler:
@@ -87,6 +126,7 @@ class LlmHandler:
                 blackboard=ctx.layout.blackboard,
                 security=ctx.config.security,
                 thread=env.thread,
+                messenger=EnvelopeMessenger(env, ctx),
             ),
             log=ctx.log,
             trust=trust,

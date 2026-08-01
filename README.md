@@ -12,7 +12,7 @@
 
 传输层（同机 / 局域网 / SSH）只负责把信封送到那个目录，Agent 消费消息的方式完全一致。
 
-## 现在能跑什么（M0 + M1 + M2）
+## 现在能跑什么（M0 + M1 + M2 + M3）
 
 **通信底座（M0/M1）**
 
@@ -35,10 +35,26 @@
   来件里伪造的定界符会被打断
 - ✅ **thread 记忆**：历史按 thread 落盘 jsonl，超长时用模型压成摘要（压缩失败则保留原文）
 - ✅ **录制回放**：`--record` 录下真实模型响应，`--replay` 当假模型跑 —— CI 天天跑不花钱
-- ✅ **CLI**：`init` / `agent start` / `agent list` / `send` / `status` / `log`
 
-还没做（见 [04-roadmap](./docs/04-roadmap.md)）：M3 多 Agent 编排、M4 LAN 发现、
-M5 SSH 跨机、M6 Web 面板。
+**多 Agent 编排（M3）**
+
+- ✅ **计划即数据**：coordinator 用 LLM 产出计划 JSON（pydantic 校验，
+  失败时把错误原文喂回去重试，最多 3 次），步骤是一张有依赖的 DAG
+- ✅ **拓扑调度**：无依赖的步骤并发派发，每步一个子 thread（上下文隔离），
+  下游能看到上游的交付与产物路径
+- ✅ **事件驱动的状态机**：coordinator 不阻塞等下游，状态落在黑板上 ——
+  **进程崩了重启能接着调度**
+- ✅ **催办与超时**：迟迟不回先催一次（chat，挂在该步的子 thread 上），再超时判失败；
+  上游失败的分支标 `skipped`，不让整次运行卡死
+- ✅ **完成标准判定**：`done_when` 由 coordinator 用 LLM 对照各步交付判定，
+  不满足则追加修复步骤（上限 2 轮，防无限返工）
+- ✅ **点对点 @mention**：worker 之间可以用 `send_message` 直接说话，
+  不必事事经过 coordinator；@ 死循环止于协议层的 hops 熔断
+- ✅ **共享黑板**：`BOARD.md`（≤100 行，coordinator 单写者）注入每个 Agent 的上下文，
+  `blackboard/tasks/<id>/` 放任务产物
+- ✅ **CLI**：`init` / `run` / `agent start` / `agent list` / `send` / `status` / `log`
+
+还没做（见 [04-roadmap](./docs/04-roadmap.md)）：M4 LAN 发现、M5 SSH 跨机、M6 Web 面板。
 
 ## 快速开始
 
@@ -104,6 +120,59 @@ Agent 会自己读文件 → 写测试 → 跑 pytest → 用 `finish` 交付结
 uv run anthill agent start coder --replay .anthill/tapes/coder.jsonl
 ```
 
+### 让一队 Agent 协同干活（M3）
+
+配好 coordinator + 若干 worker（`role = "coordinator"` 的那个负责拆解与汇总）：
+
+```toml
+[agents.boss]
+role = "coordinator"
+provider = "claude"          # 编排用强模型，干活用便宜模型 —— 跨模型混编是常见配法
+
+[agents.coder]
+role = "worker"
+provider = "deepseek"
+tools = ["read_file", "write_file", "list_dir", "run_shell", "send_message", "finish"]
+
+[agents.reviewer]
+role = "reviewer"
+provider = "claude"
+tools = ["read_file", "list_dir", "send_message", "finish"]   # 审查者只读
+```
+
+```bash
+# 三个终端各起一个 agentd
+uv run anthill agent start boss
+uv run anthill agent start coder
+uv run anthill agent start reviewer
+
+# 第四个终端下达任务，实时看它拆解、派活、汇总
+uv run anthill run "给 utils/date.py 补单测，并让 reviewer 过一遍"
+```
+
+```text
+╭─ anthill run ────────────────────────────────────────────╮
+│ 给 utils/date.py 补单测，并让 reviewer 过一遍              │
+│ 12s · 为 date.py 补单测并通过审查                         │
+│                                                          │
+│  ✓  s1  coder           写了 12 个用例，覆盖闰年与时区      │
+│  ▶  s2  role:reviewer   审查 s1 的产物                    │
+│                                                          │
+│ ← [已受理] laptop:boss                                    │
+╰──────────────────────────────────────────────────────────╯
+```
+
+协作过程随时可以直接看 —— 它就是文件：
+
+```bash
+cat demo/.anthill/blackboard/BOARD.md                    # 一页纸的当前状态
+cat demo/.anthill/blackboard/tasks/*/state.json          # 每步的完整状态机
+uv run anthill log boss --follow                         # 编排事件流
+```
+
+`anthill run` 只是个**只读观察者**，编排逻辑全在 coordinator 里：
+Ctrl-C 掉它，后台的协作照常跑完。
+
 ### 其他常用命令
 
 ```bash
@@ -131,16 +200,19 @@ anthill/
 ├── security/      # 策略引擎（风险 × 信任）与终端确认流
 ├── agent/         # agentd：runtime / watcher / sender / handlers
 │   ├── loop.py    #   ReAct 工具循环（步数 + token 双熔断）
-│   ├── context.py #   上下文组装：不可信包裹 + token 预算
+│   ├── context.py #   上下文组装：不可信包裹 + 黑板 + token 预算
 │   ├── memory.py  #   thread 历史落盘与摘要压缩
-│   └── tools/     #   read_file / write_file / list_dir / run_shell / finish
+│   └── tools/     #   read_file / write_file / list_dir / run_shell / send_message / finish
+├── orchestrator/  # 编排：plan（计划 DAG）/ state（运行状态机）/ board / coordinator
 └── cli/           # typer 命令
 
 工作区（运行时生成）
 demo/.anthill/
 ├── node.toml
-├── agents/<name>/mailbox/{inbox/{tmp,new,cur,done},outbox/{pending,sent,dead}}
+├── agents/<name>/{mailbox/{inbox/{tmp,new,cur,done},outbox/…},threads/<thread>.jsonl}
 ├── blackboard/
+│   ├── BOARD.md                    # 一页纸的当前协作状态（coordinator 单写者）
+│   └── tasks/<task_id>/{state.json,产物…}
 └── logs/agentd-<name>.jsonl
 ```
 

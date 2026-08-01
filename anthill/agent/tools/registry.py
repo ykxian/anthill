@@ -9,6 +9,7 @@ from __future__ import annotations
 from anthill.agent.tools.base import Tool
 from anthill.agent.tools.finish import FinishTool
 from anthill.agent.tools.fs import ListDirTool, ReadFileTool, WriteFileTool
+from anthill.agent.tools.messaging import SendMessageTool
 from anthill.agent.tools.shell import RunShellTool
 from anthill.core.errors import ToolError
 
@@ -17,6 +18,7 @@ TOOL_FACTORIES = {
     "write_file": WriteFileTool,
     "list_dir": ListDirTool,
     "run_shell": RunShellTool,
+    "send_message": SendMessageTool,
     "finish": FinishTool,
 }
 

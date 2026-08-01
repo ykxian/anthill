@@ -1,7 +1,7 @@
 """按配置组装一个 Agent 的大脑。
 
-只有一处地方决定「这个 Agent 是 echo 还是 LLM」：配置里有没有 provider。
-CLI 与测试都走这一个入口，避免两条装配路径长期漂移。
+只有一处地方决定「这个 Agent 是 echo、worker 还是 coordinator」：
+role + 有没有 provider。CLI 与测试都走这一个入口，避免两条装配路径长期漂移。
 """
 
 from __future__ import annotations
@@ -15,8 +15,13 @@ from anthill.agent.tools.base import Confirmer
 from anthill.agent.tools.registry import build_toolset
 from anthill.core.config import Config
 from anthill.core.paths import NodeLayout
+from anthill.orchestrator.board import Blackboard
+from anthill.orchestrator.coordinator import CoordinatorHandler, CoordinatorSettings
 from anthill.providers.registry import TapeMode, provider_for_agent
 from anthill.security.policy import PolicyEngine
+
+COORDINATOR_ROLE = "coordinator"
+DEFAULT_CONTEXT_WINDOW = 128_000
 
 
 def build_handler(
@@ -33,13 +38,22 @@ def build_handler(
     if provider is None:
         return EchoHandler()
 
+    blackboard = Blackboard(layout.blackboard)
+    if agent.role == COORDINATOR_ROLE:
+        return CoordinatorHandler(
+            provider=provider,
+            blackboard=blackboard,
+            settings=CoordinatorSettings(step_timeout=config.runtime.task_timeout),
+        )
+
     section = config.provider_for(agent_name)
     tools = build_toolset(agent.tools)
     builder = ContextBuilder(
         agent=agent,
         node=config.node.name,
         tools=tools,
-        context_window=section.context_window if section else 128_000,
+        context_window=section.context_window if section else DEFAULT_CONTEXT_WINDOW,
+        board_summary=blackboard.summary,
     )
     return LlmHandler(
         provider=provider,
