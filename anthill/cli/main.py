@@ -1,0 +1,43 @@
+"""AntHill CLI 入口。
+
+anthill init            初始化工作区
+anthill agent start/list 守护进程
+anthill send            投递消息
+anthill status          节点总览
+anthill log             结构化日志
+"""
+
+from __future__ import annotations
+
+import typer
+
+from anthill import __version__
+from anthill.cli.agent_cmd import agent_app
+from anthill.cli.common import console
+from anthill.cli.init_cmd import init_command
+from anthill.cli.log_cmd import log_command
+from anthill.cli.msg_cmd import send_command
+from anthill.cli.status_cmd import status_command
+
+app = typer.Typer(
+    name="anthill",
+    help="AntHill — 基于文件邮箱的分布式多 Agent 协同框架",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+app.command("init")(init_command)
+app.command("send")(send_command)
+app.command("status")(status_command)
+app.command("log")(log_command)
+app.add_typer(agent_app, name="agent")
+
+
+@app.command("version")
+def version() -> None:
+    """打印版本号。"""
+    console.print(f"anthill {__version__}")
+
+
+if __name__ == "__main__":
+    app()

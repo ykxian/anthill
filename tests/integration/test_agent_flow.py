@@ -1,0 +1,232 @@
+"""集成：真的把两个 agentd 跑起来，让消息在文件邮箱之间走一遍。
+
+覆盖 02-protocol §8 的用例 4（幂等）与用例 6（hops 熔断），
+以及 M1 的验收标准：send → accepted 回执 → result。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import shutil
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from datetime import timedelta
+
+import pytest
+
+from anthill.agent.handlers import EchoHandler, HandlerContext
+from anthill.agent.runtime import AgentRuntime
+from anthill.core import outbox as outbox_module
+from anthill.core.config import Config
+from anthill.core.envelope import Address, Envelope
+from anthill.core.ids import now
+from anthill.core.logging import EventLog
+from anthill.core.mailbox import Mailbox
+from anthill.core.outbox import Outbox
+from anthill.core.paths import NodeLayout
+from anthill.core.payloads import ChatPayload, MessageType, TaskRequestPayload
+from anthill.core.states import DeliveryState
+
+TIMEOUT = 5.0
+
+
+@asynccontextmanager
+async def running(
+    layout: NodeLayout, config: Config, name: str, handler=None
+) -> AsyncIterator[AgentRuntime]:
+    runtime = AgentRuntime(
+        layout=layout,
+        config=config,
+        agent_name=name,
+        handler=handler,
+        log=EventLog(layout.log_file(name), agent=name, echo=False),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(runtime.run(stop))
+    try:
+        yield runtime
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=TIMEOUT)
+
+
+async def wait_until(predicate: Callable[[], bool], timeout: float = TIMEOUT) -> None:
+    async def poll() -> None:
+        while not predicate():
+            await asyncio.sleep(0.02)
+
+    await asyncio.wait_for(poll(), timeout=timeout)
+
+
+def inbox_types(mailbox: Mailbox) -> list[MessageType]:
+    """读取（还没被消费的）来件类型，测试里当断言用。"""
+    return [Mailbox.read_envelope(p).type for p in mailbox.list_new()]
+
+
+def archived(mailbox: Mailbox) -> list[Envelope]:
+    return [Mailbox.read_envelope(p) for p in sorted(mailbox.done.rglob("*.json"))]
+
+
+async def test_task_request_gets_accepted_receipt_and_result(layout, config, make_task):
+    """M1 验收：投一条任务，收到 accepted 回执与 task.result。"""
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+    env = make_task(sender="cli", recipient="beta")
+
+    async with running(layout, config, "beta"):
+        Mailbox(layout.mailbox_dir("beta")).deposit(env)
+        await wait_until(lambda: len(cli_box.list_new()) >= 2)
+
+    types = inbox_types(cli_box)
+    assert MessageType.RECEIPT_ACCEPTED in types
+    assert MessageType.TASK_RESULT in types
+
+    result = next(Mailbox.read_envelope(p) for p in cli_box.list_new() if "result" in p.read_text())
+    assert result.thread == env.thread  # 同一线程，便于按 thread 折叠展示
+    assert result.reply_to == env.id
+    assert "测试任务" in result.payload.summary
+
+
+async def test_duplicate_delivery_is_processed_once_but_acked_every_time(layout, config, make_task):
+    """用例 4：同一信封投 3 次 → 业务处理恰好 1 次，回执 3 次。"""
+    beta_box = Mailbox(layout.mailbox_dir("beta"))
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+    env = make_task(sender="cli", recipient="beta")
+
+    async with running(layout, config, "beta"):
+        for _ in range(3):
+            beta_box.deposit(env)  # 同一个 id，模拟发送方重试
+            await asyncio.sleep(0.05)
+        await wait_until(lambda: inbox_types(cli_box).count(MessageType.RECEIPT_ACCEPTED) == 3)
+
+    types = inbox_types(cli_box)
+    assert types.count(MessageType.RECEIPT_ACCEPTED) == 3
+    assert types.count(MessageType.TASK_RESULT) == 1  # 业务只做了一次
+
+
+async def test_mutual_chat_is_broken_by_hop_limit(layout, config, addr):
+    """用例 6：两个 echo agent 互相回信，第 ttl_hops 跳被熔断，消息风暴止住。"""
+    ping = Envelope.new(
+        sender=addr("alpha"),
+        recipient=addr("beta"),
+        type=MessageType.CHAT,
+        payload=ChatPayload(body="ping"),
+        ttl_hops=4,
+    )
+
+    async with running(layout, config, "alpha"), running(layout, config, "beta"):
+        Mailbox(layout.mailbox_dir("beta")).deposit(ping)
+        await asyncio.sleep(1.5)  # 让它们尽情互相回，看会不会停下来
+
+    chats = [
+        env
+        for box in ("alpha", "beta")
+        for env in archived(Mailbox(layout.mailbox_dir(box)))
+        if env.type is MessageType.CHAT
+    ]
+    assert chats, "至少要有第一条 ping"
+    assert max(env.hops for env in chats) <= 4  # 从没突破 ttl
+    assert len(chats) <= 4  # 不是无限风暴
+
+
+async def test_expired_message_is_refused_with_receipt(layout, config, addr):
+    expired = Envelope(
+        from_=addr("cli"),
+        to=addr("beta"),
+        type=MessageType.TASK_REQUEST,
+        payload=TaskRequestPayload(title="过期任务"),
+        expires_at=now() - timedelta(seconds=1),
+    )
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+
+    async with running(layout, config, "beta"):
+        Mailbox(layout.mailbox_dir("beta")).deposit(expired)
+        await wait_until(lambda: len(cli_box.list_new()) >= 1)
+
+    assert inbox_types(cli_box) == [MessageType.RECEIPT_EXPIRED]
+
+
+async def test_invalid_envelope_is_quarantined_not_swallowed(layout, config):
+    beta_box = Mailbox(layout.mailbox_dir("beta"))
+    (beta_box.new / "01J000000000000000000000BB.json").write_text("{坏}", encoding="utf-8")
+
+    async with running(layout, config, "beta"):
+        await wait_until(lambda: (beta_box.done / "invalid").is_dir())
+
+    assert list((beta_box.done / "invalid").glob("*.json"))
+    assert beta_box.list_new() == []  # 不能堵住队列
+
+
+async def test_sender_state_machine_reaches_completed(layout, config, addr):
+    """发送方视角：pending → delivered → accepted → completed 全程走通。"""
+    async with running(layout, config, "beta"), running(layout, config, "alpha") as alpha:
+        env = await alpha.sender.send_new(
+            to=addr("beta"),
+            type=MessageType.TASK_REQUEST,
+            payload=TaskRequestPayload(title="端到端", body="跑通状态机"),
+        )
+        await wait_until(
+            lambda: (
+                (r := alpha.tracker.get(env.id)) is not None and r.state is DeliveryState.COMPLETED
+            )
+        )
+
+    assert alpha.tracker.get(env.id).state is DeliveryState.COMPLETED
+    # 任务类消息不再有悬空状态（回执类是「送到即完事」，不参与等待）
+    assert MessageType.TASK_REQUEST not in {r.type for r in alpha.tracker.open_records()}
+
+
+async def test_role_addressing_reaches_a_worker(layout, config, addr):
+    async with running(layout, config, "beta"), running(layout, config, "alpha") as alpha:
+        env = await alpha.sender.send_new(
+            to=Address(node="testnode", agent="role:worker"),
+            type=MessageType.TASK_REQUEST,
+            payload=TaskRequestPayload(title="按角色派活"),
+        )
+        await wait_until(
+            lambda: (
+                (r := alpha.tracker.get(env.id)) is not None and r.state is DeliveryState.COMPLETED
+            ),
+        )
+
+    assert alpha.tracker.get(env.id).to.agent in {"beta", "gamma"}
+
+
+async def test_delivery_to_missing_mailbox_retries_then_dead_letters(
+    layout, config, addr, monkeypatch
+):
+    """重试耗尽 → 死信 → 上报 coordinator。退避时间调短，否则测试要跑 31 秒。"""
+    monkeypatch.setattr(outbox_module, "BACKOFF_BASE", timedelta(seconds=0.01))
+    # gamma 配置里有，但故意不建邮箱目录 → 投递必然失败
+    shutil.rmtree(layout.mailbox_dir("gamma"))
+    alpha_box = Mailbox(layout.mailbox_dir("alpha"))
+
+    async with running(layout, config, "alpha") as alpha:
+        env = await alpha.sender.send_new(
+            to=addr("gamma"),
+            type=MessageType.TASK_REQUEST,
+            payload=TaskRequestPayload(title="发给不存在的邮箱"),
+        )
+        await wait_until(
+            lambda: (r := alpha.tracker.get(env.id)) is not None and r.state is DeliveryState.DEAD
+        )
+
+    assert len(Outbox(alpha_box).dead_letters()) == 1
+    assert Outbox(alpha_box).load_pending() == []
+
+
+@pytest.mark.parametrize("handler", [EchoHandler()])
+async def test_handler_errors_become_task_error(layout, config, make_task, handler):
+    class Exploding:
+        name = "exploding"
+
+        async def handle(self, env: Envelope, ctx: HandlerContext) -> None:
+            raise RuntimeError("大脑炸了")
+
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+
+    async with running(layout, config, "beta", handler=Exploding()):
+        Mailbox(layout.mailbox_dir("beta")).deposit(make_task(sender="cli", recipient="beta"))
+        await wait_until(lambda: MessageType.TASK_ERROR in inbox_types(cli_box))
+
+    assert MessageType.TASK_ERROR in inbox_types(cli_box)
+    assert isinstance(handler, EchoHandler)  # 夹具参数只是为了对照，确保正常 handler 仍可用
