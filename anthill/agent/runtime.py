@@ -15,8 +15,10 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from anthill.agent.handlers import EchoHandler, HandlerContext, MessageHandler
+from anthill.agent.factory import build_handler
+from anthill.agent.handlers import HandlerContext, MessageHandler
 from anthill.agent.sender import Sender
+from anthill.agent.tools.base import Confirmer
 from anthill.agent.watcher import MailboxWatcher, WatchMode
 from anthill.core.config import Config, check_runtime
 from anthill.core.envelope import Address, Envelope
@@ -29,6 +31,7 @@ from anthill.core.payloads import MessageType, TaskErrorPayload
 from anthill.core.router import Router
 from anthill.core.seen import SeenStore
 from anthill.core.states import DeliveryTracker
+from anthill.providers.registry import TapeMode
 from anthill.transport.registry import TransportRegistry
 
 COORDINATOR_ROLE = "coordinator"
@@ -57,8 +60,14 @@ class AgentRuntime:
         handler: MessageHandler | None = None,
         log: EventLog | None = None,
         echo: bool = True,
+        mode: TapeMode = TapeMode.LIVE,
+        tape: Path | None = None,
+        confirm: Confirmer | None = None,
     ) -> None:
-        check_runtime(config, layout, agent_name)  # fail fast，别等收到消息才发现没配好
+        # fail fast，别等收到消息才发现没配好；回放模式不连上游，也就不需要 API key
+        check_runtime(
+            config, layout, agent_name, require_provider_key=(mode is not TapeMode.REPLAY)
+        )
 
         self.layout = layout
         self.config = config
@@ -66,7 +75,15 @@ class AgentRuntime:
         self.agent_config = config.agent(agent_name)
         self.identity = Address(node=config.node.name, agent=agent_name)
         self.mailbox = Mailbox(layout.mailbox_dir(agent_name)).ensure()
-        self.handler: MessageHandler = handler or EchoHandler()
+        # 配了 provider 就是 LLM 大脑，没配就是 echo —— 判断只在 factory 里做一次
+        self.handler: MessageHandler = handler or build_handler(
+            layout=layout,
+            config=config,
+            agent_name=agent_name,
+            mode=mode,
+            tape=tape,
+            confirm=confirm,
+        )
         self.log = log or EventLog(layout.log_file(agent_name), agent=agent_name, echo=echo)
 
         self._seen: SeenStore = self.mailbox.open_seen()
@@ -178,11 +195,22 @@ class AgentRuntime:
 
     async def aclose(self) -> None:
         await self._watcher.stop()
+        await self._close_handler()
         await self._transports.close()
         self._seen.close()
         self.status_path.unlink(missing_ok=True)
         self.log.info("agentd.stop")
         self.log.close()
+
+    async def _close_handler(self) -> None:
+        """handler 可选地实现 aclose（LLM handler 用它关上游连接）。关不掉也不该影响退出。"""
+        closer = getattr(self.handler, "aclose", None)
+        if closer is None:
+            return
+        try:
+            await closer()
+        except Exception as exc:
+            self.log.warn("handler.close_failed", error=f"{type(exc).__name__}: {exc}")
 
     # ---------- 单条消息的处理 ----------
 

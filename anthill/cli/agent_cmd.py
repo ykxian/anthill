@@ -15,6 +15,8 @@ from anthill.agent.runtime import AgentRuntime
 from anthill.cli.common import console, fail, is_running, load
 from anthill.core.errors import AntHillError
 from anthill.core.mailbox import Mailbox
+from anthill.providers.registry import TapeMode
+from anthill.security.confirm import terminal_confirmer
 
 agent_app = typer.Typer(no_args_is_help=True, help="Agent 守护进程")
 
@@ -24,11 +26,34 @@ def start(
     name: str = typer.Argument(..., help="Agent 名（需在 node.toml 中已配置）"),
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="只写日志文件，不在终端回显"),
+    record: Path | None = typer.Option(
+        None, "--record", help="把每次模型调用录进这个 jsonl，供回放/排查"
+    ),
+    replay: Path | None = typer.Option(
+        None, "--replay", help="用录制带当假模型跑，不产生 API 费用"
+    ),
+    unattended: bool = typer.Option(
+        False,
+        "--unattended",
+        "-u",
+        help="无人值守：不弹确认，需要确认的高风险操作一律拒绝（不是「全部同意」）",
+    ),
 ) -> None:
     """启动一个 agentd：监控自己的邮箱，处理消息，写回执。Ctrl-C 优雅退出。"""
     layout, config = load(workspace)
+    if record and replay:
+        fail("--record 与 --replay 不能同时使用")
+    mode = TapeMode.REPLAY if replay else (TapeMode.RECORD if record else TapeMode.LIVE)
     try:
-        runtime = AgentRuntime(layout=layout, config=config, agent_name=name, echo=not quiet)
+        runtime = AgentRuntime(
+            layout=layout,
+            config=config,
+            agent_name=name,
+            echo=not quiet,
+            mode=mode,
+            tape=replay or record,
+            confirm=None if unattended else terminal_confirmer(console),
+        )
     except AntHillError as exc:
         fail(str(exc))
 

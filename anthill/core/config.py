@@ -22,6 +22,13 @@ DEFAULT_MULTICAST_GROUP = "239.77.77.7"
 DEFAULT_DISCOVERY_PORT = 45777
 DEFAULT_POLL_INTERVAL = 2.0
 DEFAULT_TASK_TIMEOUT = 600.0
+DEFAULT_MAX_TOKENS = 4096
+DEFAULT_TEMPERATURE = 0.2
+DEFAULT_LLM_TIMEOUT = 120.0
+DEFAULT_CONTEXT_WINDOW = 128_000
+DEFAULT_MAX_STEPS = 20
+DEFAULT_TOKEN_BUDGET = 200_000
+DEFAULT_SHELL_TIMEOUT = 120.0
 
 
 class _Section(BaseModel):
@@ -71,6 +78,11 @@ class ProviderSection(_Section):
     api_key_env: str
     model: str
     base_url: str | None = None
+    max_tokens: int = Field(default=DEFAULT_MAX_TOKENS, gt=0)
+    temperature: float = Field(default=DEFAULT_TEMPERATURE, ge=0, le=2)
+    timeout: float = Field(default=DEFAULT_LLM_TIMEOUT, gt=0)
+    context_window: int = Field(default=DEFAULT_CONTEXT_WINDOW, gt=0)
+    """模型上下文窗口，context.py 按它的 70% 做预算（03-tech-design §4）。"""
 
 
 class AgentSection(_Section):
@@ -81,6 +93,36 @@ class AgentSection(_Section):
     provider: str | None = None
     persona: str = ""
     tools: tuple[str, ...] = ()
+    max_steps: int = Field(default=DEFAULT_MAX_STEPS, gt=0)
+    token_budget: int = Field(default=DEFAULT_TOKEN_BUDGET, gt=0)
+
+
+DEFAULT_SHELL_ALLOWLIST = (
+    "pytest",
+    "python -m pytest",
+    "ruff",
+    "mypy",
+    "git status",
+    "git diff",
+    "git log",
+)
+"""白名单只放「验证类」命令。
+
+刻意**不放** `cat`/`ls`/`head` 这类看似人畜无害的读命令：shell 的 cwd 虽然锁在
+workspace，但参数可以写绝对路径，`cat /etc/passwd` 一样读得到。Agent 想读文件有
+`read_file`/`list_dir` 工具，那两个是做过路径前缀校验的 —— 没必要为了省事在这里开个后门。
+"""
+
+
+class SecuritySection(_Section):
+    """工具策略（03-tech-design §6）。默认保守：危险操作宁可停下来问人。"""
+
+    shell_allowlist: tuple[str, ...] = DEFAULT_SHELL_ALLOWLIST
+    shell_timeout: float = Field(default=DEFAULT_SHELL_TIMEOUT, gt=0)
+    confirm_high_risk: bool = True
+    """False 表示无人值守模式：high 风险直接拒绝而不是等人确认。"""
+
+    max_output_bytes: int = Field(default=64_000, gt=0)
 
 
 class RuntimeSection(_Section):
@@ -93,6 +135,7 @@ class Config(_Section):
     node: NodeSection
     discovery: DiscoverySection = DiscoverySection()
     runtime: RuntimeSection = RuntimeSection()
+    security: SecuritySection = SecuritySection()
     peers: dict[str, PeerSection] = Field(default_factory=dict)
     providers: dict[str, ProviderSection] = Field(default_factory=dict)
     agents: dict[str, AgentSection] = Field(default_factory=dict)
@@ -161,12 +204,18 @@ class Config(_Section):
         return self.providers[provider] if provider else None
 
 
-def check_runtime(config: Config, layout: NodeLayout, agent_name: str) -> None:
-    """agentd 启动前的 fail-fast 体检。任一项不过直接拒绝启动。"""
+def check_runtime(
+    config: Config, layout: NodeLayout, agent_name: str, *, require_provider_key: bool = True
+) -> None:
+    """agentd 启动前的 fail-fast 体检。任一项不过直接拒绝启动。
+
+    `require_provider_key=False` 用于回放模式：那时根本不连上游，
+    不该因为「没导出 API key」而拒绝启动。
+    """
     agent = config.agent(agent_name)
     problems: list[str] = []
 
-    if agent.provider:
+    if agent.provider and require_provider_key:
         provider = config.providers[agent.provider]
         if not os.environ.get(provider.api_key_env):
             problems.append(
@@ -204,6 +253,13 @@ poll_interval = 2.0        # watcher 降级为轮询时的扫描间隔（秒）
 task_timeout = 600.0
 watch_mode = "auto"        # auto | inotify | poll（NFS 上会自动降级为 poll）
 
+[security]
+# 工具风险 × 来源信任 → 放行 / 要确认 / 拒绝。high 风险（如非白名单 shell 命令）
+# 一律要人点头；agentd 不在终端里跑时「没人能确认」就等于拒绝。
+confirm_high_risk = true
+shell_timeout = 120.0
+# shell_allowlist = ["pytest", "ruff", "git status"]   # 名单内的命令降为 medium
+
 # ---- 模型 provider：只写环境变量名，不写密钥本身 ----
 # [providers.deepseek]
 # kind = "openai_compat"
@@ -220,6 +276,20 @@ role = "coordinator"
 
 [agents.echo]
 role = "worker"
+
+# ---- 有大脑的 Agent：配上 provider 就会走 ReAct 工具循环 ----
+# [agents.coder]
+# role = "worker"
+# provider = "deepseek"
+# persona = "你写最小可用的代码，改动前先读现状。"
+# tools = ["read_file", "write_file", "list_dir", "run_shell", "finish"]
+# max_steps = 20           # 步数熔断
+# token_budget = 200000    # 费用熔断：单个任务累计 token 上限
+#
+# [agents.reviewer]        # 最小权限示范：审查者只读，不能写、不能跑命令
+# role = "reviewer"
+# provider = "deepseek"
+# tools = ["read_file", "list_dir", "finish"]
 
 # ---- 跨机 peer（M5 SSH 阶段启用）----
 # [peers.lab-server]
