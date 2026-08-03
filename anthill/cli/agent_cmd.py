@@ -12,10 +12,13 @@ import typer
 from rich.table import Table
 
 from anthill.agent.runtime import AgentRuntime
+from anthill.agent.tools.base import Confirmer
 from anthill.cli.common import console, fail, is_running, load
 from anthill.core.errors import AntHillError
 from anthill.core.mailbox import Mailbox
+from anthill.core.paths import NodeLayout
 from anthill.providers.registry import TapeMode
+from anthill.security.approvals import ApprovalStore, approval_confirmer
 from anthill.security.confirm import terminal_confirmer
 
 agent_app = typer.Typer(no_args_is_help=True, help="Agent 守护进程")
@@ -38,6 +41,11 @@ def start(
         "-u",
         help="无人值守：不弹确认，需要确认的高风险操作一律拒绝（不是「全部同意」）",
     ),
+    approvals: bool = typer.Option(
+        False,
+        "--approvals",
+        help="危险操作写进 .anthill/approvals/ 等人批（跨机场景：本机 `anthill approve --peer`）",
+    ),
 ) -> None:
     """启动一个 agentd：监控自己的邮箱，处理消息，写回执。Ctrl-C 优雅退出。"""
     layout, config = load(workspace)
@@ -52,7 +60,7 @@ def start(
             echo=not quiet,
             mode=mode,
             tape=replay or record,
-            confirm=None if unattended else terminal_confirmer(console),
+            confirm=_confirmer(layout, name, unattended=unattended, approvals=approvals),
         )
     except AntHillError as exc:
         fail(str(exc))
@@ -61,6 +69,22 @@ def start(
         asyncio.run(_run(runtime))
     except KeyboardInterrupt:  # asyncio.run 在信号处理外仍可能抛
         console.print("\n[dim]已停止[/dim]")
+
+
+def _confirmer(
+    layout: NodeLayout, name: str, *, unattended: bool, approvals: bool
+) -> Confirmer | None:
+    """三种确认方式，按显式程度排序。
+
+    --unattended  谁也不问，需要确认的一律拒绝
+    --approvals   写进 approvals 目录等人批（远端无人值守但仍要人点头时用）
+    默认          在本终端上问（没有 tty 时退化为「没人能确认」→ 拒绝）
+    """
+    if unattended:
+        return None
+    if approvals:
+        return approval_confirmer(ApprovalStore(layout.root), agent=name)
+    return terminal_confirmer(console)
 
 
 async def _run(runtime: AgentRuntime) -> None:

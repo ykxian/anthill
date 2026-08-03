@@ -76,3 +76,14 @@ class SignatureError(ProtocolError):
 
 class PeerError(AntHillError):
     """对端不存在、未信任，或指纹与首次信任时不一致（TOFU 告警）。"""
+
+
+class UnroutableNode(DeliveryError):
+    """本节点没有通往目标节点的路。
+
+    与其他不可重试错误分开，是因为它有个特殊出路：暂存下来等对方来拉
+    （SSH 场景里服务器连不回笔记本，见 core/spool.py）。
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, retryable=False)

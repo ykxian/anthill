@@ -12,7 +12,7 @@
 
 传输层（同机 / 局域网 / SSH）只负责把信封送到那个目录，Agent 消费消息的方式完全一致。
 
-## 现在能跑什么（M0 + M1 + M2 + M3 + M4）
+## 现在能跑什么（M0 + M1 + M2 + M3 + M4 + M5）
 
 **通信底座（M0/M1）**
 
@@ -52,6 +52,7 @@
   不必事事经过 coordinator；@ 死循环止于协议层的 hops 熔断
 - ✅ **共享黑板**：`BOARD.md`（≤100 行，coordinator 单写者）注入每个 Agent 的上下文，
   `blackboard/tasks/<id>/` 放任务产物
+
 **跨机通信（M4）**
 
 - ✅ **默认静默**：`discovery.enabled = false` 时不发包、不监听、**连 socket 都不创建**；
@@ -64,9 +65,23 @@
   各有一条测试（02-protocol §8 用例 7）
 - ✅ **准入四道闸**：解析（400）→ 是否受信任（403）→ 签名与时间窗（401）
   → 收件人是否本机 Agent（421 不当跳板 / 404）
-- ✅ **CLI**：`init` / `run` / `serve` / `peers` / `agent` / `send` / `status` / `log`
 
-还没做（见 [04-roadmap](./docs/04-roadmap.md)）：M5 SSH 跨机、M6 Web 面板。
+**SSH 跨机（M5）**
+
+- ✅ **服务器不开任何新端口**：SFTP 直接把信封写进远端邮箱（`tmp→rename`，
+  跨机与同机语义完全一致），复用你已经有的 SSH 信任通道
+- ✅ **回信靠拉，不靠推**：SSH 是单向的（服务器连不回 NAT 后面的笔记本），
+  所以远端把回信暂存在 `spool/<你的节点>/`，你 `anthill pull` 取走 —— 和 `git pull` 一个道理
+- ✅ **远端危险操作由本机点头**：远端 agentd 把请求写进 `approvals/` 并停下来等，
+  你在本机 `anthill approve --peer lab` 批，答复经 SFTP 写回。走文件不走消息 ——
+  消息会和串行消费循环死锁
+- ✅ **收件方验签**：共用服务器上，同机器的其他账号也能往你的 inbox 里写文件；
+  通道加密拦不住这种本地伪造投递，验签才拦得住
+- ✅ **连接复用与重连**、**按需拉取远端产物**（`anthill fetch`）
+- ✅ **CLI**：`init` / `run` / `serve` / `peers` / `agent` / `send` / `status` / `log`
+  / `approve` / `fetch` / `pull`
+
+还没做（见 [04-roadmap](./docs/04-roadmap.md)）：M6 Web 面板与打磨。
 
 ## 快速开始
 
@@ -214,6 +229,42 @@ ss -uan | grep 45777      # 没有任何输出 —— discovery 关闭时连 soc
 但**发现 ≠ 可通信**：广播只会让对方以 `discovered` 出现在 `peers list` 里，
 必须核对指纹并 `trust` 交换密钥后才能互投消息。
 
+### 跨机协作之二：SSH（M5）
+
+服务器上只要有 sshd 就够了 —— **不用开任何新端口，也不用配证书**：
+
+```toml
+# 笔记本的 node.toml
+[peers.lab-server]
+transport = "ssh"
+host = "10.0.8.21"
+user = "yekaixian"
+remote_workspace = "~/work/proj"
+# identity_file = "~/.ssh/id_ed25519"   # 留空则用 ssh-agent 与默认密钥
+```
+
+```toml
+# 服务器的 node.toml：它连不回你的笔记本，所以回信先暂存
+[runtime]
+spool_unroutable = true
+```
+
+```bash
+# 服务器上（只有 sshd，没有别的端口）
+uv run anthill agent start runner --approvals
+
+# 笔记本上
+uv run anthill send lab-server:runner "跑一遍 pytest 并总结失败原因"
+uv run anthill approve --peer lab-server     # 远端遇到危险命令会停下来等你点头
+uv run anthill pull lab-server               # 取回回执与结果
+uv run anthill fetch lab-server reports/pytest.log   # 按需拉产物
+```
+
+为什么回信要拉而不是推？因为 SSH 天生单向：你能连服务器，服务器连不回你
+（NAT 后面、也没跑 sshd）。所以远端把回信暂存在 `spool/<你的节点>/`，
+由你来取 —— 和 `git pull` 一个道理。信封原样保留，拉回去之后走的是
+和同机投递完全一样的处理路径。
+
 ### 其他常用命令
 
 ```bash
@@ -236,11 +287,11 @@ cat demo/.anthill/agents/cli/mailbox/inbox/done/*/*.json
 ```text
 anthill/
 ├── core/          # 协议层：envelope / mailbox / seen / outbox / states / router / config
-├── transport/     # 传输层：base 抽象 + local（lan / ssh 待做）
+├── transport/     # 传输层：base 抽象 + local / lan（HTTP+HMAC）/ ssh（SFTP）
 ├── providers/     # 模型接入：base 抽象 + anthropic / openai_compat + 录制回放
 ├── discovery/     # 组播信标（默认关闭）与 peers 列表（TOFU 信任）
 ├── web/           # FastAPI：LAN 投递端点 /deliver
-├── security/      # HMAC 签名、密钥与配对、策略引擎（风险 × 信任）、终端确认流
+├── security/      # HMAC 签名、密钥与配对、策略引擎（风险 × 信任）、确认与审批流
 ├── agent/         # agentd：runtime / watcher / sender / handlers
 │   ├── loop.py    #   ReAct 工具循环（步数 + token 双熔断）
 │   ├── context.py #   上下文组装：不可信包裹 + 黑板 + token 预算

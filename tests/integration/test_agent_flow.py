@@ -256,3 +256,28 @@ async def test_permanently_unroutable_message_dies_exactly_once(layout, config, 
     coordinator_box = Mailbox(layout.mailbox_dir("alpha"))
     reports = [e for e in archived(coordinator_box) if e.type is MessageType.EVENT]
     assert len(reports) <= 1  # 死信只上报一次
+
+
+async def test_unroutable_reply_is_spooled_when_the_node_enables_it(layout, config, addr):
+    """SSH 是单向的：服务器连不回你的笔记本，回信只能暂存等你来拉。
+
+    默认关闭（上一条用例验证了默认还是死信），开了才走这条路。
+    """
+    from anthill.core.spool import Spool
+
+    spooling = config.model_copy(
+        update={"runtime": config.runtime.model_copy(update={"spool_unroutable": True})}
+    )
+    spool = Spool(layout.root)
+
+    async with running(layout, spooling, "alpha") as alpha:
+        env = await alpha.sender.send_new(
+            to=Address(node="laptop", agent="cli"),  # 路由不到
+            type=MessageType.TASK_REQUEST,
+            payload=TaskRequestPayload(title="回不去的信"),
+        )
+        await wait_until(lambda: bool(spool.pending("laptop")))
+
+    assert [p.name for p in spool.pending("laptop")] == [f"{env.id}.json"]
+    assert Outbox(Mailbox(layout.mailbox_dir("alpha"))).dead_letters() == []  # 不是死信
+    assert spool.take("laptop", f"{env.id}.json").id == env.id  # 信封原样保留

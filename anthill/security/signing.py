@@ -41,9 +41,14 @@ def verify_envelope(
     key: bytes,
     *,
     at: datetime | None = None,
-    max_skew: timedelta = MAX_CLOCK_SKEW,
+    max_skew: timedelta | None = MAX_CLOCK_SKEW,
 ) -> None:
-    """校验签名与时间窗。任一不过抛 SignatureError，绝不返回布尔值让调用方忘了判。"""
+    """校验签名与时间窗。任一不过抛 SignatureError，绝不返回布尔值让调用方忘了判。
+
+    `max_skew=None` 表示只验签名、不看时间。用于**已经躺在邮箱里**的信封：
+    邮箱是存储转发队列，agentd 停机几小时再启动是正常的，
+    那时按时间窗判就会把一堆合法消息误杀。这种场景的重放防护由 seen.db 承担。
+    """
     if not env.sig:
         raise SignatureError(f"消息 {env.id} 未签名，但本通道要求签名")
     if not env.sig.startswith(SIG_PREFIX):
@@ -54,6 +59,8 @@ def verify_envelope(
     if not hmac.compare_digest(env.sig, expected):  # 定时安全比较，别用 ==
         raise SignatureError(f"消息 {env.id} 签名不匹配：内容被改过，或用的不是同一把密钥")
 
+    if max_skew is None:
+        return
     skew = abs((at or now()) - env.ts)
     if skew > max_skew:
         raise SignatureError(

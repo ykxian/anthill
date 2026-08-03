@@ -65,6 +65,12 @@ class PeerSection(_Section):
     remote_workspace: str | None = None
     endpoint: str | None = None
     key_env: str | None = None
+    port: int = Field(default=22, ge=1, le=65535)
+    identity_file: str | None = None
+    """SSH 私钥路径。留空则用 ssh-agent 与 ~/.ssh 下的默认密钥。"""
+
+    known_hosts: str | None = None
+    """known_hosts 路径。留空用 ~/.ssh/known_hosts —— 主机指纹校验绝不会被跳过。"""
 
     @model_validator(mode="after")
     def _check_transport_fields(self) -> Self:
@@ -131,6 +137,12 @@ class RuntimeSection(_Section):
     poll_interval: float = Field(default=DEFAULT_POLL_INTERVAL, gt=0)
     task_timeout: float = Field(default=DEFAULT_TASK_TIMEOUT, gt=0)
     watch_mode: Literal["auto", "inotify", "poll"] = "auto"
+    spool_unroutable: bool = False
+    """路由不到的目标改为暂存，等对方 `anthill pull` 来取。
+
+    服务器上开这个：SSH 是单向的，服务器连不回你的笔记本（NAT 后面、也没跑 sshd），
+    结果只能等你来拉。默认关闭 —— 关闭时路由不到就是死信，行为跟以前一样。
+    """
 
 
 class Config(_Section):
@@ -308,9 +320,13 @@ role = "worker"
 # transport = "lan"
 # endpoint = "http://10.0.8.21:45778"
 #
-# [peers.old-box]          # SSH peer（M5 阶段启用）
+# [peers.lab-server]       # SSH peer：服务器上只要有 sshd，不用开任何新端口
 # transport = "ssh"
 # host = "10.0.8.21"
 # user = "yekaixian"
 # remote_workspace = "~/work/proj"
+# identity_file = "~/.ssh/id_ed25519"   # 留空则用 ssh-agent 与默认密钥
+#
+# 服务器那一侧记得开 [runtime] spool_unroutable = true：
+# SSH 是单向的，服务器连不回你的笔记本，回信要先暂存等你 `anthill pull`。
 """

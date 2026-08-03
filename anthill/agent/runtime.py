@@ -30,8 +30,11 @@ from anthill.core.paths import NodeLayout
 from anthill.core.payloads import MessageType, TaskErrorPayload
 from anthill.core.router import Router
 from anthill.core.seen import SeenStore
+from anthill.core.spool import Spool
 from anthill.core.states import DeliveryTracker
+from anthill.discovery.registry import PeerRegistry
 from anthill.providers.registry import TapeMode
+from anthill.security.signing import verify_envelope
 from anthill.transport.registry import TransportRegistry
 
 COORDINATOR_ROLE = "coordinator"
@@ -92,7 +95,8 @@ class AgentRuntime:
         self._seen: SeenStore = self.mailbox.open_seen()
         self._tracker = DeliveryTracker()
         self._router = Router(config, layout)
-        self._transports = TransportRegistry(config, layout)
+        self._peers = PeerRegistry(layout.root)
+        self._transports = TransportRegistry(config, layout, peers=self._peers, log=self.log)
         self.sender = Sender(
             identity=self.identity,
             mailbox=self.mailbox,
@@ -101,6 +105,7 @@ class AgentRuntime:
             tracker=self._tracker,
             log=self.log,
             coordinator=self._find_coordinator(),
+            spool=Spool(layout.root) if config.runtime.spool_unroutable else None,
         )
         self._watcher = MailboxWatcher(
             self.mailbox.new,
@@ -247,6 +252,7 @@ class AgentRuntime:
 
         try:
             env = Mailbox.read_envelope(claimed)
+            self._check_signature(env)
         except (ProtocolError, MailboxError, ValidationError) as exc:
             self.mailbox.quarantine(claimed, str(exc))
             self.log.error("msg.invalid", file=claimed.name, error=str(exc))
@@ -259,6 +265,22 @@ class AgentRuntime:
             await self._report_failure(env, exc)
         finally:
             self.mailbox.archive(claimed)
+
+    def _check_signature(self, env: Envelope) -> None:
+        """跨节点来件必须验签 —— 只要我们持有对方的密钥。
+
+        邮箱就是一个目录：在共用的服务器上，同机器的其他账号也能往里面写文件。
+        SSH/LAN 通道本身的加密拦不住这种「本地伪造投递」，签名才拦得住。
+
+        不查时间窗（`max_skew=None`）：邮箱是存储转发队列，agentd 停机几小时
+        再启动是正常的，按时间窗判会把一堆合法消息误杀。重放由 seen.db 兜。
+        """
+        if env.from_.node == self.identity.node:
+            return
+        key = self._peers.key_for(env.from_.node)
+        if key is None:
+            return  # 没配密钥就没法验；这种情况下投递本来也进不来
+        verify_envelope(env, key, max_skew=None)
 
     async def _dispatch(self, env: Envelope) -> None:
         self.log.info(

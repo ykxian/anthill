@@ -168,12 +168,50 @@ task.result 都跨 HTTP 原路回到 CLI 邮箱。「关闭时零发包」用 `s
 
 ## M5 · SSH 跨机（1 周）—— 场景 B
 
-- [ ] `transport/ssh.py`：asyncssh SFTP 投递（tmp→rename）、连接复用与重连
-- [ ] 远端 artifacts 按需拉取（result 引用的产物 SFTP get）
-- [ ] 远端 high 风险操作强制本地确认的策略打通
+- [x] `transport/ssh.py`：asyncssh SFTP 投递（tmp→rename）、连接复用与重连
+- [x] 远端 artifacts 按需拉取（result 引用的产物 SFTP get）
+- [x] 远端 high 风险操作强制本地确认的策略打通
 
 **验收**：本地 coordinator 派任务给学校服务器上的 runner agent，
 远端跑 pytest 并回传失败归因；全程服务器不开任何新端口。**录第二支演示视频。**
+
+**实际结果（已达成）**：454 个测试全绿，总覆盖率 88%；mypy strict 与 ruff 全绿。
+测试用 asyncssh 在**进程内起真的 SSH + SFTP 服务端**，所以测的是真链路（真握手、
+真 SFTP 写、真 rename），不是打桩。手工联调跑通完整场景 B：
+`send lab-server:echo` → SFTP 落进远端邮箱 → 远端 agent 处理 → 回信暂存 →
+`anthill pull lab-server` 取回 accepted 回执与 task.result。
+`ss -tlnp` 确认服务器上除 sshd 外零新增端口。
+
+这一步最重要的发现与决定：
+
+1. **SSH 是单向的，回信只能靠拉。**
+   联调时才意识到：笔记本能 SSH 到服务器，服务器**连不回笔记本**（NAT 后面、
+   也没跑 sshd）。那远端干完活结果怎么送回来？答案是 `core/spool.py`：
+   投不出去的信封落进 `.anthill/spool/<对方节点>/`，由对方 `anthill pull` 取走 ——
+   **和 `git pull` 一个道理**。信封原样保留（id/签名/thread 都不变），
+   拉回去之后走的是和同机投递完全一样的处理路径。
+   开关默认关闭（`[runtime] spool_unroutable`），关闭时路由不到就是死信，行为不变。
+2. **远端危险操作的确认走文件，不走消息 —— 因为消息会死锁。**
+   agentd 的消费循环是串行的：handler 里 await 一条回信，那条回信却要经同一个
+   循环投递进来。所以 `security/approvals.py` 用两个文件（请求 + 答复）+ 轮询，
+   轮询发生在**同一个协程**里，不经过消费循环。
+   本机 `anthill approve --peer lab` 经 SFTP 读列表、写回答复；服务器上不需要有人。
+   超时按拒绝处理：没人管的危险操作，默认不做。
+3. **收件方验签才让签名有意义。**
+   邮箱就是一个目录：共用服务器上，同机器的其他账号也能往里面写文件。
+   SSH/LAN 通道的加密拦不住这种「本地伪造投递」。所以 agentd 读到跨节点信封时
+   会验签（只要本机持有对方密钥），不通过就进隔离区。
+   **at-rest 验签刻意不查时间窗** —— 邮箱是存储转发队列，agentd 停机几小时
+   再启动是正常的，按 5 分钟窗判会把一堆合法消息误杀；重放由 seen.db 兜。
+
+联调抓到的 bug：
+
+- **`anthill pull` 把「连不上服务器」和「没有待取的回信」当成了同一件事**，
+  静默返回成功。用户会以为回信收完了，其实还堆在服务器上。
+  修：只把 SFTP 的「目录不存在」当作正常，连接失败照常报错。
+- **没法给 peer 单独指定 known_hosts**：真实场景用 `~/.ssh/known_hosts` 没问题，
+  但专用密钥 / 专用 known_hosts 的部署配不了。补了 `known_hosts` 配置项 ——
+  注意**没有**「跳过主机指纹校验」的开关，那是这条路的安全前提。
 
 ## M6 · 面板与打磨（1 周）
 

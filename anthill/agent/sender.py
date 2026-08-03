@@ -9,14 +9,21 @@ from __future__ import annotations
 import asyncio
 
 from anthill.core.envelope import Address, Envelope, ReplyVia, TransportKind
-from anthill.core.errors import DeliveryError, HopLimitExceeded, UnknownRecipient
+from anthill.core.errors import (
+    DeliveryError,
+    HopLimitExceeded,
+    MailboxError,
+    UnknownRecipient,
+    UnroutableNode,
+)
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.outbox import Outbox, OutboxEntry
 from anthill.core.payloads import EventPayload, MessageType, Payload, ReceiptPayload
 from anthill.core.router import Router
+from anthill.core.spool import Spool
 from anthill.core.states import DeliveryState, DeliveryTracker
-from anthill.transport.base import DeliveryResult
+from anthill.transport.base import DeliveryResult, Destination
 from anthill.transport.registry import TransportRegistry
 
 DEAD_LETTER_EVENT = "delivery.dead_letter"
@@ -34,6 +41,7 @@ class Sender:
         tracker: DeliveryTracker,
         log: EventLog,
         coordinator: str | None = None,
+        spool: Spool | None = None,
     ) -> None:
         self.identity = identity
         self._outbox = Outbox(mailbox)
@@ -42,6 +50,7 @@ class Sender:
         self._tracker = tracker
         self._log = log
         self._coordinator = coordinator
+        self._spool = spool
         # 正在投递中的消息 id。outbox/pending 是「待发」的持久化真相，
         # 但首次投递期间信封也还躺在 pending 里 —— 不挡一下的话重试循环会抢着重发一遍。
         self._inflight: set[str] = set()
@@ -148,6 +157,21 @@ class Sender:
         env = entry.envelope
         try:
             result = await self._transports.deliver(env)
+        except UnroutableNode as exc:
+            spooled = self._try_spool(env, exc)
+            if spooled is not None:
+                self._outbox.mark_sent(entry)
+                self._tracker.mark(env.id, DeliveryState.DELIVERED, detail=str(spooled))
+                return DeliveryResult.success(
+                    TransportKind.LOCAL,
+                    Destination(node=env.to.node, agent=env.to.agent),
+                    str(spooled),
+                )
+            abandoned = self._outbox.abandon(entry, str(exc))
+            await self._give_up(abandoned, str(exc))
+            return DeliveryResult(
+                ok=False, transport=TransportKind.LOCAL, destination=str(env.to), detail=str(exc)
+            )
         except DeliveryError as exc:
             result = DeliveryResult(
                 ok=False, transport=TransportKind.LOCAL, destination=str(env.to), detail=str(exc)
@@ -183,6 +207,28 @@ class Sender:
         if updated.is_dead:
             await self._give_up(updated, result.detail or "重试耗尽")
         return result
+
+    def _try_spool(self, env: Envelope, exc: UnroutableNode) -> object | None:
+        """路由不到就暂存，等对方来拉（SSH 场景：服务器连不回笔记本）。
+
+        没开暂存就返回 None，走原来的死信流程 —— 默认行为不变。
+        """
+        if self._spool is None:
+            return None
+        try:
+            path = self._spool.deposit(env)
+        except (MailboxError, OSError) as spool_exc:
+            self._log.error("spool.failed", msg=env.id, error=str(spool_exc))
+            return None
+        self._log.info(
+            "delivery.spooled",
+            msg=env.id,
+            to=str(env.to),
+            type=str(env.type),
+            reason=str(exc),
+            path=str(path),
+        )
+        return path
 
     async def _give_up(self, entry: OutboxEntry, error: str) -> None:
         """死信：标记状态 + 上报 coordinator。上报失败只记日志，绝不递归上报。"""

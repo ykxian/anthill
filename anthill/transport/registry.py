@@ -7,13 +7,14 @@ from __future__ import annotations
 
 from anthill.core.config import Config, PeerSection
 from anthill.core.envelope import Envelope, TransportKind
-from anthill.core.errors import DeliveryError
+from anthill.core.errors import DeliveryError, UnroutableNode
 from anthill.core.logging import EventLog
 from anthill.core.paths import NodeLayout
 from anthill.discovery.registry import PeerRegistry
 from anthill.transport.base import DeliveryResult, Destination, Transport
 from anthill.transport.lan import LanTransport
 from anthill.transport.local import LocalTransport
+from anthill.transport.ssh import SshTransport
 
 
 class TransportRegistry:
@@ -36,6 +37,11 @@ class TransportRegistry:
                 log=log or EventLog(None, agent=config.node.name, echo=False),
                 advertise=config.node.endpoint,
             ),
+            TransportKind.SSH: SshTransport(
+                node_name=config.node.name,
+                peers=self._peers,
+                log=log or EventLog(None, agent=config.node.name, echo=False),
+            ),
         }
 
     def register(self, transport: Transport) -> None:
@@ -48,10 +54,9 @@ class TransportRegistry:
             return Destination(node=node, agent=env.to.agent)
         peer = self._config.peers.get(node) or self._lan_peer(node)
         if peer is None:
-            raise DeliveryError(
+            raise UnroutableNode(
                 f"节点 {node!r} 不在 peers 列表里 —— 发现 ≠ 可通信，"
-                f"需要先在 node.toml 配置或 `anthill peers trust --token <令牌>`",
-                retryable=False,
+                f"需要先在 node.toml 配置或 `anthill peers trust --token <令牌>`"
             )
         return Destination(node=node, agent=env.to.agent, peer=peer)
 
