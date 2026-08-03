@@ -474,7 +474,11 @@ async def test_silent_worker_is_nudged_then_timed_out(layout: NodeLayout, node: 
 async def test_coordinator_resumes_scheduling_after_a_restart(
     layout: NodeLayout, node: Config
 ) -> None:
-    """状态在黑板上，不在内存里 —— 换一个全新的 handler 实例也能接着调度。"""
+    """状态在黑板上，不在内存里 —— 换一个全新的 handler 实例也能接着调度。
+
+    worker 故意在 coordinator 停掉之后才启动：这样「回信堆在 inbox 里等着，
+    由一个全新实例接手」才是真的被验证到，而不是撞运气撞出来的。
+    """
     # Arrange：第一个 coordinator 只负责派出 s1 然后「下线」
     boss1 = FakeProvider([plan_turn()])
     coder = FakeProvider([finish_turn("写完了")])
@@ -482,17 +486,19 @@ async def test_coordinator_resumes_scheduling_after_a_restart(
     cli_box = Mailbox(layout.mailbox_dir("cli"))
     store = RunStore(layout.blackboard)
 
+    async with running(layout, node, "boss", coordinator_handler(layout, boss1)):
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        # 等一个**单调**的条件：s1 派出去过。
+        # 早先这里等的是「s1 正在跑」，可 worker 可能在第一次轮询前就回完了，
+        # 那个条件就永远不会为真 —— 测试自身的竞态，偶发超时。
+        await wait_until(lambda: bool(store.all()) and store.all()[0].step("s1").attempts > 0)
+
+    # Act：worker 现在才上线，回信会堆在已停机的 coordinator 邮箱里
     async with AsyncExitStack() as stack:
         for name, provider in (("coder", coder), ("reviewer", reviewer)):
             await stack.enter_async_context(
                 running(layout, node, name, worker_handler(layout, node, name, provider))
             )
-        async with running(layout, node, "boss", coordinator_handler(layout, boss1)):
-            Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
-            await wait_until(lambda: bool(store.all()) and bool(store.all()[0].busy_ids))
-        # coordinator 已停；coder 的回信会堆在它的 inbox 里等着
-
-        # Act：换一个全新的 coordinator 实例接手
         boss2 = FakeProvider([verdict_turn(satisfied=True)])
         async with running(layout, node, "boss", coordinator_handler(layout, boss2)):
             await wait_until(lambda: bool(finals_in(cli_box)))
