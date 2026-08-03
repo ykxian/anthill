@@ -27,6 +27,11 @@ from anthill.web.app import create_app
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 45778
+LOOPBACK = ("127.0.0.1", "localhost", "::1", "")
+
+
+def is_loopback(host: str) -> bool:
+    return host.strip().lower() in LOOPBACK
 
 
 def serve_command(
@@ -34,6 +39,9 @@ def serve_command(
     port: int = typer.Option(DEFAULT_PORT, "--port", help="监听端口"),
     advertise: str = typer.Option(
         "", "--advertise", help="广播给对端的地址，默认 http://<host>:<port>"
+    ),
+    panel: bool | None = typer.Option(
+        None, "--panel/--no-panel", help="只读面板；默认只在绑回环时开启"
     ),
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="只写日志文件，不在终端回显"),
@@ -48,15 +56,33 @@ def serve_command(
         fail(str(exc))
 
     endpoint = advertise or f"http://{host}:{port}"
+    # 面板默认只在回环上开：一旦 --host 0.0.0.0（为了让同网段投递进来），
+    # 面板就会跟着暴露给整个网段。要那样必须显式 --panel，不给默认踩坑的机会。
+    show_panel = is_loopback(host) if panel is None else panel
     console.print(
         f"[bold green]▶[/bold green] {config.node.name} 接收端 [dim]{endpoint}[/dim]"
         + ("" if config.discovery.enabled else "  [dim]（discovery 未开启，不广播）[/dim]")
     )
     if host == DEFAULT_HOST:
         console.print("[dim]只绑回环；要让同网段的机器投递进来，用 --host 0.0.0.0[/dim]")
+    if show_panel:
+        console.print(f"[bold]面板[/bold] {endpoint}/panel [dim]（只读）[/dim]")
+    elif panel is None:
+        console.print("[dim]面板已关闭：绑的不是回环地址；确实要开就加 --panel[/dim]")
 
     try:
-        asyncio.run(_serve(layout, config, peers, log, host=host, port=port, endpoint=endpoint))
+        asyncio.run(
+            _serve(
+                layout,
+                config,
+                peers,
+                log,
+                host=host,
+                port=port,
+                endpoint=endpoint,
+                panel=show_panel,
+            )
+        )
     except KeyboardInterrupt:
         console.print("\n[dim]已停止[/dim]")
     finally:
@@ -72,8 +98,15 @@ async def _serve(
     host: str,
     port: int,
     endpoint: str,
+    panel: bool = False,
 ) -> None:
-    app = create_app(layout=layout, config=config, peers=peers, log=log)  # type: ignore[arg-type]
+    app = create_app(
+        layout=layout,  # type: ignore[arg-type]
+        config=config,  # type: ignore[arg-type]
+        peers=peers,
+        log=log,
+        panel=panel,
+    )
     server = uvicorn.Server(
         uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False)
     )

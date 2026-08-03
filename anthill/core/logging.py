@@ -13,6 +13,7 @@ from types import TracebackType
 from typing import Any, TextIO
 
 from rich.console import Console
+from rich.markup import escape
 
 from anthill.core.ids import now
 
@@ -85,18 +86,23 @@ class EventLog:
 
 
 def format_record(record: dict[str, Any]) -> str:
-    """给 rich 用的一行渲染：时间 · agent · 事件 · 其余字段。"""
+    """给 rich 用的一行渲染：时间 · agent · 事件 · 其余字段。
+
+    **字段值一律 escape**：日志里装的是任意内容 —— 任务标题、错误信息、文件路径、
+    模型输出，里面完全可能有方括号。不转义的话 rich 会把 `[discovery]` 当成样式标记
+    直接吃掉，排查时看到的就是被悄悄删了一段的日志，比没有日志更误导人。
+    """
     level = str(record.get("level", "info"))
     style = LEVEL_STYLE.get(level, "white")
-    ts = str(record.get("ts", ""))[11:23]
+    ts = escape(str(record.get("ts", ""))[11:23])
     rest = " ".join(
-        f"[dim]{k}=[/dim]{v}"
+        f"[dim]{escape(str(k))}=[/dim]{escape(str(v))}"
         for k, v in record.items()
         if k not in {"ts", "agent", "level", "event"}
     )
     return (
-        f"[dim]{ts}[/dim] [{style}]{record.get('event', '')}[/{style}] "
-        f"[b]{record.get('agent', '')}[/b] {rest}"
+        f"[dim]{ts}[/dim] [{style}]{escape(str(record.get('event', '')))}[/{style}] "
+        f"[b]{escape(str(record.get('agent', '')))}[/b] {rest}"
     )
 
 

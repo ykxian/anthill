@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AntHill 面板</title>
+<style>
+/* 视觉方向：贴着终端用的技术仪表盘。等宽字体为主，状态一律用语义色，
+   信息密度优先 —— 这是排查问题时开着的第二个窗口，不是营销页。 */
+:root {
+  color-scheme: dark light;
+  --bg: #0e0f13;
+  --surface: #16181f;
+  --surface-2: #1c1f28;
+  --line: #262a36;
+  --text: #e6e8ef;
+  --muted: #8b91a3;
+  --dim: #5d6376;
+  --accent: #f0a02c;      /* 蚁丘的琥珀色 */
+  --ok: #4ec9a0;
+  --warn: #e3b341;
+  --bad: #f2726f;
+  --idle: #6b7286;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --gap: 14px;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f0f2f6; --line: #dfe3ea;
+    --text: #14161c; --muted: #5a6172; --dim: #868da0; --accent: #b96f06;
+    --ok: #16855f; --warn: #9a7212; --bad: #c33c39; --idle: #7b8296;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font-family: var(--mono); font-size: 13px; line-height: 1.55;
+}
+a { color: var(--accent); }
+
+/* ---- 顶栏：节点身份是最大的一块字，其余都压小 ---- */
+header {
+  display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+  padding: 18px 22px 14px; border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%);
+  position: sticky; top: 0; z-index: 5;
+}
+header h1 {
+  margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.02em;
+}
+header h1 .mark { color: var(--accent); }
+header .node { font-size: 13px; color: var(--muted); }
+header .node b { color: var(--text); font-weight: 600; }
+#conn { margin-left: auto; font-size: 12px; color: var(--muted); display: flex; gap: 7px; align-items: center; }
+#conn .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--idle); }
+#conn.live .dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+#conn.down .dot { background: var(--bad); }
+
+/* ---- bento：左栏拓扑，右侧上任务下消息流 ---- */
+main {
+  display: grid; gap: var(--gap); padding: var(--gap) 22px 26px;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  grid-template-areas: "topo runs" "topo stream";
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: calc(100vh - 66px);
+}
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; grid-template-areas: "topo" "runs" "stream"; }
+}
+section {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+}
+#topo { grid-area: topo; } #runs { grid-area: runs; } #stream { grid-area: stream; }
+section > h2 {
+  margin: 0; padding: 11px 14px; font-size: 11px; font-weight: 600;
+  letter-spacing: 0.13em; text-transform: uppercase; color: var(--muted);
+  border-bottom: 1px solid var(--line); background: var(--surface-2);
+  display: flex; justify-content: space-between; align-items: center;
+}
+section > h2 .count { color: var(--dim); letter-spacing: 0; text-transform: none; }
+.body { overflow: auto; padding: 8px; flex: 1; min-height: 0; }
+.empty { color: var(--dim); padding: 18px 8px; text-align: center; }
+
+/* ---- 卡片：hover 有明确反馈，不是死的表格 ---- */
+.card {
+  border: 1px solid transparent; border-radius: 7px; padding: 8px 10px;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+.card:hover { background: var(--surface-2); border-color: var(--line); }
+.row { display: flex; align-items: baseline; gap: 8px; }
+.grow { flex: 1; min-width: 0; }
+.name { font-weight: 600; }
+.meta { color: var(--dim); font-size: 12px; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- 状态点：颜色是唯一的状态语言，别处不再用装饰色 ---- */
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--idle); }
+.dot.on { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 20%, transparent); }
+.pill {
+  font-size: 11px; padding: 1px 7px; border-radius: 99px;
+  border: 1px solid var(--line); color: var(--muted); background: var(--surface-2);
+}
+.pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+.pill.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+.pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
+
+/* ---- 任务：步骤用左侧色条串起来，一眼看出卡在哪一步 ---- */
+.run { padding: 10px 12px; border-radius: 8px; background: var(--surface-2); margin-bottom: 8px; }
+.run > .row { margin-bottom: 6px; }
+.goal { font-weight: 600; }
+.steps { display: flex; flex-direction: column; gap: 3px; }
+.step { display: flex; gap: 9px; align-items: baseline; padding-left: 9px; border-left: 2px solid var(--line); }
+.step.running { border-left-color: var(--warn); }
+.step.done { border-left-color: var(--ok); }
+.step.failed { border-left-color: var(--bad); }
+.step.skipped { border-left-color: var(--dim); }
+.step .sid { color: var(--muted); min-width: 34px; }
+.step .who { color: var(--accent); min-width: 96px; }
+.step .what { color: var(--muted); }
+
+/* ---- 消息流：等宽对齐的时间线 ---- */
+.event { display: flex; gap: 10px; padding: 2px 6px; border-radius: 5px; }
+.event:hover { background: var(--surface-2); }
+.event .ts { color: var(--dim); flex: none; }
+.event .who { color: var(--accent); flex: none; min-width: 92px; }
+.event .what { flex: none; min-width: 168px; }
+.event .detail { color: var(--muted); }
+.event.warn .what { color: var(--warn); }
+.event.error .what { color: var(--bad); }
+footer { padding: 0 22px 20px; color: var(--dim); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="mark">▲</span> AntHill</h1>
+  <span class="node">节点 <b id="node">…</b></span>
+  <span id="conn"><span class="dot"></span><span id="conn-text">连接中</span></span>
+</header>
+
+<main>
+  <section id="topo">
+    <h2>拓扑 <span class="count" id="topo-count"></span></h2>
+    <div class="body" id="topo-body"></div>
+  </section>
+
+  <section id="runs">
+    <h2>任务看板 <span class="count" id="runs-count"></span></h2>
+    <div class="body" id="runs-body"></div>
+  </section>
+
+  <section id="stream">
+    <h2>消息流 <span class="count" id="events-count"></span></h2>
+    <div class="body" id="stream-body"></div>
+  </section>
+</main>
+
+<footer>只读面板 —— 确认与操作留在 CLI。数据来自 <code>.anthill/</code> 下的文件，刷新即最新。</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => (
+  { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function setConn(state, text) {
+  const el = $("conn");
+  el.className = state;
+  $("conn-text").textContent = text;
+}
+
+function renderTopo(data) {
+  const agents = data.agents || [];
+  const peers = data.peers || [];
+  $("topo-count").textContent = `${agents.filter(a => a.running).length}/${agents.length} 在跑`;
+  const agentHtml = agents.map(a => `
+    <div class="card">
+      <div class="row">
+        <span class="dot ${a.running ? "on" : ""}"></span>
+        <span class="name grow truncate">${esc(a.name)}</span>
+        <span class="pill">${esc(a.role)}</span>
+      </div>
+      <div class="row meta">
+        <span class="grow truncate">${esc(a.provider)} · ${esc(a.watch_mode)}</span>
+        ${a.queue ? `<span class="pill warn">待处理 ${a.queue}</span>` : ""}
+        ${a.dead ? `<span class="pill bad">死信 ${a.dead}</span>` : ""}
+      </div>
+    </div>`).join("");
+
+  const peerHtml = peers.length ? `
+    <div class="meta" style="padding:10px 10px 4px">对端节点</div>
+    ${peers.map(p => `
+      <div class="card">
+        <div class="row">
+          <span class="dot ${p.status === "trusted" ? "on" : ""}"></span>
+          <span class="name grow truncate">${esc(p.node)}</span>
+          <span class="pill ${p.status === "trusted" ? "ok" : "warn"}">${esc(p.status)}</span>
+        </div>
+        <div class="meta truncate">${esc(p.endpoint || "地址未知")}</div>
+        ${p.fingerprint ? `<div class="meta truncate">${esc(p.fingerprint)}</div>` : ""}
+      </div>`).join("")}` : "";
+
+  $("topo-body").innerHTML = agentHtml + peerHtml || `<div class="empty">还没有配置 Agent</div>`;
+}
+
+function renderRuns(data) {
+  const runs = data.runs || [];
+  const live = runs.filter(r => !r.finished);
+  $("runs-count").textContent = `进行中 ${live.length} · 已完成 ${runs.length - live.length}`;
+  if (!runs.length) {
+    $("runs-body").innerHTML = `<div class="empty">还没有编排任务 —— 试试 <code>anthill run "…"</code></div>`;
+    return;
+  }
+  $("runs-body").innerHTML = [...live, ...runs.filter(r => r.finished).slice(-3)].map(r => `
+    <div class="run">
+      <div class="row">
+        <span class="goal grow truncate">${esc(r.goal)}</span>
+        ${r.round ? `<span class="pill warn">返工 ${r.round}</span>` : ""}
+        <span class="pill ${r.finished ? "ok" : ""}">${r.finished ? "已完成" : "进行中"}</span>
+      </div>
+      <div class="steps">
+        ${(r.steps || []).map(s => `
+          <div class="step ${esc(s.state)}">
+            <span class="sid">${esc(s.id)}</span>
+            <span class="who truncate">${esc(s.assignee)}</span>
+            <span class="what grow truncate">${esc(s.detail)}</span>
+          </div>`).join("")}
+      </div>
+    </div>`).join("");
+}
+
+function renderEvents(data) {
+  const events = data.events || [];
+  $("events-count").textContent = `最近 ${events.length} 条`;
+  const body = $("stream-body");
+  const pinned = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+  body.innerHTML = events.length
+    ? events.map(e => `
+      <div class="event ${esc(e.level)}">
+        <span class="ts">${esc(e.ts)}</span>
+        <span class="who truncate">${esc(e.agent)}</span>
+        <span class="what">${esc(e.event)}</span>
+        <span class="detail truncate">${esc(e.detail)}</span>
+      </div>`).join("")
+    : `<div class="empty">还没有事件</div>`;
+  if (pinned) body.scrollTop = body.scrollHeight;  // 贴底时才自动跟随，别打断正在往回翻的人
+}
+
+function render(data) {
+  $("node").textContent = data.node || "?";
+  document.title = `AntHill · ${data.node || ""}`;
+  renderTopo(data);
+  renderRuns(data);
+  renderEvents(data);
+}
+
+async function poll() {
+  try {
+    const res = await fetch("api/state");
+    if (!res.ok) throw new Error(res.status);
+    render(await res.json());
+    setConn("live", "轮询中");
+  } catch (err) {
+    setConn("down", "连接不上");
+  }
+}
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  let socket;
+  try {
+    socket = new WebSocket(`${proto}://${location.host}${location.pathname.replace(/\/$/, "")}/ws`);
+  } catch (err) {
+    setInterval(poll, 2000); poll(); return;
+  }
+  socket.onopen = () => setConn("live", "实时");
+  socket.onmessage = (msg) => render(JSON.parse(msg.data));
+  socket.onclose = () => { setConn("down", "已断开，重连中"); setTimeout(connect, 2000); };
+  socket.onerror = () => socket.close();
+}
+
+poll();
+connect();
+</script>
+</body>
+</html>

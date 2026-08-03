@@ -3,7 +3,8 @@
 > 基于**文件邮箱**的分布式多 Agent 协同框架。
 > 蚂蚁不开会 —— 它们把信息素留在环境里，别的蚂蚁路过就能读懂并接力。
 
-设计文档在 [`docs/`](./docs)（先读 [00-prd](./docs/00-prd.md)）。
+[English README](./README.en.md) · 设计文档在 [`docs/`](./docs)（先读 [00-prd](./docs/00-prd.md)）
+
 本 README 只讲**当前已经能跑的东西**。
 
 ## 一条公理
@@ -11,8 +12,41 @@
 > Agent 之间的所有通信，最终都表现为「一个信封文件出现在目标 Agent 的 `inbox/new` 目录里」。
 
 传输层（同机 / 局域网 / SSH）只负责把信封送到那个目录，Agent 消费消息的方式完全一致。
+由此推出三个性质：**传输与消费解耦**（新增一种传输不用改 Agent 一行代码）、
+**天然持久化与可审计**（消息就是文件，能 `ls` 能 `cat` 能进 git 能事后重放）、
+**异构 Agent 零成本接入**（任何能读写文件的东西都能当 Agent）。
 
-## 现在能跑什么（M0 + M1 + M2 + M3 + M4 + M5）
+```mermaid
+flowchart LR
+    subgraph L4[交互层]
+        CLI[CLI · typer]
+        WEB[面板 · FastAPI + WebSocket 只读]
+    end
+    subgraph L3[智能层]
+        ORCH[Orchestrator 拆解/分派/汇总]
+        LOOP[Agent Loop · ReAct 工具循环]
+        TOOLS[工具集 + 策略引擎]
+        PROV[Provider · Anthropic / OpenAI 兼容]
+    end
+    subgraph L2[消息层]
+        ENV[Envelope 协议 · pydantic]
+        MBX[Mailbox · Maildir 式目录 + 原子写]
+        RCPT[回执与重试]
+        ROUTE["路由 · @mention / 角色寻址"]
+    end
+    subgraph L1[传输层]
+        LT[Local 文件直写]
+        NT[LAN HTTP+HMAC]
+        ST[SSH SFTP]
+        DISC[Discovery UDP 组播 · 默认关闭]
+    end
+    L4 --> L3 --> L2 --> L1
+```
+
+依赖方向严格自上而下。**L1/L2 完全不含任何 LLM 逻辑**，可以单独测试，
+甚至单独拿去给「人肉 Agent」用 —— 这个项目最早就是那么开始的。
+
+## 现在能跑什么（M0 – M6，全部里程碑）
 
 **通信底座（M0/M1）**
 
@@ -81,7 +115,15 @@
 - ✅ **CLI**：`init` / `run` / `serve` / `peers` / `agent` / `send` / `status` / `log`
   / `approve` / `fetch` / `pull`
 
-还没做（见 [04-roadmap](./docs/04-roadmap.md)）：M6 Web 面板与打磨。
+**面板与打磨（M6）**
+
+- ✅ **只读 Web 面板**：拓扑（谁在跑、积压、死信、对端信任状态）、任务看板
+  （每步状态与交付）、合并后的实时消息流。单页 HTML + 原生 JS + WebSocket，
+  **无构建链、无外部资源** —— 没外网的服务器上也能打开
+- ✅ 面板**默认只在绑回环时开启**：一旦 `--host 0.0.0.0`，它会跟着暴露给整个网段
+- ✅ 中英文 README、CHANGELOG、MIT LICENSE；测试覆盖率 88%
+
+六个里程碑全部完成。
 
 ## 快速开始
 
@@ -265,6 +307,29 @@ uv run anthill fetch lab-server reports/pytest.log   # 按需拉产物
 由你来取 —— 和 `git pull` 一个道理。信封原样保留，拉回去之后走的是
 和同机投递完全一样的处理路径。
 
+### 看着它干活（M6）
+
+```bash
+uv run anthill serve            # 面板在 http://127.0.0.1:45778/panel
+```
+
+```text
+▲ AntHill   节点 laptop                                    ● 实时
+┌─ 拓扑 ───────────┐┌─ 任务看板 ──────────────────────────────┐
+│ ● boss    协调    ││ 给 utils/date.py 补单测并通过审查   进行中 │
+│ ● coder   worker  ││  s1  coder          写了 12 个用例…      │
+│ ○ reviewer 审查   ││  s2  role:reviewer  审查 s1 产物         │
+│                   │└─────────────────────────────────────────┘
+│ 对端节点          │┌─ 消息流 ────────────────────────────────┐
+│ ● lab-server 信任 ││ 10:22:31 boss   step.dispatched step=s2 │
+└───────────────────┘└─────────────────────────────────────────┘
+```
+
+面板是**只读**的：确认、审批、派活一律留在 CLI。一个只会 `GET` 的页面，
+最坏也就是被人看到状态，没法成为攻击面。
+它的数据源全部是 `.anthill/` 下的文件 —— 因为一个节点上跑着好几个进程，
+内存里的 event bus 跨不过进程边界。
+
 ### 其他常用命令
 
 ```bash
@@ -332,7 +397,9 @@ shell_timeout = 120.0
 启动前会做 fail-fast 体检：provider 是否存在、`api_key_env` 是否已设置、邮箱是否可写
 （`--replay` 模式不连上游，不要求 API key）。
 
-安全模型是一张矩阵：**工具风险 × 来源信任**。
+## 安全模型
+
+一切归结为一张矩阵：**工具风险 × 来源信任**。
 
 | | 你本人（`role = "user"`） | 本机 Agent | 信任的 peer | 未知节点 |
 |---|---|---|---|---|
@@ -353,6 +420,11 @@ uv run mypy anthill                     # strict 模式
 
 测试按 [02-protocol §8](./docs/02-protocol.md) 的协议一致性清单组织：
 schema 校验、原子写、并发投递、幂等、重试状态机、hops 熔断。
+
+## 更新日志
+
+见 [CHANGELOG.md](./CHANGELOG.md)：按里程碑记录了每一步做了什么、
+以及联调时踩到的坑与修法。
 
 ## License
 

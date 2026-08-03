@@ -14,9 +14,12 @@ agentd 完全不需要知道这条消息是从网线上来的。
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 
 from anthill.core.config import Config
@@ -27,8 +30,12 @@ from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
 from anthill.discovery.registry import PeerRecord, PeerRegistry
 from anthill.security.signing import verify_envelope
+from anthill.web.panel import build_snapshot
 
 DELIVER_PATH = "/deliver"
+PANEL_PATH = "/panel"
+PANEL_HTML = Path(__file__).parent / "static" / "panel.html"
+PANEL_REFRESH = 2.0
 
 
 def create_app(
@@ -37,8 +44,11 @@ def create_app(
     config: Config,
     peers: PeerRegistry,
     log: EventLog,
+    panel: bool = False,
 ) -> FastAPI:
     app = FastAPI(title=f"anthill:{config.node.name}", docs_url=None, redoc_url=None)
+    if panel:
+        _mount_panel(app, layout=layout, config=config, peers=peers)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -137,3 +147,34 @@ def _deposit(env: Envelope, layout: NodeLayout, log: EventLog) -> Any:
     except MailboxError as exc:
         log.error("lan.deposit_failed", msg=env.id, error=str(exc))
         raise HTTPException(status_code=503, detail=f"写入邮箱失败：{exc}") from exc
+
+
+def _mount_panel(app: FastAPI, *, layout: NodeLayout, config: Config, peers: PeerRegistry) -> None:
+    """只读面板（03-tech-design §9）。
+
+    **只读**是刻意的：确认、审批、派活一律留在 CLI。面板不提供任何写入口，
+    它就没法成为攻击面 —— 一个只会 `GET` 的页面，最坏也就是被人看到状态。
+    调用方还会把它限制在回环地址上（见 serve_cmd）。
+    """
+
+    @app.get(PANEL_PATH, response_class=HTMLResponse)
+    async def panel_page() -> HTMLResponse:
+        try:
+            return HTMLResponse(PANEL_HTML.read_text(encoding="utf-8"))
+        except OSError as exc:  # pragma: no cover - 安装损坏才会走到
+            raise HTTPException(status_code=500, detail=f"面板页面读不出来：{exc}") from exc
+
+    @app.get(f"{PANEL_PATH}/api/state")
+    async def panel_state() -> dict[str, Any]:
+        return build_snapshot(layout, config, peers)
+
+    @app.websocket(f"{PANEL_PATH}/ws")
+    async def panel_ws(websocket: WebSocket) -> None:
+        """定时推快照。做成推送而不是让页面轮询，是为了 kill -9 之后状态能立刻变灰。"""
+        await websocket.accept()
+        try:
+            while True:
+                await websocket.send_json(build_snapshot(layout, config, peers))
+                await asyncio.sleep(PANEL_REFRESH)
+        except (WebSocketDisconnect, RuntimeError):
+            return  # 页面关了，正常退出
