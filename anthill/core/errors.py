@@ -68,3 +68,11 @@ class PlanError(AntHillError):
 
 class OrchestrationError(AntHillError):
     """编排过程本身出错（状态损坏、找不到对应步骤等）。"""
+
+
+class SignatureError(ProtocolError):
+    """签名缺失/不匹配，或时间戳超出防重放窗口（02-protocol §6）。"""
+
+
+class PeerError(AntHillError):
+    """对端不存在、未信任，或指纹与首次信任时不一致（TOFU 告警）。"""

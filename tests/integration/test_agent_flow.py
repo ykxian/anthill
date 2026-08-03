@@ -230,3 +230,29 @@ async def test_handler_errors_become_task_error(layout, config, make_task, handl
 
     assert MessageType.TASK_ERROR in inbox_types(cli_box)
     assert isinstance(handler, EchoHandler)  # 夹具参数只是为了对照，确保正常 handler 仍可用
+
+
+async def test_permanently_unroutable_message_dies_exactly_once(layout, config, addr):
+    """不可重试的失败必须移出 pending。
+
+    否则重试循环每秒把它捡起来一次、每秒报一次死信，
+    日志和 coordinator 邮箱都会被刷爆 —— 这是 M4 联调时真的踩到的坑。
+    """
+    alpha_box = Mailbox(layout.mailbox_dir("alpha"))
+
+    async with running(layout, config, "alpha") as alpha:
+        env = await alpha.sender.send_new(
+            to=Address(node="nowhere", agent="ghost"),  # 不在 peers 列表里 → 不可重试
+            type=MessageType.TASK_REQUEST,
+            payload=TaskRequestPayload(title="发给不存在的节点"),
+        )
+        await wait_until(
+            lambda: (r := alpha.tracker.get(env.id)) is not None and r.state is DeliveryState.DEAD
+        )
+        await asyncio.sleep(1.2)  # 给重试循环足够多的机会再犯一次
+
+    assert Outbox(alpha_box).load_pending() == []
+    assert len(Outbox(alpha_box).dead_letters()) == 1
+    coordinator_box = Mailbox(layout.mailbox_dir("alpha"))
+    reports = [e for e in archived(coordinator_box) if e.type is MessageType.EVENT]
+    assert len(reports) <= 1  # 死信只上报一次

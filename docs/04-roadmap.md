@@ -123,14 +123,48 @@ Agent 写出 `greet.py`，试图跑 `python3 -c ...` 时被策略引擎拦下（
 
 ## M4 · LAN 发现与投递（1 周）—— 场景 C
 
-- [ ] `discovery/beacon.py`：UDP 组播 announce/probe，**默认 enabled=false**
-- [ ] `discovery/registry.py`：peers 列表、`anthill peers trust`（TOFU 指纹）
-- [ ] `security/signing.py`：HMAC + 时间窗防重放（用例 7）
-- [ ] `transport/lan.py` + FastAPI `/deliver` 端点（未信任来源直接拒收）
+- [x] `discovery/beacon.py`：UDP 组播 announce/probe，**默认 enabled=false**
+- [x] `discovery/registry.py`：peers 列表、`anthill peers trust`（TOFU 指纹）
+- [x] `security/signing.py`：HMAC + 时间窗防重放（用例 7）
+- [x] `transport/lan.py` + FastAPI `/deliver` 端点（未信任来源直接拒收）
 
 **验收**：两台机器（或同机两个 workspace + 不同端口模拟）：默认互相不可见；
 双方开启 discovery 并 trust 后可互派任务；抓包确认关闭时零发包；
 篡改消息被拒收。
+
+**实际结果（已达成）**：392 个测试全绿，总覆盖率 89%；mypy strict 与 ruff 全绿。
+02-protocol §8 的一致性清单**至此全部打钩**（用例 7 的三种攻击各有一条测试）。
+同机两个 workspace + 两个端口做了真实联调：`peers invite/trust` 配对 → 两端
+`anthill serve` → `anthill send lab-server:echo ... --wait` → accepted 回执与
+task.result 都跨 HTTP 原路回到 CLI 邮箱。「关闭时零发包」用 `ss -uan` 取证：
+默认配置下 45777 上零监听，改成 `enabled = true` 后才出现。
+
+设计决定：
+
+1. **一个节点一个接收端进程（`anthill serve`），不是每个 Agent 一个端口。**
+   收下来的信封直接原子写进对应 Agent 的 inbox/new，剩下的交给那个 agentd 的 watcher。
+   HTTP 只是「又一种把文件送进目录的方式」，agentd 完全不知道消息来自网线。
+2. **准入四道闸，任何一道不过都不落盘**：能否解析（400）→ 发件节点是否被信任（403）
+   → 签名与时间窗（401）→ 收件人是否本机已存在的 Agent（421/404）。
+   421 那一条是「不当跳板」：绝不代为转投第三方。
+3. **默认既不广播也不对外**：`discovery.enabled=false` 时连 socket 都不创建；
+   `serve` 默认只绑 127.0.0.1，要对外必须显式 `--host 0.0.0.0`。
+4. **防重放是两道**：时间窗 5 分钟（本层）+ id 去重（seen.db，M0 就有）。
+   只有前者能在窗口内重放；只有后者则 seen.db 得永久保留。合起来 seen.db 只需存一个窗口。
+
+联调抓到三个测试没覆盖的真 bug（均已修 + 补回归）：
+
+1. **死信无限循环（最严重）**：不可重试的失败只上报了 coordinator，却没把条目移出
+   `outbox/pending` —— 重试循环每秒捡起来一次、每秒报一次死信。日志和 coordinator
+   邮箱会被慢慢刷爆。修：新增 `Outbox.abandon()`，不可重试即刻进死信。
+2. **回信路由是断的**：`invite/trust` 配好后，被邀请方在邀请方的 peers 里没有 endpoint，
+   单向能通、回信发不出去。修：投递请求带 `X-AntHill-Endpoint`，收方**验签通过后**
+   记下来（能伪造这个头的人已经有共享密钥，所以不构成新攻击面）。
+3. **peers 列表被进程内缓存**：一个节点上跑着 serve + 若干 agentd，
+   serve 学到的地址 agentd 看不见。修：按 mtime 自动重载 —— 文件是唯一真相，内存只是缓存。
+
+还有一个纯可用性 bug：`peers invite` 打印的令牌被 rich 按终端宽度折行，
+用户复制过去就带着换行导致解析失败。两头都修了（打印用 soft_wrap，解析先清空白）。
 
 ## M5 · SSH 跨机（1 周）—— 场景 B
 

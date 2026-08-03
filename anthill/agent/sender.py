@@ -153,7 +153,9 @@ class Sender:
                 ok=False, transport=TransportKind.LOCAL, destination=str(env.to), detail=str(exc)
             )
             if not exc.retryable:
-                await self._give_up(entry, str(exc))
+                # 先移出 pending 再上报，否则重试循环会一直捡起它反复报死信
+                abandoned = self._outbox.abandon(entry, str(exc))
+                await self._give_up(abandoned, str(exc))
                 return result
 
         if result.ok:

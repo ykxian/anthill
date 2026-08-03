@@ -12,7 +12,7 @@
 
 传输层（同机 / 局域网 / SSH）只负责把信封送到那个目录，Agent 消费消息的方式完全一致。
 
-## 现在能跑什么（M0 + M1 + M2 + M3）
+## 现在能跑什么（M0 + M1 + M2 + M3 + M4）
 
 **通信底座（M0/M1）**
 
@@ -52,9 +52,21 @@
   不必事事经过 coordinator；@ 死循环止于协议层的 hops 熔断
 - ✅ **共享黑板**：`BOARD.md`（≤100 行，coordinator 单写者）注入每个 Agent 的上下文，
   `blackboard/tasks/<id>/` 放任务产物
-- ✅ **CLI**：`init` / `run` / `agent start` / `agent list` / `send` / `status` / `log`
+**跨机通信（M4）**
 
-还没做（见 [04-roadmap](./docs/04-roadmap.md)）：M4 LAN 发现、M5 SSH 跨机、M6 Web 面板。
+- ✅ **默认静默**：`discovery.enabled = false` 时不发包、不监听、**连 socket 都不创建**；
+  `anthill serve` 默认只绑 127.0.0.1，要对外必须显式 `--host 0.0.0.0`
+- ✅ **UDP 组播发现**：开启后周期 announce 节点摘要（TTL=1，不出本网段），
+  广播包里只有公开信息
+- ✅ **发现 ≠ 可通信**：看到的节点先记成 `discovered`，必须核对指纹并 `peers trust`
+  交换密钥后才能互投；TOFU —— 同名节点换了钥匙一律拒绝并告警
+- ✅ **HMAC-SHA256 签名 + 5 分钟时间窗**：篡改 payload / 改投收件人 / 过期重放三种攻击
+  各有一条测试（02-protocol §8 用例 7）
+- ✅ **准入四道闸**：解析（400）→ 是否受信任（403）→ 签名与时间窗（401）
+  → 收件人是否本机 Agent（421 不当跳板 / 404）
+- ✅ **CLI**：`init` / `run` / `serve` / `peers` / `agent` / `send` / `status` / `log`
+
+还没做（见 [04-roadmap](./docs/04-roadmap.md)）：M5 SSH 跨机、M6 Web 面板。
 
 ## 快速开始
 
@@ -173,6 +185,35 @@ uv run anthill log boss --follow                         # 编排事件流
 `anthill run` 只是个**只读观察者**，编排逻辑全在 coordinator 里：
 Ctrl-C 掉它，后台的协作照常跑完。
 
+### 跨机协作（M4）
+
+两台机器（或同机两个工作区 + 不同端口）配对：
+
+```bash
+# 服务器上：生成配对令牌
+uv run anthill peers invite laptop --endpoint http://10.0.8.21:45778
+
+# 笔记本上：核对指纹后信任它（令牌走你已经信任的通道传，别贴公开群）
+uv run anthill peers trust --token <令牌>
+uv run anthill peers list          # 双方指纹应当一致
+
+# 两端各起一个接收端
+uv run anthill serve --host 0.0.0.0
+
+# 跨节点派活，回执与结果原路返回
+uv run anthill send lab-server:runner "跑一遍 pytest 并总结失败原因" --wait 120
+```
+
+默认配置下**同网段的其他机器看不到你**：
+
+```bash
+ss -uan | grep 45777      # 没有任何输出 —— discovery 关闭时连 socket 都不创建
+```
+
+要被动发现同网段的节点，把 `[discovery] enabled` 改成 `true`。
+但**发现 ≠ 可通信**：广播只会让对方以 `discovered` 出现在 `peers list` 里，
+必须核对指纹并 `trust` 交换密钥后才能互投消息。
+
 ### 其他常用命令
 
 ```bash
@@ -197,7 +238,9 @@ anthill/
 ├── core/          # 协议层：envelope / mailbox / seen / outbox / states / router / config
 ├── transport/     # 传输层：base 抽象 + local（lan / ssh 待做）
 ├── providers/     # 模型接入：base 抽象 + anthropic / openai_compat + 录制回放
-├── security/      # 策略引擎（风险 × 信任）与终端确认流
+├── discovery/     # 组播信标（默认关闭）与 peers 列表（TOFU 信任）
+├── web/           # FastAPI：LAN 投递端点 /deliver
+├── security/      # HMAC 签名、密钥与配对、策略引擎（风险 × 信任）、终端确认流
 ├── agent/         # agentd：runtime / watcher / sender / handlers
 │   ├── loop.py    #   ReAct 工具循环（步数 + token 双熔断）
 │   ├── context.py #   上下文组装：不可信包裹 + 黑板 + token 预算
@@ -221,6 +264,9 @@ demo/.anthill/
 `node.toml` 里**只写环境变量名，永不写密钥**。默认配置是静默的：
 
 ```toml
+[node]
+endpoint = "http://10.0.8.9:45778"   # 本机对外地址；投递时带给对方，让它知道回信往哪发
+
 [discovery]
 enabled = false          # 不发包、不监听，同网段其他 Agent 与你互不可见
 

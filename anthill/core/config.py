@@ -38,6 +38,8 @@ class _Section(BaseModel):
 class NodeSection(_Section):
     name: str
     workspace: str = "."
+    endpoint: str = ""
+    """本机对外地址（如 http://10.0.8.9:45778）。投递时随请求带给对方，让对方知道回信往哪发。"""
 
     @model_validator(mode="after")
     def _check_name(self) -> Self:
@@ -242,11 +244,14 @@ def default_node_toml(node_name: str) -> str:
 [node]
 name = "{node_name}"
 workspace = "."
+# endpoint = "http://10.0.8.9:45778"   # 本机对外地址，跨机通信时告诉对方回信往哪发
 
 [discovery]
 enabled = false            # 默认不广播：不发包、不监听，同网段其他 Agent 与你互不可见
 multicast_group = "239.77.77.7"
 port = 45777
+# 开启后也只是「能互相看见」。发现 ≠ 可通信：
+# 必须核对指纹并 `anthill peers trust --token <令牌>` 交换密钥后才能互投消息。
 
 [runtime]
 poll_interval = 2.0        # watcher 降级为轮询时的扫描间隔（秒）
@@ -295,8 +300,15 @@ role = "worker"
 #   anthill run "给 utils/date.py 补单测，并让 reviewer 过一遍"
 # 编排用强模型、干活用便宜模型是常见配法。
 
-# ---- 跨机 peer（M5 SSH 阶段启用）----
+# ---- 跨机 peer ----
+# 局域网内的对端一般不用写在这里：`anthill peers invite/trust` 配好后
+# 会记进 .anthill/peers.json（含共享密钥，权限 0600）。
+# 只有需要固定地址时才显式配置：
 # [peers.lab-server]
+# transport = "lan"
+# endpoint = "http://10.0.8.21:45778"
+#
+# [peers.old-box]          # SSH peer（M5 阶段启用）
 # transport = "ssh"
 # host = "10.0.8.21"
 # user = "yekaixian"

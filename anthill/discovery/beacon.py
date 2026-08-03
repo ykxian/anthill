@@ -1,0 +1,190 @@
+"""UDP 组播信标：周期性 announce 自己，同时收听别人（01-architecture §5.3）。
+
+**默认 `enabled = false`，此时不发包、不监听、连 socket 都不创建** ——
+这是用户明确提的需求：不开启时，同网段的其他 Agent 与你互不可见。
+
+用组播（239.x.x.x）而不是全网广播，且 TTL=1 不出本网段，是为了把打扰面压到最小。
+收到 announce 只会把对方记进 peers 列表（`discovered`），**不会**建立任何信任 ——
+真要互投消息，还得人肉核对指纹后 `anthill peers trust`。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import socket
+import struct
+from dataclasses import dataclass
+from typing import Any
+
+from anthill.core.config import DiscoverySection
+from anthill.core.envelope import NODE_NAME_RE, PROTO_VERSION
+from anthill.core.logging import EventLog
+from anthill.discovery.registry import PeerRegistry
+
+ANNOUNCE_INTERVAL = 30.0
+MULTICAST_TTL = 1  # 只在本网段内可见，不跨路由器
+MAX_DATAGRAM = 4096
+
+
+@dataclass(frozen=True, slots=True)
+class Announcement:
+    """广播包的内容。**只放公开信息** —— 密钥、路径、任务内容一概不进。"""
+
+    node: str
+    endpoint: str
+    agents: tuple[str, ...] = ()
+    proto: str = PROTO_VERSION
+
+    def to_bytes(self) -> bytes:
+        payload = {
+            "kind": "anthill.announce",
+            "proto": self.proto,
+            "node": self.node,
+            "endpoint": self.endpoint,
+            "agents": list(self.agents),
+        }
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> Announcement | None:
+        """解析失败一律返回 None：网络上什么垃圾包都可能飞过来，不能让它把进程搞崩。"""
+        if len(data) > MAX_DATAGRAM:
+            return None
+        try:
+            parsed: Any = json.loads(data)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(parsed, dict) or parsed.get("kind") != "anthill.announce":
+            return None
+        node = str(parsed.get("node", ""))
+        if not NODE_NAME_RE.match(node):
+            return None
+        agents = parsed.get("agents")
+        return cls(
+            node=node,
+            endpoint=str(parsed.get("endpoint", ""))[:200],
+            agents=tuple(str(a)[:64] for a in agents[:64]) if isinstance(agents, list) else (),
+            proto=str(parsed.get("proto", PROTO_VERSION)),
+        )
+
+
+class Beacon:
+    def __init__(
+        self,
+        *,
+        settings: DiscoverySection,
+        announcement: Announcement,
+        peers: PeerRegistry,
+        log: EventLog,
+        interval: float = ANNOUNCE_INTERVAL,
+    ) -> None:
+        self._settings = settings
+        self._announcement = announcement
+        self._peers = peers
+        self._log = log
+        self._interval = interval
+        self._transport: asyncio.DatagramTransport | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self._settings.enabled
+
+    def on_datagram(self, data: bytes, addr: tuple[str, int]) -> None:
+        """收到一个包。只记「见过」，绝不建立信任。"""
+        announcement = Announcement.from_bytes(data)
+        if announcement is None:
+            return
+        if announcement.node == self._announcement.node:
+            return  # 自己的包
+        if announcement.proto.split(".", 1)[0] != PROTO_VERSION.split(".", 1)[0]:
+            self._log.warn(
+                "discovery.proto_mismatch",
+                node=announcement.node,
+                proto=announcement.proto,
+            )
+            return
+        known = self._peers.get(announcement.node)
+        self._peers.observe(
+            node=announcement.node,
+            endpoint=announcement.endpoint,
+            agents=announcement.agents,
+        )
+        if known is None:
+            self._log.info(
+                "discovery.found",
+                node=announcement.node,
+                endpoint=announcement.endpoint,
+                agents=",".join(announcement.agents),
+                hint="发现 ≠ 可通信；核对指纹后用 `anthill peers trust` 才能互投",
+            )
+
+    async def run(self, stop: asyncio.Event) -> None:
+        if not self.enabled:
+            # 一行日志，让「为什么对面看不见我」这个问题一眼有答案
+            self._log.info("discovery.disabled", hint="node.toml 里 [discovery] enabled = false")
+            await stop.wait()
+            return
+
+        loop = asyncio.get_running_loop()
+        try:
+            sock = make_socket(self._settings.multicast_group, self._settings.port)
+        except OSError as exc:
+            self._log.error("discovery.socket_failed", error=str(exc))
+            await stop.wait()
+            return
+
+        transport, _ = await loop.create_datagram_endpoint(lambda: _BeaconProtocol(self), sock=sock)
+        self._transport = transport
+        self._log.info(
+            "discovery.started",
+            group=self._settings.multicast_group,
+            port=self._settings.port,
+            interval=self._interval,
+        )
+        try:
+            await self._announce_loop(stop)
+        finally:
+            transport.close()
+            self._transport = None
+
+    async def _announce_loop(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            self.announce_once()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=self._interval)
+
+    def announce_once(self) -> None:
+        if self._transport is None:
+            return
+        target = (self._settings.multicast_group, self._settings.port)
+        try:
+            self._transport.sendto(self._announcement.to_bytes(), target)
+        except OSError as exc:
+            self._log.warn("discovery.announce_failed", error=str(exc))
+
+
+class _BeaconProtocol(asyncio.DatagramProtocol):
+    def __init__(self, beacon: Beacon) -> None:
+        self._beacon = beacon
+
+    def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
+        self._beacon.on_datagram(data, addr)
+
+    def error_received(self, exc: Exception) -> None:
+        self._beacon._log.warn("discovery.socket_error", error=str(exc))
+
+
+def make_socket(group: str, port: int) -> socket.socket:
+    """一个既能收组播又能发组播的 socket。TTL=1 保证不出本网段。"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    with contextlib.suppress(AttributeError, OSError):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    sock.bind(("", port))
+    membership = struct.pack("4s4s", socket.inet_aton(group), socket.inet_aton("0.0.0.0"))
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, MULTICAST_TTL)
+    sock.setblocking(False)
+    return sock

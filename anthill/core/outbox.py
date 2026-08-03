@@ -150,6 +150,16 @@ class Outbox:
             self._write(updated)
         return updated
 
+    def abandon(self, entry: OutboxEntry, error: str) -> OutboxEntry:
+        """不可重试的失败：直接进死信，不等退避。
+
+        必须有这个方法 —— 否则「收件人不存在」这类错误会把条目永远留在 pending，
+        重试循环每秒捡起来一次、每秒报一次死信，日志和 coordinator 邮箱都会被刷爆。
+        """
+        updated = entry.failed(error)
+        self._to_dead(updated)
+        return updated
+
     def _to_dead(self, entry: OutboxEntry) -> Path:
         dead_dir = self._mailbox.dead
         dead_dir.mkdir(parents=True, exist_ok=True)

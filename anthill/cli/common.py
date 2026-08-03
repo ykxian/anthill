@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 from rich.console import Console
@@ -26,7 +27,8 @@ def load(workspace: Path | None = None) -> tuple[NodeLayout, Config]:
     return layout, config
 
 
-def fail(message: str, code: int = 1) -> None:
+def fail(message: str, code: int = 1) -> NoReturn:
+    """打印错误并退出。标成 NoReturn，调用点后面的代码就不会被当成「可能执行到」。"""
     err_console.print(f"[bold red]✗[/bold red] {message}")
     raise typer.Exit(code)
 
