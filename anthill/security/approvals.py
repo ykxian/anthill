@@ -20,7 +20,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from anthill.agent.tools.base import Confirmer
 from anthill.core.atomic import atomic_write
@@ -34,6 +34,14 @@ POLL_INTERVAL = 1.0
 
 
 class ApprovalRequest(BaseModel):
+    """一条待审批的请求。
+
+    `id` 强制 ULID：它会被拼进文件路径，而这个模型是从**远端机器**读来的
+    （`anthill approve --peer`）—— 不校验的话，一个被攻陷的远端只要把 id 写成
+    `../../..../x` 就能指使我们往它任意路径写文件。校验放在模型上，
+    所有读到它的地方就都挡住了。
+    """
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: str
@@ -41,6 +49,13 @@ class ApprovalRequest(BaseModel):
     prompt: str
     thread: str = ""
     created_at: str = ""
+
+    @field_validator("id")
+    @classmethod
+    def _check_id(cls, value: str) -> str:
+        if not is_valid_id(value):
+            raise ValueError(f"非法审批 id {value!r}：只接受 ULID")
+        return value
 
     @classmethod
     def create(cls, *, agent: str, prompt: str, thread: str = "") -> ApprovalRequest:

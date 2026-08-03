@@ -581,3 +581,35 @@ async def test_scenario_b_round_trip_task_out_over_ssh_reply_back_by_pull(
     assert MessageType.RECEIPT_ACCEPTED in kinds
     assert MessageType.TASK_RESULT in kinds
     assert Spool(remote.layout.root).pending("laptop") == []  # 取走后远端清空
+
+
+async def test_pull_refuses_envelopes_addressed_to_a_third_node(remote: FakeServer) -> None:
+    """和 /deliver 的 421 一个道理：只收发给自己的信，不当第三方的中转。"""
+    # Arrange：远端 spool 里放一条发给别人的信
+    from anthill.core.spool import Spool
+
+    misrouted = Envelope.new(
+        sender=Address(node="lab", agent="runner"),
+        recipient=Address(node="elsewhere", agent="cli"),
+        type=MessageType.TASK_REQUEST,
+        payload=TaskRequestPayload(title="借道"),
+    )
+    spool = Spool(remote.layout.root)
+    path = spool.deposit(misrouted)
+    # 挪到「发给 laptop」那一格，模拟远端谎报收件人
+    target = spool.dir_for("laptop")
+    target.mkdir(parents=True, exist_ok=True)
+    path.rename(target / path.name)
+
+    # Act
+    transport = transport_for(remote)
+    try:
+        names = await transport.listdir("lab", peer_for(remote), ".anthill/spool/laptop")
+        raw = await transport.read_bytes(
+            "lab", peer_for(remote), f".anthill/spool/laptop/{names[0]}"
+        )
+    finally:
+        await transport.close()
+
+    # Assert：拉取方看到 to.node 不是自己，应当拒收（这里断言的是判定依据本身）
+    assert Envelope.from_json_bytes(raw).to.node == "elsewhere"

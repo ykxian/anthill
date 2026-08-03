@@ -21,6 +21,7 @@ from anthill.cli.common import console, fail, load
 from anthill.core.config import Config, PeerSection
 from anthill.core.envelope import Envelope
 from anthill.core.errors import AntHillError
+from anthill.core.ids import is_valid_id
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
@@ -156,6 +157,11 @@ async def _load_remote(
     return out
 
 
+def _is_envelope_name(name: str) -> bool:
+    """暂存文件名就是 `<ULID>.json`，别的一律不碰。"""
+    return name.endswith(".json") and is_valid_id(name[: -len(".json")])
+
+
 def _report(request: ApprovalRequest, approved: bool) -> None:
     mark = "[bold green]✓ 已批准[/bold green]" if approved else "[bold red]✗ 已拒绝[/bold red]"
     console.print(f"{mark} {request.id[-6:]}（{request.agent}）")
@@ -247,13 +253,21 @@ async def _pull(layout: NodeLayout, config: Config, node: str, peer: PeerSection
         # 混成一个「一切正常」，用户会以为回信收完了，其实还堆在服务器上
 
         for name in names:
-            if not name.endswith(".json"):
+            if not _is_envelope_name(name):
+                # 名字来自远端，会被拼进「读」和「删」两个路径。
+                # 正常 SFTP 服务端不会返回带 / 的条目，但对面已经被攻陷时会 ——
+                # 这个校验的成本是三行，代价是别人能指使我们删任意文件
+                console.print(f"[yellow]![/yellow] 跳过可疑的文件名 {name!r}")
                 continue
             raw = await transport.read_bytes(node, peer, f"{remote_dir}/{name}")
             try:
                 env = Envelope.from_json_bytes(raw)
             except AntHillError as exc:
                 console.print(f"[yellow]![/yellow] 跳过损坏的 {name}：{exc}")
+                continue
+            if env.to.node != config.node.name:
+                # 与 /deliver 的 421 一个道理：只收发给自己的信，不当第三方的中转
+                console.print(f"[yellow]![/yellow] {name} 是发给 {env.to.node} 的，不代收")
                 continue
             mailbox = Mailbox(layout.mailbox_dir(env.to.agent))
             if not mailbox.exists:

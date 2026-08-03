@@ -191,3 +191,20 @@ def test_pull_does_not_report_a_connection_failure_as_nothing_to_pull(workspace:
     result = runner.invoke(app, ["pull", "lab", "-w", str(workspace)])
 
     assert "没有待取" not in result.output
+
+
+# ---------- 远端输入的边界校验（复查时补上）----------
+
+
+def test_envelope_names_from_a_remote_must_be_ulids() -> None:
+    """暂存文件名会被拼进「读」和「删」两个远端路径。
+
+    正常 SFTP 服务端不会返回带 / 的条目名，但对面被攻陷时会 ——
+    校验成本三行，不校验的代价是别人能指使我们删任意文件。
+    """
+    from anthill.cli.remote_cmd import _is_envelope_name
+    from anthill.core.ids import new_id
+
+    assert _is_envelope_name(f"{new_id()}.json")
+    for bad in ("../../../etc/passwd", "../x.json", "x.json", "evil", f"{new_id()}.txt"):
+        assert not _is_envelope_name(bad), bad

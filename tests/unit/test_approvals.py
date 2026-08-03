@@ -154,3 +154,18 @@ async def test_the_prompt_reaches_the_human_verbatim(tmp_path: Path) -> None:
     assert seen and seen[0].prompt == PROMPT
     assert seen[0].agent == "runner"
     await task
+
+
+# ---------- 审批 id 必须是 ULID（复查时发现）----------
+
+
+@pytest.mark.parametrize("bad", ["../../../etc/passwd", "a/b", "", "不是ULID"])
+def test_request_with_a_non_ulid_id_is_rejected_by_the_model(bad: str) -> None:
+    """这个模型是从**远端机器**读来的（`anthill approve --peer`）。
+
+    id 会被拼进文件路径，不校验的话被攻陷的远端就能指使我们往任意路径写文件。
+    """
+    with pytest.raises(ValueError, match="审批 id"):
+        ApprovalRequest.model_validate(
+            {"id": bad, "agent": "runner", "prompt": "rm -rf /"}
+        )
