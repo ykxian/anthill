@@ -20,13 +20,14 @@
 flowchart LR
     subgraph L4[交互层]
         CLI[CLI · typer]
-        WEB[面板 · FastAPI + WebSocket 只读]
+        WEB[面板 · FastAPI + WebSocket<br/>默认只读，可开写入口]
     end
     subgraph L3[智能层]
         ORCH[Orchestrator 拆解/分派/汇总]
         LOOP[Agent Loop · ReAct 工具循环]
         TOOLS[工具集 + 策略引擎]
         PROV[Provider · Anthropic / OpenAI 兼容]
+        ADP[Adapter · Claude Code 等已有终端]
     end
     subgraph L2[消息层]
         ENV[Envelope 协议 · pydantic]
