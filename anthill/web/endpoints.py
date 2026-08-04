@@ -9,3 +9,4 @@ from __future__ import annotations
 DELIVER_PATH = "/deliver"
 HEALTH_PATH = "/health"
 PANEL_PATH = "/panel"
+SUMMARY_PATH = "/node/summary"

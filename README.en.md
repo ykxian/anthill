@@ -27,13 +27,14 @@ consumes messages never changes. Three properties fall out of this:
 flowchart LR
     subgraph L4[Interface]
         CLI[CLI · typer]
-        WEB[Panel · FastAPI + WebSocket, read-only]
+        WEB[Panel · FastAPI + WebSocket<br/>cluster view, read-only by default]
     end
     subgraph L3[Intelligence]
         ORCH[Orchestrator · plan / dispatch / summarise]
         LOOP[Agent loop · ReAct]
         TOOLS[Tools + policy engine]
         PROV[Providers · Anthropic / OpenAI-compatible]
+        ADP[Adapters · Claude Code and other terminals]
     end
     subgraph L2[Messaging]
         ENV[Envelope · pydantic]
@@ -133,6 +134,42 @@ be tested on their own, or handed to "human agents" (which is exactly how this p
 - The panel is enabled by default **only when bound to loopback**: once you use
   `--host 0.0.0.0` for LAN delivery it would otherwise be exposed to the whole segment.
 
+**Existing terminals, agent-to-agent chat, writable panel (M7)**
+
+- **Bring Claude Code and friends in**: one line of config (`command = ["claude", "-p"]`).
+  To the runtime it is just another handler — adding a terminal changes no agentd code.
+- **A long-running interactive session can join too** (`bridge = true`): incoming messages
+  become `.md` files, you (or the Claude Code session you keep open) write the reply.
+  Receiving **never blocks**, so you can think for ten minutes — and you can **cut in at
+  any time** by dropping a file with a `to:` header into the outbox.
+- **Agents actually converse**: an @-mention reply goes to the person mentioned rather than
+  back to the sender. Conversations end on a **per-thread turn budget** — deterministic,
+  not "the model says it's done", and not the hop circuit breaker (that's a protocol-level
+  backstop; if it trips, something is wrong).
+- **Writable panel** (`--panel-write`): start runs, send messages, edit node.toml in place.
+
+**One panel for every machine (M8)**
+
+- **Control panel**: open the panel on any one machine and it aggregates every **trusted**
+  node onto a single page — topology grouped by machine, runs and events gaining a
+  "which machine" column.
+- Aggregation fetches exactly **one file**: each node periodically writes its snapshot to
+  `.anthill/status.json`, and the control panel pulls it the way that peer is already
+  reachable — `GET /node/summary` over LAN, plain SFTP for SSH peers, so **the SSH side
+  still opens no ports**.
+- Reading state uses the same shared key as delivery (sign `domain + node + path + timestamp`,
+  30-second replay window). Untrusted nodes appear in the topology but are **never read from**.
+  Marking a node trusted means it can both deliver to you and see what you're doing;
+  `anthill serve --no-summary` opts out.
+- **A peer's snapshot is external input** and is validated against a pydantic model at the
+  process boundary before anything touches it — those fields end up interpolated into the
+  panel's HTML, and with write access enabled, running JS in the panel is close to running
+  commands on that machine. The frontend escapes every interpolation too; both gates matter.
+- **One unreachable machine can't stall the page**: peers are fetched concurrently, and a
+  node with cached data is served that data while a refresh runs in the background —
+  measured at 0.18s to render after unplugging a machine. A snapshot that stopped updating
+  is also marked unreachable: over SSH the file stays readable long after that node died.
+
 ## Quick start
 
 ```bash
@@ -197,6 +234,62 @@ cat demo/.anthill/blackboard/BOARD.md            # one-page status snapshot
 cat demo/.anthill/blackboard/tasks/*/state.json  # the full state machine per run
 uv run anthill log boss --follow                 # structured event stream
 ```
+
+### Bring your existing terminal in
+
+```toml
+[agents.cc]
+role = "worker"
+command = ["claude", "-p"]     # a command means the adapter path — no provider needed
+
+[agents.session]
+role = "worker"
+bridge = true                  # a long-running interactive session, or just you
+```
+
+A `command` agent starts a fresh process per message. `bridge = true` is the other shape:
+messages land as `.md` files under `agents/<name>/bridge/inbox/`, replies go into
+`../outbox/`. It **never blocks**, so new messages keep arriving while you think — and a
+file with a `to:` header is a message *you* initiate, which is how a human cuts into a
+collaboration already in progress.
+
+```bash
+uv run anthill bridge session                                  # what's waiting for me
+uv run anthill bridge session --to coder --text "I'll take this one"
+uv run anthill chat coder                                      # multi-turn, one thread
+uv run anthill talk coder reviewer "how should we fix this bug" # two agents, you watch
+```
+
+Note the boundary: an external terminal follows the same envelope, thread and timeout rules
+as a native agent, but **the tool policy engine does not reach inside it** — Claude Code has
+its own permission system, and AntHill does not proxy it.
+
+### One panel for every machine
+
+```bash
+uv run anthill serve            # on your laptop: http://127.0.0.1:45778/panel
+uv run anthill serve            # on every other machine — no extra configuration
+```
+
+```text
+▲ AntHill   node laptop                    3 nodes · 5/7 running   ● live
+┌─ Topology ─────────────┐┌─ Runs ───────────────────────────────────┐
+│ ● laptop         local ││ lab   tests for utils/date.py    running │
+│   ● cc     bridge      ││        s1  coder      wrote 12 cases…    │
+│ ● lab        connected │└──────────────────────────────────────────┘
+│   ● coder  deepseek    │┌─ Events ─────────────────────────────────┐
+│ ○ server        down   ││ 10:22:31 lab    coder  step.dispatched   │
+│   ConnectError: …      ││ 10:22:33 laptop cli    delivery.ok       │
+└────────────────────────┘└──────────────────────────────────────────┘
+```
+
+Once `peers trust` is set up there is nothing else to configure: reading a peer's state
+uses the same shared key as delivery. Write access (`--panel-write`) only ever applies to
+the control machine itself — runs it starts leave from the local `cli` agent and cross the
+network through signed delivery. **The control panel can read other machines' state; it
+cannot change their config.** `/panel/api/cluster` is itself loopback-only: it is a GET with
+side effects, and it pools every peer's state in one place. When the panel is bound to
+`0.0.0.0` the page falls back to showing the local node only.
 
 ## Security model
 

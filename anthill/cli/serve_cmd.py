@@ -14,20 +14,25 @@ import asyncio
 import signal
 from contextlib import suppress
 from pathlib import Path
+from typing import Any
 
 import typer
 import uvicorn
 
 from anthill.cli.common import console, fail, load
+from anthill.core.config import Config
 from anthill.core.errors import AntHillError
 from anthill.core.logging import EventLog
+from anthill.core.paths import NodeLayout
 from anthill.discovery.beacon import Announcement, Beacon
 from anthill.discovery.registry import PeerRegistry
 from anthill.web.app import create_app
+from anthill.web.cluster import write_status
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 45778
 LOOPBACK = ("127.0.0.1", "localhost", "::1", "")
+STATUS_INTERVAL = 5.0
 
 
 def is_loopback(host: str) -> bool:
@@ -47,6 +52,11 @@ def serve_command(
         False,
         "--panel-write",
         help="允许面板发起任务与改配置；只能配合回环地址使用",
+    ),
+    summary: bool = typer.Option(
+        True,
+        "--summary/--no-summary",
+        help="是否把本机状态共享给已信任的对端（别人的总控面板要靠它）",
     ),
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="只写日志文件，不在终端回显"),
@@ -82,6 +92,8 @@ def serve_command(
         console.print(f"[bold]面板[/bold] {endpoint}/panel [dim]（{mode}）[/dim]")
     elif panel is None:
         console.print("[dim]面板已关闭：绑的不是回环地址；确实要开就加 --panel[/dim]")
+    if not summary:
+        console.print("[dim]不共享状态：别人的总控面板会把本机显示成不可用[/dim]")
 
     try:
         asyncio.run(
@@ -95,6 +107,7 @@ def serve_command(
                 endpoint=endpoint,
                 panel=show_panel,
                 panel_write=panel_write,
+                summary=summary,
             )
         )
     except KeyboardInterrupt:
@@ -104,8 +117,8 @@ def serve_command(
 
 
 async def _serve(
-    layout: object,
-    config: object,
+    layout: NodeLayout,
+    config: Config,
     peers: PeerRegistry,
     log: EventLog,
     *,
@@ -114,24 +127,26 @@ async def _serve(
     endpoint: str,
     panel: bool = False,
     panel_write: bool = False,
+    summary: bool = True,
 ) -> None:
     app = create_app(
-        layout=layout,  # type: ignore[arg-type]
-        config=config,  # type: ignore[arg-type]
+        layout=layout,
+        config=config,
         peers=peers,
         log=log,
         panel=panel,
         panel_writable=panel_write,
+        summary=summary,
     )
     server = uvicorn.Server(
         uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False)
     )
     beacon = Beacon(
-        settings=config.discovery,  # type: ignore[attr-defined]
+        settings=config.discovery,
         announcement=Announcement(
-            node=config.node.name,  # type: ignore[attr-defined]
+            node=config.node.name,
             endpoint=endpoint,
-            agents=tuple(sorted(config.agents)),  # type: ignore[attr-defined]
+            agents=tuple(sorted(config.agents)),
         ),
         peers=peers,
         log=log,
@@ -143,10 +158,13 @@ async def _serve(
         with suppress(NotImplementedError, RuntimeError):
             loop.add_signal_handler(sig, stop.set)
 
-    log.info("serve.start", node=config.node.name, endpoint=endpoint, host=host, port=port)  # type: ignore[attr-defined]
+    log.info("serve.start", node=config.node.name, endpoint=endpoint, host=host, port=port)
     tasks = [
         asyncio.create_task(server.serve(), name="http"),
         asyncio.create_task(beacon.run(stop), name="beacon"),
+        asyncio.create_task(
+            _status_loop(layout, config, peers, log, stop, enabled=summary), name="status"
+        ),
         asyncio.create_task(stop.wait(), name="stop"),
     ]
     try:
@@ -156,5 +174,54 @@ async def _serve(
         server.should_exit = True
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        _report_crashes(tasks, results, log)
         log.info("serve.stop")
+
+
+def _report_crashes(tasks: list[asyncio.Task[Any]], results: list[Any], log: EventLog) -> None:
+    """哪个后台任务是**炸掉**才停的，要说出来。
+
+    `gather(return_exceptions=True)` 会把异常连同 traceback 一起吞掉 ——
+    不补这一句的话，某个循环崩了会表现成「serve 正常退出，退出码 0」，
+    盯着日志也看不出发生过什么。
+    """
+    for task, result in zip(tasks, results, strict=True):
+        if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+            log.error(
+                "serve.task_crashed",
+                task=task.get_name(),
+                error=f"{type(result).__name__}: {result}",
+            )
+
+
+async def _status_loop(
+    layout: NodeLayout,
+    config: Config,
+    peers: PeerRegistry,
+    log: EventLog,
+    stop: asyncio.Event,
+    *,
+    interval: float = STATUS_INTERVAL,
+    enabled: bool = True,
+) -> None:
+    """定期把本节点快照写成 `.anthill/status.json`，供总控面板来取。
+
+    写文件而不是让对方实时算：总控可能同时连着七八台机器，
+    让每台机器各自按自己的节奏写好放那儿，比来一次算一次省事也稳得多。
+
+    **写不出来绝不能把 serve 带走**：磁盘满、`.anthill` 只读、peers.json 被手改坏，
+    都只该让「别人看不到我的状态」，不该让这台机器停止收消息。
+    所以这里接住所有异常 —— 少一份状态是小事，节点掉线是大事。
+    """
+    if not enabled:
+        await stop.wait()
+        return
+    while not stop.is_set():
+        try:
+            write_status(layout, config, peers)
+        except Exception as exc:
+            log.warn("status.write_failed", error=f"{type(exc).__name__}: {exc}")
+        with suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+            return

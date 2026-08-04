@@ -35,14 +35,23 @@ def build_snapshot(
     peers: PeerRegistry,
     *,
     event_limit: int = DEFAULT_EVENT_LIMIT,
+    include_peers: bool = True,
 ) -> dict[str, Any]:
-    return {
+    """本节点的快照。
+
+    `include_peers=False` 用于**要发给别的节点**的那一份（`/node/summary`）：
+    对端做总控面板不需要知道我还认识谁，而 peers 列表里带着别人的指纹与地址 ——
+    给出去没有收益，只有泄露。给自己看的面板不受这个限制。
+    """
+    snapshot = {
         "node": config.node.name,
         "agents": _agents(layout, config),
-        "peers": _peers(peers),
         "runs": _runs(layout),
         "events": _events(layout, config, event_limit),
     }
+    if include_peers:
+        snapshot["peers"] = _peers(peers)
+    return snapshot
 
 
 def _agents(layout: NodeLayout, config: Config) -> list[dict[str, Any]]:
@@ -132,9 +141,15 @@ INTERESTING = ("msg", "to", "frm", "thread", "step", "task", "error", "tool", "n
 
 
 def _slim(record: dict[str, Any]) -> dict[str, Any]:
-    """日志字段很多，面板只要能看懂发生了什么的那几个。"""
+    """日志字段很多，面板只要能看懂发生了什么的那几个。
+
+    `ts` 是给人看的（只留 `HH:MM:SS`），`sort` 是给排序用的完整时间戳 ——
+    总控要把好几台机器的事件合成一条时间线，只按 `HH:MM:SS` 排的话，
+    跨过零点那一刻新事件会被排到最前面、然后第一个被截掉。
+    """
     return {
         "ts": str(record.get("ts", ""))[11:19],
+        "sort": str(record.get("ts", "")),
         "agent": record.get("agent", "-"),
         "level": record.get("level", "info"),
         "event": record.get("event", ""),

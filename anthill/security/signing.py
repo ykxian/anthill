@@ -56,7 +56,7 @@ def verify_envelope(
         raise SignatureError(f"不支持的签名算法 {algo!r}，本节点只认 {SIG_ALGO}")
 
     expected = compute_signature(env, key)
-    if not hmac.compare_digest(env.sig, expected):  # 定时安全比较，别用 ==
+    if not _same(env.sig, expected):  # 定时安全比较，别用 ==
         raise SignatureError(f"消息 {env.id} 签名不匹配：内容被改过，或用的不是同一把密钥")
 
     if max_skew is None:
@@ -68,3 +68,74 @@ def verify_envelope(
             f"超过 {max_skew.total_seconds():.0f}s，按重放拒收"
             "（也可能是两台机器时钟没对齐）"
         )
+
+
+# ---------- 请求签名（面板汇总用）----------
+
+REQUEST_DOMAIN = "anthill/request/v1"
+"""域分隔标签。信封签名与请求签名共用同一把密钥，材料里必须带上各自的标签，
+否则「一条消息的规范化字节」和「一个请求的三元组」有可能被凑成同一串。"""
+
+REQUEST_SEP = "\n"
+MAX_REQUEST_SKEW = timedelta(seconds=30)
+"""比信封的 5 分钟严得多。
+
+信封要宽，是因为邮箱是存储转发队列，两台机器时钟差几分钟也得收。
+读请求不一样：它是**同步**的，正常情况下签完立刻就发出去了。
+而 LAN 这一段是明文 HTTP，请求又没有 seen.db 那样的去重，
+窗口有多长，抓到一个包的人就能重放多久 —— 所以能收多紧收多紧。"""
+
+
+def sign_request(key: bytes, *, node: str, path: str, ts: str) -> str:
+    """给一个 GET 请求签名。
+
+    信封签名是给「一条消息」用的；这里要认证的是「一次读取」，没有信封可签，
+    所以直接签 `域标签 + 节点 + 路径 + 时间戳`。
+    """
+    material = REQUEST_SEP.join((REQUEST_DOMAIN, node, path, ts)).encode()
+    return f"{SIG_PREFIX}{hmac.new(key, material, sha256).hexdigest()}"
+
+
+def verify_request(
+    key: bytes,
+    *,
+    node: str,
+    path: str,
+    ts: str,
+    signature: str,
+    at: datetime | None = None,
+    max_skew: timedelta = MAX_REQUEST_SKEW,
+) -> None:
+    """任一项不过抛 SignatureError。**绝不让畸形输入变成 500** ——
+    这个函数在认证之前就要面对陌生人给的字节。"""
+    if not signature:
+        raise SignatureError("请求未签名")
+    expected = sign_request(key, node=node, path=path, ts=ts)
+    if not _same(signature, expected):
+        raise SignatureError("请求签名不匹配")
+    try:
+        moment = datetime.fromisoformat(ts)
+    except ValueError as exc:
+        raise SignatureError(f"时间戳 {ts!r} 无法解析") from exc
+    try:
+        skew = abs((at or now()) - moment)
+    except TypeError as exc:  # 不带时区的时间戳减不了
+        raise SignatureError(f"时间戳 {ts!r} 没带时区") from exc
+    if skew > max_skew:
+        raise SignatureError(
+            f"请求时间戳偏差 {skew.total_seconds():.0f}s 超过 {max_skew.total_seconds():.0f}s，"
+            "按重放拒收（也可能是两台机器时钟没对齐）"
+        )
+
+
+def _same(given: str, expected: str) -> bool:
+    """定时安全比较。
+
+    `compare_digest` 对非 ASCII 的 str 会抛 TypeError —— HTTP 头是按 latin-1 解出来的，
+    一个 0xFF 字节就能让它抛。不接住的话，任何人（连密钥都不用有）
+    随手发个畸形头就能换来一个 500 加一段 traceback。
+    """
+    try:
+        return hmac.compare_digest(given, expected)
+    except TypeError:
+        return False

@@ -10,8 +10,11 @@ from rich.panel import Panel
 from rich.table import Table
 
 from anthill.cli.common import console, is_running, load
+from anthill.core.config import Config
 from anthill.core.mailbox import Mailbox
 from anthill.core.outbox import Outbox
+from anthill.core.paths import NodeLayout
+from anthill.discovery.registry import PeerRegistry
 
 
 def status_command(
@@ -30,7 +33,7 @@ def status_command(
             f"节点 [b]{config.node.name}[/b]\n"
             f"工作区 {layout.workspace}\n"
             f"发现   {discovery}\n"
-            f"peers  {', '.join(config.peers) or '（未配置）'}",
+            f"peers  {_peers(layout, config)}",
             title="AntHill",
             border_style="cyan",
         )
@@ -55,6 +58,21 @@ def status_command(
             f"[red]{dead}[/red]" if dead else "0",
         )
     console.print(table)
+
+
+def _peers(layout: NodeLayout, config: Config) -> str:
+    """对端有两个来源，只报一个会骗人。
+
+    `[peers.*]` 是手写在 node.toml 里的；`peers invite/trust` 建立的关系落在
+    `peers.json`。只看前者的话，配对好的节点在这里显示成「未配置」——
+    而这条命令恰恰是「为什么收不到消息」时第一个要看的地方。
+    """
+    labels = {node: "配置" for node in config.peers}
+    for record in PeerRegistry(layout.root).all():
+        labels[record.node] = "已信任" if record.trusted else "[dim]仅发现[/dim]"
+    if not labels:
+        return "（未配置）"
+    return "，".join(f"{node}（{labels[node]}）" for node in sorted(labels))
 
 
 def _runtime_state(status_file: Path) -> tuple[bool, str, str]:

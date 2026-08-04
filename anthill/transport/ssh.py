@@ -163,14 +163,23 @@ class SshTransport(Transport):
         self._log.info("ssh.fetched", node=node, remote=remote, bytes=len(data))
         return len(data)
 
-    async def read_bytes(self, node: str, peer: PeerSection | None, remote: str) -> bytes:
+    async def read_bytes(
+        self, node: str, peer: PeerSection | None, remote: str, *, max_bytes: int | None = None
+    ) -> bytes:
+        """读远端小文件。`max_bytes` 是给「文件由对方决定大小」的场景用的上限 ——
+        不设上限的话，对面放一个几个 G 的文件就能把这边撑爆。"""
         target = SshTarget.from_peer(node, peer)
         conn = await self._connection(node, target)
         async with conn.start_sftp_client() as sftp:
             path = await self._resolve(sftp, target, remote)
             async with sftp.open(path, "rb") as handle:
-                data = await handle.read()
-        return bytes(data) if isinstance(data, bytes | bytearray) else str(data).encode()
+                data = await (handle.read() if max_bytes is None else handle.read(max_bytes + 1))
+        raw = bytes(data) if isinstance(data, bytes | bytearray) else str(data).encode()
+        if max_bytes is not None and len(raw) > max_bytes:
+            raise DeliveryError(
+                f"{node} 的 {remote} 超过 {max_bytes} 字节上限，拒绝读取", retryable=False
+            )
+        return raw
 
     async def write_bytes(
         self, node: str, peer: PeerSection | None, remote: str, data: bytes

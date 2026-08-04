@@ -15,6 +15,8 @@ agentd 完全不需要知道这条消息是从网线上来的。
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +45,7 @@ from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
 from anthill.discovery.registry import PeerRecord, PeerRegistry
-from anthill.security.signing import verify_envelope
+from anthill.security.signing import verify_envelope, verify_request
 from anthill.web.actions import (
     ConfigRequest,
     RunRequest,
@@ -54,7 +56,8 @@ from anthill.web.actions import (
     start_run,
     write_config,
 )
-from anthill.web.endpoints import DELIVER_PATH, PANEL_PATH
+from anthill.web.cluster import ClusterCache, build_cluster, read_status
+from anthill.web.endpoints import DELIVER_PATH, PANEL_PATH, SUMMARY_PATH
 from anthill.web.panel import build_snapshot
 
 PANEL_HTML = Path(__file__).parent / "static" / "panel.html"
@@ -69,10 +72,17 @@ def create_app(
     log: EventLog,
     panel: bool = False,
     panel_writable: bool = False,
+    summary: bool = True,
 ) -> FastAPI:
-    app = FastAPI(title=f"anthill:{config.node.name}", docs_url=None, redoc_url=None)
+    app = FastAPI(
+        title=f"anthill:{config.node.name}",
+        docs_url=None,
+        redoc_url=None,
+        lifespan=_lifespan,
+    )
+    app.state.cluster_cache = ClusterCache()
     if panel:
-        _mount_panel(app, layout=layout, config=config, peers=peers)
+        _mount_panel(app, layout=layout, config=config, peers=peers, log=log)
     if panel and panel_writable:
         _mount_panel_actions(app, layout=layout, config=config, log=log)
 
@@ -84,6 +94,41 @@ def create_app(
             "agents": sorted(config.agents),
             "proto": Envelope.model_fields["proto"].default,
         }
+
+    @app.get(SUMMARY_PATH)
+    async def node_summary(
+        x_anthill_node: str = Header(default=""),
+        x_anthill_ts: str = Header(default=""),
+        x_anthill_sig: str = Header(default=""),
+    ) -> dict[str, Any]:
+        """把本节点的状态给**已信任的对端**看，供它做总控面板。
+
+        认证跟投递同一把共享密钥：签 `节点 + 路径 + 时间戳`，30 秒防重放窗。
+
+        **说清楚给出去的是什么**：Agent 名单与积压、编排任务的目标与每步交付、
+        最近若干条日志（含 `error` 字段，里面可能带本机路径或某个 peer 的
+        `user@host`）。不含密钥，也不含本机的 peers 列表。
+        换句话说：把一个节点标成 trusted，意味着它既能给你投消息，
+        也能看你在干什么。不想共享就用 `anthill serve --no-summary`。
+        """
+        if not summary:
+            raise HTTPException(status_code=404, detail="本节点没有开放状态共享")
+        try:
+            _, key = peers.require_trusted(x_anthill_node)
+        except PeerError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        try:
+            verify_request(
+                key,
+                node=x_anthill_node,
+                path=SUMMARY_PATH,
+                ts=x_anthill_ts,
+                signature=x_anthill_sig,
+            )
+        except SignatureError as exc:
+            log.warn("summary.rejected", frm=x_anthill_node, reason=str(exc))
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        return read_status(layout, config, peers)
 
     @app.post(DELIVER_PATH, status_code=202)
     async def deliver(
@@ -175,7 +220,18 @@ def _deposit(env: Envelope, layout: NodeLayout, log: EventLog) -> Any:
         raise HTTPException(status_code=503, detail=f"写入邮箱失败：{exc}") from exc
 
 
-def _mount_panel(app: FastAPI, *, layout: NodeLayout, config: Config, peers: PeerRegistry) -> None:
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """退出时把后台刷新任务收干净，免得 uvicorn 抱怨「任务还没结束就被销毁」。"""
+    yield
+    cache: ClusterCache | None = getattr(app.state, "cluster_cache", None)
+    if cache is not None:
+        await cache.aclose()
+
+
+def _mount_panel(
+    app: FastAPI, *, layout: NodeLayout, config: Config, peers: PeerRegistry, log: EventLog
+) -> None:
     """面板的只读部分（03-tech-design §9）。
 
     默认就只有这些 `GET` —— 一个只会读的页面，最坏也就是被人看到状态。
@@ -192,6 +248,19 @@ def _mount_panel(app: FastAPI, *, layout: NodeLayout, config: Config, peers: Pee
     @app.get(f"{PANEL_PATH}/api/state")
     async def panel_state() -> dict[str, Any]:
         return build_snapshot(layout, config, peers)
+
+    @app.get(f"{PANEL_PATH}/api/cluster")
+    async def panel_cluster(request: Request) -> dict[str, Any]:
+        """总控视图：本机 + 所有已信任对端。连不上的标成不可达，不卡住整页。
+
+        **只允许本机访问**，和写入口同一条理由：这个 GET 是有副作用的
+        （每次可能触发 N 次对外连接），而且它把**所有**对端的状态汇到一处 ——
+        面板绑了 `0.0.0.0` 时，那等于把整个集群的状态摊给整个网段。
+        页面拿到 403 会自动退回只看本机。
+        """
+        if not is_local_client(request.client.host if request.client else None):
+            raise HTTPException(status_code=403, detail="总控视图只允许本机访问")
+        return await build_cluster(layout, config, peers, log, request.app.state.cluster_cache)
 
     @app.websocket(f"{PANEL_PATH}/ws")
     async def panel_ws(websocket: WebSocket) -> None:

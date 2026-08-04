@@ -129,6 +129,18 @@ section > h2 .count { color: var(--dim); letter-spacing: 0; text-transform: none
 .event .detail { color: var(--muted); }
 .event.warn .what { color: var(--warn); }
 .event.error .what { color: var(--bad); }
+/* ---- 节点分组：总控视图下，每台机器一组 ---- */
+.node-group { margin-bottom: 10px; }
+.node-head {
+  display: flex; align-items: baseline; gap: 8px; padding: 6px 10px 4px;
+  border-bottom: 1px dashed var(--line); margin-bottom: 4px;
+}
+.node-head .name { font-weight: 600; letter-spacing: 0.02em; }
+.node-head .tag { font-size: 11px; color: var(--dim); }
+.node-group.down { opacity: 0.72; }
+.node-group.down .node-head { border-bottom-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
+.where { color: var(--dim); flex: none; min-width: 84px; }
+
 /* ---- 操作条：写权限开着才出现 ---- */
 .actions { display: flex; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .actions input, .actions select, textarea {
@@ -217,11 +229,8 @@ function setConn(state, text) {
   $("conn-text").textContent = text;
 }
 
-function renderTopo(data) {
-  const agents = data.agents || [];
-  const peers = data.peers || [];
-  $("topo-count").textContent = `${agents.filter(a => a.running).length}/${agents.length} 在跑`;
-  const agentHtml = agents.map(a => `
+function agentCard(a) {
+  return `
     <div class="card">
       <div class="row">
         <span class="dot ${a.running ? "on" : ""}"></span>
@@ -230,29 +239,33 @@ function renderTopo(data) {
       </div>
       <div class="row meta">
         <span class="grow truncate">${esc(a.provider)} · ${esc(a.watch_mode)}</span>
-        ${a.queue ? `<span class="pill warn">待处理 ${a.queue}</span>` : ""}
-        ${a.dead ? `<span class="pill bad">死信 ${a.dead}</span>` : ""}
+        ${a.queue ? `<span class="pill warn">待处理 ${esc(a.queue)}</span>` : ""}
+        ${a.dead ? `<span class="pill bad">死信 ${esc(a.dead)}</span>` : ""}
       </div>
-    </div>`).join("");
-
-  const peerHtml = peers.length ? `
-    <div class="meta" style="padding:10px 10px 4px">对端节点</div>
-    ${peers.map(p => `
-      <div class="card">
-        <div class="row">
-          <span class="dot ${p.status === "trusted" ? "on" : ""}"></span>
-          <span class="name grow truncate">${esc(p.node)}</span>
-          <span class="pill ${p.status === "trusted" ? "ok" : "warn"}">${esc(p.status)}</span>
-        </div>
-        <div class="meta truncate">${esc(p.endpoint || "地址未知")}</div>
-        ${p.fingerprint ? `<div class="meta truncate">${esc(p.fingerprint)}</div>` : ""}
-      </div>`).join("")}` : "";
-
-  $("topo-body").innerHTML = agentHtml + peerHtml || `<div class="empty">还没有配置 Agent</div>`;
+    </div>`;
 }
 
-function renderRuns(data) {
-  const runs = data.runs || [];
+function renderTopo(nodes) {
+  const total = nodes.reduce((n, x) => n + (x.agents || []).length, 0);
+  const live = nodes.reduce((n, x) => n + (x.agents || []).filter(a => a.running).length, 0);
+  $("topo-count").textContent = `${nodes.length} 个节点 · ${live}/${total} 在跑`;
+
+  $("topo-body").innerHTML = nodes.map(node => `
+    <div class="node-group ${node.reachable ? "" : "down"}">
+      <div class="node-head">
+        <span class="dot ${node.reachable ? "on" : ""}"></span>
+        <span class="name grow truncate">${esc(node.node)}</span>
+        <span class="tag">${node.local ? "本机" : node.reachable ? "已连上" : "连不上"}</span>
+      </div>
+      ${node.reachable
+        ? (node.agents || []).map(agentCard).join("") ||
+          `<div class="meta" style="padding:4px 10px">这个节点没有配置 Agent</div>`
+        : `<div class="meta" style="padding:4px 10px">${esc(node.reason || "")}</div>`}
+    </div>`).join("") || `<div class="empty">还没有配置 Agent</div>`;
+}
+
+function renderRuns(nodes) {
+  const runs = nodes.flatMap(n => (n.runs || []).map(r => ({ ...r, where: n.node })));
   const live = runs.filter(r => !r.finished);
   $("runs-count").textContent = `进行中 ${live.length} · 已完成 ${runs.length - live.length}`;
   if (!runs.length) {
@@ -262,8 +275,9 @@ function renderRuns(data) {
   $("runs-body").innerHTML = [...live, ...runs.filter(r => r.finished).slice(-3)].map(r => `
     <div class="run">
       <div class="row">
+        <span class="where">${esc(r.where)}</span>
         <span class="goal grow truncate">${esc(r.goal)}</span>
-        ${r.round ? `<span class="pill warn">返工 ${r.round}</span>` : ""}
+        ${r.round ? `<span class="pill warn">返工 ${esc(r.round)}</span>` : ""}
         <span class="pill ${r.finished ? "ok" : ""}">${r.finished ? "已完成" : "进行中"}</span>
       </div>
       <div class="steps">
@@ -277,8 +291,12 @@ function renderRuns(data) {
     </div>`).join("");
 }
 
-function renderEvents(data) {
-  const events = data.events || [];
+function renderEvents(nodes) {
+  const events = nodes
+    .flatMap(n => (n.events || []).map(e => ({ ...e, where: n.node })))
+    // 按完整时间戳排，不能按显示用的 HH:MM:SS —— 跨零点会把新事件排到最前面然后截掉
+    .sort((a, b) => (a.sort || a.ts || "").localeCompare(b.sort || b.ts || ""))
+    .slice(-80);
   $("events-count").textContent = `最近 ${events.length} 条`;
   const body = $("stream-body");
   const pinned = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
@@ -286,6 +304,7 @@ function renderEvents(data) {
     ? events.map(e => `
       <div class="event ${esc(e.level)}">
         <span class="ts">${esc(e.ts)}</span>
+        <span class="where truncate">${esc(e.where)}</span>
         <span class="who truncate">${esc(e.agent)}</span>
         <span class="what">${esc(e.event)}</span>
         <span class="detail truncate">${esc(e.detail)}</span>
@@ -294,22 +313,59 @@ function renderEvents(data) {
   if (pinned) body.scrollTop = body.scrollHeight;  // 贴底时才自动跟随，别打断正在往回翻的人
 }
 
-function render(data) {
-  $("node").textContent = data.node || "?";
-  document.title = `AntHill · ${data.node || ""}`;
-  renderTopo(data);
-  renderRuns(data);
-  renderEvents(data);
+// 两路数据合成一张图：
+//   WebSocket —— 每 2 秒推**本机**快照，kill -9 之后立刻变灰
+//   api/cluster —— 每 5 秒拉一次全集群，远端本来也只有这个新鲜度
+// 分开是有原因的：让 WS 每 2 秒去连一遍每台机器（SSH 还要重开连接），
+// 整个面板的刷新节奏就被最慢那台拖住了。
+const CLUSTER_REFRESH = 5000;
+const state = { node: "", nodes: [] };
+let socketLive = false;
+
+function asNode(snapshot) {
+  // 默认值放在展开之后：远端传来的 payload 不能把 local / reachable 覆盖掉
+  return { ...snapshot, node: snapshot.node, local: true, reachable: true };
 }
 
+function draw() {
+  $("node").textContent = state.node || "?";
+  document.title = `AntHill · ${state.node || ""}`;
+  renderTopo(state.nodes);
+  renderRuns(state.nodes);
+  renderEvents(state.nodes);
+}
+
+function applyCluster(data) {
+  state.node = data.node || state.node;
+  state.nodes = data.nodes || [asNode(data)];  // 单机节点没有 nodes 字段
+  draw();
+}
+
+function applyLocal(snapshot) {
+  // WS 推来的只是本机 —— 只换本机那一格，别把别的机器抹掉
+  state.node = snapshot.node || state.node;
+  state.nodes = [asNode(snapshot), ...state.nodes.filter(n => !n.local && n.node !== snapshot.node)];
+  draw();
+}
+
+let polling = false;
+
 async function poll() {
+  // 上一次还没回来就跳过：一台机器慢，不该让请求越堆越多
+  if (polling) return;
+  polling = true;
   try {
-    const res = await fetch("api/state");
-    if (!res.ok) throw new Error(res.status);
-    render(await res.json());
-    setConn("live", "轮询中");
+    // 总控视图只对本机开放（403）；面板开在 0.0.0.0 时退回只看本机
+    const res = await fetch("api/cluster");
+    const fallback = res.status === 403 ? await fetch("api/state") : null;
+    const use = fallback || res;
+    if (!use.ok) throw new Error(`HTTP ${use.status}`);
+    applyCluster(await use.json());
+    if (!socketLive) setConn("live", fallback ? "本机" : "轮询");
   } catch (err) {
-    setConn("down", "连接不上");
+    if (!socketLive) setConn("down", "连接不上");
+  } finally {
+    polling = false;
   }
 }
 
@@ -319,11 +375,15 @@ function connect() {
   try {
     socket = new WebSocket(`${proto}://${location.host}${location.pathname.replace(/\/$/, "")}/ws`);
   } catch (err) {
-    setInterval(poll, 2000); poll(); return;
+    return;  // 没有 WS 也能用，只是本机的粒度退化到 5 秒
   }
-  socket.onopen = () => setConn("live", "实时");
-  socket.onmessage = (msg) => render(JSON.parse(msg.data));
-  socket.onclose = () => { setConn("down", "已断开，重连中"); setTimeout(connect, 2000); };
+  socket.onopen = () => { socketLive = true; setConn("live", "实时"); };
+  socket.onmessage = (msg) => applyLocal(JSON.parse(msg.data));
+  socket.onclose = () => {
+    socketLive = false;
+    setConn("down", "已断开，重连中");
+    setTimeout(connect, 2000);
+  };
   socket.onerror = () => socket.close();
 }
 
@@ -406,6 +466,7 @@ $("config-save").addEventListener("click", async () => {
 });
 
 poll();
+setInterval(poll, CLUSTER_REFRESH);
 connect();
 enableActions();
 </script>

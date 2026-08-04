@@ -54,6 +54,29 @@ def test_status_reports_discovery_is_off(workspace: Path):
     assert "disabled" in result.output  # 默认静默是核心需求，冒烟测试盯住它
 
 
+def test_status_shows_peers_established_by_trust_not_only_configured_ones(workspace: Path):
+    """`peers trust` 建立的对端不写进 node.toml —— 只看配置就会报「未配置」。
+
+    这条命令是「为什么收不到消息」的第一站，报错了比不报还糟。
+    """
+    # Arrange
+    from anthill.discovery.registry import PeerRegistry
+    from anthill.security.keys import PairingToken, new_key
+
+    PeerRegistry(NodeLayout(workspace).root).trust(
+        PairingToken(node="lab", endpoint="http://10.0.8.21:45778", key=new_key())
+    )
+
+    # Act
+    result = runner.invoke(app, ["status", "-w", str(workspace)])
+
+    # Assert
+    assert result.exit_code == 0
+    assert "lab" in result.output
+    assert "已信任" in result.output
+    assert "未配置" not in result.output
+
+
 def test_agent_list_shows_configured_agents(workspace: Path):
     result = runner.invoke(app, ["agent", "list", "-w", str(workspace)])
 

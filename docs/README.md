@@ -18,7 +18,7 @@
 | [01-architecture.md](./01-architecture.md) | 总体架构：核心概念、分层设计、三种传输的统一模型 | 理解全局 |
 | [02-protocol.md](./02-protocol.md) | 通信协议：消息信封、邮箱目录规范、回执机制、可靠性设计 | 开发前必读 |
 | [03-tech-design.md](./03-tech-design.md) | 技术设计：技术选型、模块划分、Agent 内核、编排器、安全设计 | 开发时对照 |
-| [04-roadmap.md](./04-roadmap.md) | 里程碑与任务清单：M0–M6，每步的验收标准 | 排期用 |
+| [04-roadmap.md](./04-roadmap.md) | 里程碑与任务清单：M0–M8，每步的验收标准 | 排期用 |
 | [05-resume-interview.md](./05-resume-interview.md) | 简历写法与面试问答要点 | 秋招前复习 |
 
 ## 思想来源（借鉴映射）
