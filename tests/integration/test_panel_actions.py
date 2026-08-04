@@ -306,8 +306,10 @@ def test_panel_write_works_alongside_listening_for_other_machines(
     assert runner.invoke(cli_app, ["init", str(tmp_path), "--node-name", "n"]).exit_code == 0
 
     # Act
+    # --port 0 让端口预检拿一个空闲端口，测试就不依赖 45778 有没有被别的东西占着
     result = runner.invoke(
-        cli_app, ["serve", "--host", "0.0.0.0", "--panel-write", "-w", str(tmp_path)]
+        cli_app,
+        ["serve", "--host", "0.0.0.0", "--port", "0", "--panel-write", "-w", str(tmp_path)],
     )
 
     # Assert

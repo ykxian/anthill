@@ -319,6 +319,20 @@ def check_runtime(
         raise ConfigError("启动前检查未通过：\n  - " + "\n  - ".join(problems))
 
 
+def brain_of(agent: AgentSection) -> str:
+    """这个 Agent 的「大脑」是什么，给人看的一个词。
+
+    桥接 Agent 显示成 echo 会让人以为它不干活 —— 实际上它背后是一个人
+    （或一个常驻会话）。「在跑什么」是排查时第一眼看的东西，不能误导。
+    CLI 的 `agent list` 和面板共用这一份，免得再各写一遍、再各错一次。
+    """
+    if agent.bridge:
+        return "bridge"
+    if agent.command:
+        return agent.command[0]
+    return agent.provider or "echo"
+
+
 def default_node_toml(node_name: str) -> str:
     """`anthill init` 生成的模板。注释即文档，让人一眼知道能改什么。"""
     return f"""# AntHill 节点配置

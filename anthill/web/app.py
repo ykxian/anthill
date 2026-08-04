@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 from base64 import b64decode, b64encode
 from binascii import Error as BinasciiError
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -47,6 +47,7 @@ from anthill.core.ids import is_valid_id
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
+from anthill.core.workspace import ConfigRef, ensure_mailboxes
 from anthill.discovery.registry import PeerRecord, PeerRegistry
 from anthill.security.keys import PairingToken, fingerprint
 from anthill.security.pair_client import join as pair_join
@@ -81,6 +82,7 @@ from anthill.web.admin import (
     write_remote_config,
 )
 from anthill.web.admin import refuse_reason as _admin_refuse
+from anthill.web.agents import AgentSpec, add_agent, remove_agent, start_agent, stop_agent
 from anthill.web.chat import messages as chat_messages
 from anthill.web.chat import threads as chat_threads
 from anthill.web.cluster import ClusterCache, build_cluster, read_status
@@ -119,17 +121,25 @@ def create_app(
         lifespan=_lifespan,
     )
     app.state.cluster_cache = ClusterCache()
+
+    # node.toml 是运行期可改的（面板加 Agent、远端管理、人手动编辑），
+    # 所以不能一直捧着启动那一刻读到的那份 —— 见 ConfigRef 的说明
+    ref = ConfigRef(layout, config)
+
+    def cfg() -> Config:
+        return ref.current
+
     if panel:
-        _mount_panel(app, layout=layout, config=config, peers=peers, log=log)
+        _mount_panel(app, layout=layout, cfg=cfg, peers=peers, log=log)
     if panel and panel_writable:
-        _mount_panel_actions(app, layout=layout, config=config, peers=peers, log=log)
+        _mount_panel_actions(app, layout=layout, cfg=cfg, peers=peers, log=log)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
         """给对端探活用。只暴露公开信息：节点名与 Agent 名单，绝不含密钥或路径。"""
         return {
-            "node": config.node.name,
-            "agents": sorted(config.agents),
+            "node": cfg().node.name,
+            "agents": sorted(cfg().agents),
             "proto": Envelope.model_fields["proto"].default,
         }
 
@@ -166,7 +176,7 @@ def create_app(
         except SignatureError as exc:
             log.warn("summary.rejected", frm=x_anthill_node, reason=str(exc))
             raise HTTPException(status_code=401, detail=str(exc)) from exc
-        return read_status(layout, config, peers)
+        return read_status(layout, cfg(), peers)
 
     def _signed(path: str, node: str, ts: str, sig: str) -> None:
         """已信任对端 + 有效签名，两道都过才算数。和 /node/summary 同一套。"""
@@ -187,7 +197,7 @@ def create_app(
         x_anthill_sig: str = Header(default=""),
     ) -> dict[str, Any]:
         """把本机 node.toml 给已信任的对端看。需要 remote_admin 打开。"""
-        _admin_open(config, remote_admin)
+        _admin_open(cfg(), remote_admin)
         _signed(CONFIG_PATH, x_anthill_node, x_anthill_ts, x_anthill_sig)
         return read_remote_config(layout, by=x_anthill_node, log=log)
 
@@ -204,7 +214,7 @@ def create_app(
         Agent。所以它默认根本不存在（404），要机器主人显式打开；
         打开之后每一次读写都留审计日志。
         """
-        _admin_open(config, remote_admin)
+        _admin_open(cfg(), remote_admin)
         _signed(CONFIG_PATH, x_anthill_node, x_anthill_ts, x_anthill_sig)
         try:
             return write_remote_config(layout, body, by=x_anthill_node, log=log)
@@ -219,7 +229,7 @@ def create_app(
         窗口用过一次立刻作废：六位 PIN 经不起在线穷举，
         而 PAKE 保证离线穷举无从下手（线路上没有密钥，也没有密文）。
         """
-        return _pair_begin(layout, config, peers, log, body, endpoint=advertise)
+        return _pair_begin(layout, cfg(), peers, log, body, endpoint=advertise)
 
     @app.post(PAIR_CONFIRM_PATH)
     async def pair_confirm(body: PairConfirmRequest = Body(...)) -> dict[str, Any]:
@@ -238,7 +248,7 @@ def create_app(
         env = _parse(body)
         peer, key = _trusted_key(peers, env, log)
         _verify(env, key, log)
-        _check_recipient(env, config, log)
+        _check_recipient(env, cfg(), log)
         path = _deposit(env, layout, log)
         _learn_return_path(peers, peer, x_anthill_endpoint, log)
         log.info(
@@ -426,7 +436,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def _mount_panel(
-    app: FastAPI, *, layout: NodeLayout, config: Config, peers: PeerRegistry, log: EventLog
+    app: FastAPI,
+    *,
+    layout: NodeLayout,
+    cfg: Callable[[], Config],
+    peers: PeerRegistry,
+    log: EventLog,
 ) -> None:
     """面板的只读部分（03-tech-design §9）。
 
@@ -443,7 +458,7 @@ def _mount_panel(
 
     @app.get(f"{PANEL_PATH}/api/state")
     async def panel_state() -> dict[str, Any]:
-        return build_snapshot(layout, config, peers)
+        return build_snapshot(layout, cfg(), peers)
 
     @app.get(f"{PANEL_PATH}/api/cluster")
     async def panel_cluster(request: Request) -> dict[str, Any]:
@@ -455,7 +470,7 @@ def _mount_panel(
         页面拿到 403 会自动退回只看本机。
         """
         _local_only(request, what="总控视图")
-        return await build_cluster(layout, config, peers, log, request.app.state.cluster_cache)
+        return await build_cluster(layout, cfg(), peers, log, request.app.state.cluster_cache)
 
     @app.get(f"{PANEL_PATH}/api/chats")
     async def panel_chats(request: Request) -> dict[str, Any]:
@@ -476,14 +491,19 @@ def _mount_panel(
         await websocket.accept()
         try:
             while True:
-                await websocket.send_json(build_snapshot(layout, config, peers))
+                await websocket.send_json(build_snapshot(layout, cfg(), peers))
                 await asyncio.sleep(PANEL_REFRESH)
         except (WebSocketDisconnect, RuntimeError):
             return  # 页面关了，正常退出
 
 
 def _mount_panel_actions(
-    app: FastAPI, *, layout: NodeLayout, config: Config, peers: PeerRegistry, log: EventLog
+    app: FastAPI,
+    *,
+    layout: NodeLayout,
+    cfg: Callable[[], Config],
+    peers: PeerRegistry,
+    log: EventLog,
 ) -> None:
     """面板的写入口（`anthill serve --panel-write` 才挂）。
 
@@ -508,12 +528,12 @@ def _mount_panel_actions(
     @app.post(f"{PANEL_PATH}/api/run", status_code=202)
     async def panel_run(request: Request, body: RunRequest = Body(...)) -> dict[str, Any]:
         _guard(request)
-        return await _acted(start_run(layout, config, body, log))
+        return await _acted(start_run(layout, cfg(), body, log))
 
     @app.post(f"{PANEL_PATH}/api/send", status_code=202)
     async def panel_send(request: Request, body: SendRequest = Body(...)) -> dict[str, Any]:
         _guard(request)
-        return await _acted(send_message(layout, config, body, log))
+        return await _acted(send_message(layout, cfg(), body, log))
 
     @app.post(f"{PANEL_PATH}/api/pair/open", status_code=201)
     async def panel_pair_open(request: Request) -> dict[str, Any]:
@@ -533,8 +553,8 @@ def _mount_panel_actions(
         try:
             record = await pair_join(
                 base=pair_resolve(peers, body.target),
-                my_node=config.node.name,
-                my_endpoint=config.node.endpoint,
+                my_node=cfg().node.name,
+                my_endpoint=cfg().node.endpoint,
                 pin=body.pin,
                 peers=peers,
             )
@@ -542,14 +562,47 @@ def _mount_panel_actions(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, "node": record.node, "fingerprint": record.fingerprint}
 
+    @app.post(f"{PANEL_PATH}/api/agents", status_code=201)
+    async def panel_agent_add(request: Request, body: AgentSpec = Body(...)) -> dict[str, Any]:
+        """加一个 Agent。改的是 node.toml，所以走和手改配置一样的校验与备份。"""
+        _guard(request)
+        return _agent_edit(layout, cfg(), log, lambda fresh: add_agent(layout, fresh, body))
+
+    @app.delete(f"{PANEL_PATH}/api/agents/{{name}}")
+    async def panel_agent_remove(request: Request, name: str) -> dict[str, Any]:
+        _guard(request)
+        return _agent_edit(layout, cfg(), log, lambda fresh: remove_agent(layout, fresh, name))
+
+    @app.post(f"{PANEL_PATH}/api/agents/{{name}}/start", status_code=202)
+    async def panel_agent_start(request: Request, name: str) -> dict[str, Any]:
+        """在本机把这个 agentd 拉起来 —— 单机场景下这是最后一处非用终端不可的事。"""
+        _guard(request)
+        fresh = Config.load_from(layout)  # 可能刚在面板上加过 Agent
+        try:
+            result = start_agent(layout, fresh, name)
+        except AntHillError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        log.info("panel.agent_started", agent=name, pid=str(result.get("pid", "")))
+        return result
+
+    @app.post(f"{PANEL_PATH}/api/agents/{{name}}/stop", status_code=202)
+    async def panel_agent_stop(request: Request, name: str) -> dict[str, Any]:
+        _guard(request)
+        try:
+            result = stop_agent(layout, name)
+        except AntHillError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        log.info("panel.agent_stopped", agent=name)
+        return result
+
     @app.get(f"{PANEL_PATH}/api/config")
     async def panel_config(request: Request, node: str = "") -> dict[str, Any]:
         """`?node=` 指定哪台机器；留空就是本机。"""
         _guard(request)
-        if node and node != config.node.name:
-            return await _remote(remote_read_config(config, peers, node))
+        if node and node != cfg().node.name:
+            return await _remote(remote_read_config(cfg(), peers, node))
         try:
-            return {"node": config.node.name, **read_config(layout)}
+            return {"node": cfg().node.name, **read_config(layout)}
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"读不出配置：{exc}") from exc
 
@@ -558,13 +611,14 @@ def _mount_panel_actions(
         request: Request, body: RemoteConfigWrite = Body(...)
     ) -> dict[str, Any]:
         _guard(request)
-        if body.node and body.node != config.node.name:
-            return await _remote(remote_write_config(config, peers, body.node, body.text))
+        if body.node and body.node != cfg().node.name:
+            return await _remote(remote_write_config(cfg(), peers, body.node, body.text))
         try:
             result = write_config(layout, ConfigRequest(text=body.text))
         except AntHillError as exc:
             # 配置不合法就原样退回，磁盘一个字都不改
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ensure_mailboxes(layout, Config.load_from(layout))  # 手改着加了 Agent 也算
         log.info("panel.config_written")
         return result
 
@@ -584,6 +638,29 @@ class RemoteConfigWrite(BaseModel):
     text: str = Field(min_length=1, max_length=200_000)
     node: str = Field(default="", max_length=64)
     """改哪台机器的配置。留空 = 本机。"""
+
+
+def _agent_edit(
+    layout: NodeLayout,
+    config: Config,
+    log: EventLog,
+    build: Callable[[Config], dict[str, Any]],
+) -> dict[str, Any]:
+    """加/删 Agent 都是「算出新的 node.toml 文本，再走原来那条写配置的路」。
+
+    这样校验、备份、「不合法就磁盘一个字不动」三件事只有一份实现。
+    """
+    try:
+        fresh = Config.load_from(layout)  # 别拿启动时那份，中间可能被改过
+        result = build(fresh)
+        written = write_config(layout, ConfigRequest(text=str(result.pop("text"))))
+    except AntHillError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # 配置里有它就该能收它的信，别等那个 agentd 第一次启动
+    ensure_mailboxes(layout, Config.load_from(layout))
+    del config
+    log.info("panel.agents_changed", agent=str(result.get("name", "")))
+    return {**result, **written}
 
 
 async def _remote(coro: Any) -> dict[str, Any]:

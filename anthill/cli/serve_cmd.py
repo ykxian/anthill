@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import socket
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -19,11 +20,12 @@ from typing import Any
 import typer
 import uvicorn
 
-from anthill.cli.common import console, fail, load
+from anthill.cli.common import console, fail
 from anthill.core.config import Config
 from anthill.core.errors import AntHillError
 from anthill.core.logging import EventLog
 from anthill.core.paths import NodeLayout
+from anthill.core.workspace import load_or_create
 from anthill.discovery.beacon import Announcement, Beacon
 from anthill.discovery.registry import PeerRegistry
 from anthill.web.app import create_app
@@ -37,6 +39,24 @@ STATUS_INTERVAL = 5.0
 
 def is_loopback(host: str) -> bool:
     return host.strip().lower() in LOOPBACK
+
+
+def port_taken(host: str, port: int) -> str:
+    """开跑之前先探一下端口，占了就给一句人话。
+
+    不探的话，uvicorn 会自己 `sys.exit(3)` 并甩一行 `[Errno 98]` ——
+    退出码和其他命令对不上，也不会告诉人「换个 --port 就行」。
+    而「上一个 serve 还开着」恰恰是最常见的一种启动失败。
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        probe.bind((host, port))
+    except OSError as exc:
+        return f"{host}:{port} 绑不上（{exc.strerror or exc}）"
+    finally:
+        probe.close()
+    return ""
 
 
 def serve_command(
@@ -66,14 +86,24 @@ def serve_command(
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="只写日志文件，不在终端回显"),
 ) -> None:
-    """启动本节点的接收端。Ctrl-C 优雅退出。"""
-    layout, config = load(workspace)
+    """启动本节点的接收端。Ctrl-C 优雅退出。
+
+    **找不到工作区不会报错**：它会在当前目录（或 `-w` 指的目录）建一个然后继续 ——
+    新机器上装好就能直接开面板，不必先在终端跑一次 `anthill init`。
+    建在哪、叫什么名字都会打印出来。
+    """
+    layout, config, created = _load_or_init(workspace)
     log = EventLog(layout.log_file("serve"), agent=f"serve:{config.node.name}", echo=not quiet)
     try:
         peers = PeerRegistry(layout.root)
     except AntHillError as exc:
         log.close()
         fail(str(exc))
+
+    busy = port_taken(host, port)
+    if busy:
+        log.close()
+        fail(f"{busy}\n  多半是上一个 anthill serve 还开着；换个端口：--port {port + 1}")
 
     endpoint = advertise or f"http://{host}:{port}"
     # 面板默认只在回环上开：一旦 --host 0.0.0.0（为了让同网段投递进来），
@@ -83,6 +113,12 @@ def serve_command(
     if panel_write and not show_panel:
         log.close()
         fail("--panel-write 需要面板是开着的；去掉 --no-panel")
+    if created:
+        console.print(
+            f"[bold green]✓[/bold green] 没找到工作区，已在这里建了一个：[b]{layout.root}[/b]\n"
+            f"[dim]  节点名 {config.node.name}（取自主机名）· "
+            f"Agent {', '.join(config.agents)} · 之后可以在面板上加[/dim]"
+        )
     console.print(
         f"[bold green]▶[/bold green] {config.node.name} 接收端 [dim]{endpoint}[/dim]"
         + ("" if config.discovery.enabled else "  [dim]（discovery 未开启，不广播）[/dim]")
@@ -126,8 +162,31 @@ def serve_command(
         )
     except KeyboardInterrupt:
         console.print("\n[dim]已停止[/dim]")
+    except AntHillError as exc:
+        log.close()
+        fail(f"{exc}\n  端口被占的话，换一个：--port 45779")
     finally:
         log.close()
+
+
+def _load_or_init(workspace: Path | None) -> tuple[NodeLayout, Config, bool]:
+    """有工作区就用，没有就地建一个。
+
+    显式给了 `-w` 就用那个目录；否则先往上找（可能在项目根），
+    找不到才在当前目录建 —— 别因为你 cd 进了子目录就多建一个。
+    """
+    if workspace is not None:
+        layout = NodeLayout(workspace.resolve())
+    else:
+        try:
+            layout = NodeLayout.discover()
+        except AntHillError:
+            layout = NodeLayout(Path.cwd())
+    try:
+        config, created = load_or_create(layout)
+    except AntHillError as exc:
+        fail(str(exc))
+    return layout, config, created
 
 
 async def _serve(
@@ -202,24 +261,31 @@ async def _serve(
         for task in tasks:
             task.cancel()
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        _report_crashes(tasks, results, log)
+        crashed = _report_crashes(tasks, results, log)
         log.info("serve.stop")
+    if crashed:
+        # 起不来却退 0，脚本和 systemd 都会以为成功了 —— 端口被占是最常见的那种
+        raise AntHillError("；".join(crashed))
 
 
-def _report_crashes(tasks: list[asyncio.Task[Any]], results: list[Any], log: EventLog) -> None:
-    """哪个后台任务是**炸掉**才停的，要说出来。
+def _report_crashes(tasks: list[asyncio.Task[Any]], results: list[Any], log: EventLog) -> list[str]:
+    """哪个后台任务是**炸掉**才停的，要说出来，并且要让退出码反映出来。
 
     `gather(return_exceptions=True)` 会把异常连同 traceback 一起吞掉 ——
     不补这一句的话，某个循环崩了会表现成「serve 正常退出，退出码 0」，
-    盯着日志也看不出发生过什么。
+    盯着日志也看不出发生过什么。端口被占就是最常见的那一种。
     """
+    crashed = []
     for task, result in zip(tasks, results, strict=True):
         if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+            detail = f"{task.get_name()} 任务异常退出：{type(result).__name__}: {result}"
             log.error(
                 "serve.task_crashed",
                 task=task.get_name(),
                 error=f"{type(result).__name__}: {result}",
             )
+            crashed.append(detail)
+    return crashed
 
 
 async def _status_loop(

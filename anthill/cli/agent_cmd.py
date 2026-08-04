@@ -14,7 +14,7 @@ from rich.table import Table
 from anthill.agent.runtime import AgentRuntime
 from anthill.agent.tools.base import Confirmer
 from anthill.cli.common import console, fail, is_running, load
-from anthill.core.config import AgentSection
+from anthill.core.config import AgentSection, brain_of
 from anthill.core.errors import AntHillError
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
@@ -125,16 +125,9 @@ def list_agents(
 
 
 def _brain(agent: AgentSection) -> str:
-    """这个 Agent 的大脑是什么。
-
-    桥接 Agent 显示成 `echo` 会让人以为它不干活 —— 实际上它背后是一个人
-    （或一个常驻会话）。「在跑什么」这张表是排查时第一眼看的东西，不能误导。
-    """
-    if agent.bridge:
-        return "[cyan]bridge[/cyan]"
-    if agent.command:
-        return f"[cyan]{agent.command[0]}[/cyan]"
-    return agent.provider or "[dim]echo[/dim]"
+    """加点颜色；判定逻辑在 `core/config.brain_of`，和面板共用一份。"""
+    label = brain_of(agent)
+    return f"[dim]{label}[/dim]" if label == "echo" else f"[cyan]{label}[/cyan]"
 
 
 def _runtime_state(status_file: Path) -> tuple[bool, str]:

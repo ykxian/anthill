@@ -186,12 +186,29 @@ be tested on their own, or handed to "human agents" (which is exactly how this p
 - **Edit another machine's config from the panel** (`--remote-admin`): signed requests,
   same validation and backup as local edits, and every change is audited.
 
+**The panel is the control surface (M10)**
+
+- **Nothing to set up first**: `anthill serve` creates a workspace if there isn't one,
+  so you never have to run `anthill init` before you can open the panel.
+- **Add and remove agents from the panel** — it edits node.toml through the same
+  validation and backup path as a hand edit.
+- **Start and stop agentd from the panel** — the last thing that used to require a
+  terminal window per agent.
+
 ## Quick start
+
+One command; everything else happens in the panel:
 
 ```bash
 uv sync --all-groups --extra llm         # --extra llm installs the anthropic / openai SDKs
 
 mkdir demo && cd demo
+uv run anthill serve --panel-write       # no workspace? it makes one, then serves /panel
+```
+
+The CLI route still works:
+
+```bash
 uv run anthill init                      # creates the .anthill workspace
 
 # Terminal 1: start the echo agent

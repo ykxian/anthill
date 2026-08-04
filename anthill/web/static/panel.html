@@ -191,6 +191,12 @@ button[disabled] { opacity: 0.5; cursor: not-allowed; }
   padding: 6px 0 2px; font-weight: 700;
 }
 .node-head button { padding: 2px 8px; font-size: 11px; }
+.card .ops { display: flex; gap: 4px; opacity: 0; transition: opacity 120ms ease; }
+.card:hover .ops, .card:focus-within .ops { opacity: 1; }
+.card .ops button { padding: 1px 7px; font-size: 11px; }
+.add-agent { display: grid; gap: 6px; padding: 8px 10px; border-top: 1px dashed var(--line); }
+.add-agent .line { display: flex; gap: 6px; }
+.add-agent input, .add-agent select { flex: 1; min-width: 0; }
 
 /* ---- 配置抽屉 ---- */
 #config { grid-area: config; }
@@ -272,12 +278,22 @@ function setConn(state, text) {
   $("conn-text").textContent = text;
 }
 
-function agentCard(a) {
+function agentCard(a, node) {
+  // 只有本机的 Agent 能在这里启停 —— 别的机器上的进程不归这个面板管
+  const ops = node.local && canWrite
+    ? `<span class="ops">
+         <button class="ghost" type="button" data-agent="${esc(a.name)}"
+                 data-op="${a.running ? "stop" : "start"}">${a.running ? "停" : "启动"}</button>
+         ${a.running ? "" : `<button class="ghost" type="button"
+                 data-agent="${esc(a.name)}" data-op="remove">删</button>`}
+       </span>`
+    : "";
   return `
     <div class="card">
       <div class="row">
         <span class="dot ${a.running ? "on" : ""}"></span>
         <span class="name grow truncate">${esc(a.name)}</span>
+        ${ops}
         <span class="pill">${esc(a.role)}</span>
       </div>
       <div class="row meta">
@@ -286,6 +302,25 @@ function agentCard(a) {
         ${a.dead ? `<span class="pill bad">死信 ${esc(a.dead)}</span>` : ""}
       </div>
     </div>`;
+}
+
+function addAgentForm() {
+  return `
+    <form class="add-agent" id="add-agent">
+      <div class="line">
+        <input id="agent-name" placeholder="新 Agent 的名字" autocomplete="off" />
+        <select id="agent-brain">
+          <option value="echo">echo（只回显，用来跑通链路）</option>
+          <option value="bridge">bridge（你的 Claude Code 会话）</option>
+          <option value="command">command（claude -p 这类）</option>
+          <option value="provider">provider（自研 loop 接模型）</option>
+        </select>
+      </div>
+      <div class="line">
+        <input id="agent-extra" placeholder="命令行或 provider 名，echo/bridge 留空" autocomplete="off" />
+        <button type="submit">加上</button>
+      </div>
+    </form>`;
 }
 
 function renderTopo(nodes) {
@@ -304,9 +339,10 @@ function renderTopo(nodes) {
           : ""}
       </div>
       ${node.reachable
-        ? (node.agents || []).map(agentCard).join("") ||
+        ? (node.agents || []).map((a) => agentCard(a, node)).join("") ||
           `<div class="meta" style="padding:4px 10px">这个节点没有配置 Agent</div>`
         : `<div class="meta" style="padding:4px 10px">${esc(node.reason || "")}</div>`}
+      ${node.local && canWrite ? addAgentForm() : ""}
     </div>`).join("") || `<div class="empty">还没有配置 Agent</div>`;
 }
 
@@ -627,9 +663,45 @@ async function startPairing(target) {
 }
 
 document.addEventListener("click", (event) => {
-  const target = event.target.closest?.("[data-pair]");
-  if (target) startPairing(target.dataset.pair);
+  const pair = event.target.closest?.("[data-pair]");
+  if (pair) { startPairing(pair.dataset.pair); return; }
+  const op = event.target.closest?.("[data-agent]");
+  if (op) runAgentOp(op.dataset.agent, op.dataset.op, op);
 });
+
+// 拓扑是每次轮询重画的，表单不能在渲染时挂监听（会重复挂），改成事件委托
+document.addEventListener("submit", async (event) => {
+  if (event.target.id !== "add-agent") return;
+  event.preventDefault();
+  const name = $("agent-name").value.trim();
+  const brain = $("agent-brain").value;
+  const extra = $("agent-extra").value.trim();
+  if (!name) return;
+  const body = { name, brain };
+  if (brain === "command") body.command = extra;
+  if (brain === "provider") body.provider = extra;
+  try {
+    await api("panel/api/agents", { method: "POST", body: JSON.stringify(body) });
+    poll();
+  } catch (err) {
+    window.alert(String(err.message || err));
+  }
+});
+
+async function runAgentOp(name, op, button) {
+  if (op === "remove" && !window.confirm(`把 ${name} 从 node.toml 里删掉？`)) return;
+  button.disabled = true;
+  try {
+    if (op === "remove") await api(`panel/api/agents/${encodeURIComponent(name)}`, { method: "DELETE" });
+    else await api(`panel/api/agents/${encodeURIComponent(name)}/${op}`, { method: "POST" });
+    // 启停要几百毫秒才在 runtime.json 上体现出来，等一拍再刷
+    setTimeout(poll, 700);
+  } catch (err) {
+    window.alert(String(err.message || err));
+  } finally {
+    button.disabled = false;
+  }
+}
 
 $("run-form").addEventListener("submit", async (event) => {
   event.preventDefault();

@@ -25,6 +25,7 @@ const blank = () => ({
   scrollTop: 0,
   scrollHeight: 0,
   clientHeight: 0,
+  dataset: {},
   addEventListener() {},
 });
 const $ = (id) => {
@@ -37,7 +38,7 @@ const document = {
   querySelectorAll: () => [],
   addEventListener() {},
 };
-const window = { prompt: () => null, alert() {} };
+const window = { prompt: () => null, alert() {}, confirm: () => false };
 const location = { protocol: "http:", host: "panel.test", pathname: "/panel" };
 const fetch = async () => {
   throw new Error("测试里不连网");
@@ -57,7 +58,9 @@ const panel = new Function(
   "WebSocket",
   "setInterval",
   "setTimeout",
-  `${script}\nreturn { state, applyCluster, applyLocal };`,
+  // setWrite：写权限开着时拓扑会多画启停/删除按钮和「加 Agent」表单，
+  // 那几处也把外部数据拼进了 HTML，必须一起验
+  `${script}\nreturn { state, applyCluster, applyLocal, setWrite: (v) => { canWrite = v; } };`,
 )(document, window, location, fetch, WebSocket, noop, noop);
 
 // ---- 数据 ----
@@ -209,13 +212,15 @@ assert.ok(
 
 // XSS：整份 payload 都来自对端的 status.json，每一个插值点都是外部数据
 const EVIL = "<img src=x onerror=alert(1)>";
+panel.setWrite(true);
 panel.applyCluster({
   node: "x",
   nodes: [
     {
-      // 连得上的那台：Agent 卡片只在 reachable 时才画
+      // 连得上的那台：Agent 卡片只在 reachable 时才画。
+      // local:true 还会多画启停按钮那一条分支，把 Agent 名拼进 data 属性
       node: EVIL,
-      local: false,
+      local: true,
       reachable: true,
       agents: [
         {

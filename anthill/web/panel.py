@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from anthill.core.config import Config
+from anthill.core.config import Config, brain_of
 from anthill.core.logging import read_log
 from anthill.core.mailbox import Mailbox
 from anthill.core.outbox import Outbox
@@ -75,7 +75,7 @@ def _agents(layout: NodeLayout, config: Config) -> list[dict[str, Any]]:
             {
                 "name": name,
                 "role": agent.role,
-                "provider": agent.provider or "echo",
+                "provider": brain_of(agent),
                 "running": running,
                 "watch_mode": watch_mode,
                 "queue": len(mailbox.list_new()) if mailbox.exists else 0,

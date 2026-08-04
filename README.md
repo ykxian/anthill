@@ -47,7 +47,7 @@ flowchart LR
 依赖方向严格自上而下。**L1/L2 完全不含任何 LLM 逻辑**，可以单独测试，
 甚至单独拿去给「人肉 Agent」用 —— 这个项目最早就是那么开始的。
 
-## 现在能跑什么（M0 – M9）
+## 现在能跑什么（M0 – M10）
 
 **通信底座（M0/M1）**
 
@@ -123,7 +123,7 @@ flowchart LR
   （每步状态与交付）、合并后的实时消息流。单页 HTML + 原生 JS + WebSocket，
   **无构建链、无外部资源** —— 没外网的服务器上也能打开
 - ✅ 面板**默认只在绑回环时开启**：一旦 `--host 0.0.0.0`，它会跟着暴露给整个网段
-- ✅ 中英文 README、CHANGELOG、MIT LICENSE；631 个测试，覆盖率 86%
+- ✅ 中英文 README、CHANGELOG、MIT LICENSE；657 个测试，覆盖率 87%
 
 **接已有终端、对话、面板可写（M7）**
 
@@ -164,19 +164,33 @@ flowchart LR
 - ✅ **面板能配别的机器**（`--remote-admin`）：配置抽屉多一个「哪台机器」，
   读写走签名请求、留备份、每一次都写审计日志
 
+**面板即控制面（M10）**
+
+- ✅ **装好就能用**：`anthill serve` 找不到工作区会自己建一个，
+  不必先在终端跑 `anthill init`
+- ✅ **在面板上加 / 删 Agent**：选个大脑类型就行，改的是 node.toml，
+  走同一套校验与备份
+- ✅ **在面板上启 / 停 agentd**：单机场景下最后一处非用终端不可的事没有了
+
 ## 快速开始
+
+一条命令，剩下的都在面板上做：
 
 ```bash
 uv sync --all-groups --extra llm         # --extra llm 装 anthropic / openai SDK
 
 mkdir demo && cd demo
-uv run anthill init                     # 建 .anthill 工作区
+uv run anthill serve --panel-write       # 没有工作区？它自己建。然后开 127.0.0.1:45778/panel
+```
 
-# 终端 1：把 echo agent 跑起来
-uv run anthill agent start echo
+面板上就能加 Agent、把它启动起来、给它派活、跟它对话。
 
-# 终端 2：投一条任务，等回执与结果
-uv run anthill send echo "为 utils/date.py 补齐单元测试" --wait 8
+想用命令行也一样：
+
+```bash
+uv run anthill init                     # 显式指定建在哪、叫什么名字
+uv run anthill agent start echo         # 终端 1
+uv run anthill send echo "为 utils/date.py 补齐单元测试" --wait 8   # 终端 2
 ```
 
 预期输出：

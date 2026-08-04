@@ -264,6 +264,12 @@ LAN peer 走 `GET /node/summary`，SSH peer 直接 SFTP 读，
 `/panel/api/cluster` 与对话接口都逐请求校验来源是回环：前者是个有副作用的 GET
 又把所有对端的状态汇到一处，后者给出的是对话内容。页面拿到 403 会自动退回只看本机。
 
+**面板即控制面（M10）**：`serve` 找不到工作区会自己建一个（`core/workspace.py`），
+面板上能加/删 Agent、启/停 agentd —— 单机不必再开终端。
+配套一件必须做对的事：**node.toml 从此是运行期可变的**，
+所以 serve 不能再捧着启动时那份（`ConfigRef` 按 mtime 重载）——
+否则新加的 Agent 既不出现在面板上，`/deliver` 也会拿旧 config 判它不存在。
+
 **面板对话（M9）**：选一个 Agent 就是一个会话，接着同一个 thread 往下说。
 一个会话 = 「本机记的发件」+「cli 邮箱里这个 thread 的来信」——
 收到的信在邮箱里，**发出去的信不在**（它被投到对方邮箱去了），所以发的时候要自己记一笔。
