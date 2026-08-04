@@ -3,6 +3,36 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 版本号对应 [docs/04-roadmap.md](./docs/04-roadmap.md) 里的里程碑。
 
+## [0.8] · M7 接入已有终端、Agent 对话、面板可写
+
+### 新增
+
+- **把 Claude Code 这类终端接进来**（`adapters/cli_agent.py`）：它们都是
+  「给一段 prompt、吐一段结果」的命令行程序，配 `command = ["claude", "-p"]` 即可。
+  对 runtime 只是又一个 handler。刻意与 LLM handler 保持一致：来件同样包不可信
+  定界块、同样按 thread 落盘历史（外来 CLI 每次都是新进程，自己不记事）、
+  同样超时杀进程组。结构化交付「能给最好，不给也不影响用」。
+- **Agent 之间真的能对话**（`agent/conversation.py`）：带 @ 的对话，回信发给被 @
+  的那个人并把自己 @ 回去，球就在两人之间来回；终止靠按 thread 计的 `chat_turns`
+  预算（默认 6），**确定性**，不依赖模型自觉说「我说完了」，也不拿 hops 当刹车。
+  配套 `anthill chat <agent>`（人跟 Agent 多轮聊）与 `anthill talk <a> <b> <话题>`。
+- **面板可写**（`anthill serve --panel-write`）：发起任务、给 Agent 发消息、
+  在线改 node.toml（保存前用同一套 pydantic 模型校验，不合法磁盘一个字都不改，
+  并留 `node.toml.bak`）。
+
+### 修复
+
+- **模型纯文本回复时，它自己说的话没进 thread 记忆** —— 多轮对话里 Agent 记得
+  别人说过什么，却不记得自己说过什么，会变成单方面复读。
+- **coordinator 在「结果已发出、状态还没存」之间被 Ctrl-C，重启后会再给用户发一遍
+  最终结果。** 改成先落盘再发送 —— 和 Sender 同一条原则。
+
+### 安全
+
+- 写权限 ≈ 在这台机器上执行命令（能改配置就能加一个带 `run_shell` 的 Agent），
+  所以两道闸缺一不可：显式开关（默认关）+ **逐请求**校验来源是回环地址。
+  `--panel-write` 配非回环地址直接拒绝启动。确认与审批仍然只在 CLI。
+
 ## [0.7] · M6 面板与打磨
 
 ### 新增

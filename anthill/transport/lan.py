@@ -21,7 +21,7 @@ from anthill.core.logging import EventLog
 from anthill.discovery.registry import PeerRegistry
 from anthill.security.signing import sign_envelope
 from anthill.transport.base import DeliveryResult, Destination, Transport
-from anthill.web.app import DELIVER_PATH
+from anthill.web.endpoints import DELIVER_PATH
 
 DEFAULT_TIMEOUT = 15.0
 FATAL_STATUS = frozenset({400, 401, 403, 404, 421})

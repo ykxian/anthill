@@ -43,6 +43,11 @@ def serve_command(
     panel: bool | None = typer.Option(
         None, "--panel/--no-panel", help="只读面板；默认只在绑回环时开启"
     ),
+    panel_write: bool = typer.Option(
+        False,
+        "--panel-write",
+        help="允许面板发起任务与改配置；只能配合回环地址使用",
+    ),
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="只写日志文件，不在终端回显"),
 ) -> None:
@@ -59,6 +64,13 @@ def serve_command(
     # 面板默认只在回环上开：一旦 --host 0.0.0.0（为了让同网段投递进来），
     # 面板就会跟着暴露给整个网段。要那样必须显式 --panel，不给默认踩坑的机会。
     show_panel = is_loopback(host) if panel is None else panel
+    if panel_write and not is_loopback(host):
+        # 能改配置 ≈ 能在这台机器上执行命令。这种权限不该跟着 --host 0.0.0.0 一起对外
+        log.close()
+        fail(f"--panel-write 只能配合回环地址使用，当前 --host {host}")
+    if panel_write and not show_panel:
+        log.close()
+        fail("--panel-write 需要面板是开着的；去掉 --no-panel")
     console.print(
         f"[bold green]▶[/bold green] {config.node.name} 接收端 [dim]{endpoint}[/dim]"
         + ("" if config.discovery.enabled else "  [dim]（discovery 未开启，不广播）[/dim]")
@@ -66,7 +78,8 @@ def serve_command(
     if host == DEFAULT_HOST:
         console.print("[dim]只绑回环；要让同网段的机器投递进来，用 --host 0.0.0.0[/dim]")
     if show_panel:
-        console.print(f"[bold]面板[/bold] {endpoint}/panel [dim]（只读）[/dim]")
+        mode = "可发起任务与改配置" if panel_write else "只读"
+        console.print(f"[bold]面板[/bold] {endpoint}/panel [dim]（{mode}）[/dim]")
     elif panel is None:
         console.print("[dim]面板已关闭：绑的不是回环地址；确实要开就加 --panel[/dim]")
 
@@ -81,6 +94,7 @@ def serve_command(
                 port=port,
                 endpoint=endpoint,
                 panel=show_panel,
+                panel_write=panel_write,
             )
         )
     except KeyboardInterrupt:
@@ -99,6 +113,7 @@ async def _serve(
     port: int,
     endpoint: str,
     panel: bool = False,
+    panel_write: bool = False,
 ) -> None:
     app = create_app(
         layout=layout,  # type: ignore[arg-type]
@@ -106,6 +121,7 @@ async def _serve(
         peers=peers,
         log=log,
         panel=panel,
+        panel_writable=panel_write,
     )
     server = uvicorn.Server(
         uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False)

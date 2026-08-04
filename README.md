@@ -46,7 +46,7 @@ flowchart LR
 依赖方向严格自上而下。**L1/L2 完全不含任何 LLM 逻辑**，可以单独测试，
 甚至单独拿去给「人肉 Agent」用 —— 这个项目最早就是那么开始的。
 
-## 现在能跑什么（M0 – M6，全部里程碑）
+## 现在能跑什么（M0 – M7）
 
 **通信底座（M0/M1）**
 
@@ -123,7 +123,16 @@ flowchart LR
 - ✅ 面板**默认只在绑回环时开启**：一旦 `--host 0.0.0.0`，它会跟着暴露给整个网段
 - ✅ 中英文 README、CHANGELOG、MIT LICENSE；测试覆盖率 88%
 
-六个里程碑全部完成。
+**接已有终端、对话、面板可写（M7）**
+
+- ✅ **把 Claude Code 这类终端接进来**：配一行 `command = ["claude", "-p"]` 就行。
+  对 runtime 只是又一个 handler —— 接一个新终端不用改 agentd 一行代码
+- ✅ **Agent 之间真的能对话**：带 @ 的对话回信发给被 @ 的那个人（而不是发回给发起人），
+  球在两人之间来回；终止靠按 thread 计的轮次预算，**确定性**，不靠模型自觉、
+  也不拿 hops 熔断当刹车
+- ✅ **`anthill chat` / `anthill talk`**：人跟 Agent 多轮聊；让两个 Agent 就一件事聊，你旁观
+- ✅ **面板可写**（`--panel-write`）：发起任务、发消息、在线改 node.toml
+  （保存前用同一套模型校验，不合法磁盘一个字都不改，并留备份）
 
 ## 快速开始
 
@@ -330,6 +339,62 @@ uv run anthill serve            # 面板在 http://127.0.0.1:45778/panel
 它的数据源全部是 `.anthill/` 下的文件 —— 因为一个节点上跑着好几个进程，
 内存里的 event bus 跨不过进程边界。
 
+### 把已有的终端 Agent 接进来（M7）
+
+Claude Code、Codex、aider 这些本质上都是「给一段 prompt、吐一段结果」的命令行程序：
+
+```toml
+[agents.cc]
+role = "worker"
+command = ["claude", "-p"]     # 有 command 就走适配器，不需要 provider
+command_timeout = 900.0
+```
+
+```bash
+uv run anthill agent start cc
+uv run anthill send cc "看看 utils/date.py 有没有边界问题"
+```
+
+它和自研 Agent 守同样的规矩：来件包在不可信定界块里、按 thread 记上下文
+（外来 CLI 每次都是新进程，自己不记事）、超时杀整个进程组。
+**但工具与策略引擎管不到它** —— Claude Code 有自己的权限体系，
+AntHill 不代管：你给它什么权限，它就有什么权限。
+
+### 让 Agent 之间对话（M7）
+
+```bash
+uv run anthill chat coder                      # 人跟 Agent 多轮聊，同一个 thread
+uv run anthill talk coder reviewer "这个 bug 该怎么修"   # 两个 Agent 聊，你旁观
+```
+
+```text
+▶ coder ⇄ reviewer  thread=8K2M1P
+这个 bug 该怎么修
+
+coder    → reviewer  我倾向在入口处加一层校验……
+reviewer → coder     校验能挡住，但根因在缓存失效……
+coder    → reviewer  那就两处都改，我先写
+安静了一会儿，对话应该结束了
+```
+
+对话怎么停下来？**按 thread 数轮次**（`chat_turns`，默认 6），是确定性的 ——
+不依赖模型自觉说「我说完了」，也不拿 hops 熔断当刹车（那是协议层的兜底，
+一响就说明出事了）。
+
+### 面板上直接干活（M7）
+
+```bash
+uv run anthill serve --panel-write     # 只能配合回环地址，绑 0.0.0.0 会直接拒绝启动
+```
+
+面板上就能发起任务、给 Agent 发消息、在线改 `node.toml`（保存前会用启动期同一套
+规则校验，不合法磁盘一个字都不改，并把上一版存成 `node.toml.bak`）。
+
+写权限 ≈ 在这台机器上执行命令（能改配置就能加一个带 `run_shell` 的 Agent），
+所以两道闸缺一不可：**显式开关**（默认关）+ **逐请求校验来源是回环地址** ——
+不是「我们没绑 0.0.0.0 所以应该安全」，反向代理或端口转发会让那个假设悄悄失效。
+危险操作的确认仍然只在 CLI。
+
 ### 其他常用命令
 
 ```bash
@@ -361,8 +426,10 @@ anthill/
 │   ├── loop.py    #   ReAct 工具循环（步数 + token 双熔断）
 │   ├── context.py #   上下文组装：不可信包裹 + 黑板 + token 预算
 │   ├── memory.py  #   thread 历史落盘与摘要压缩
+│   ├── conversation.py #  对话规则：@ 谁回给谁、轮次到顶就不接话
 │   └── tools/     #   read_file / write_file / list_dir / run_shell / send_message / finish
 ├── orchestrator/  # 编排：plan（计划 DAG）/ state（运行状态机）/ board / coordinator
+├── adapters/      # 把已有的终端 Agent（Claude Code 等）接成 AntHill Agent
 └── cli/           # typer 命令
 
 工作区（运行时生成）

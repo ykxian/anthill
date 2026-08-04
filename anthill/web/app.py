@@ -18,22 +18,45 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Body,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 
 from anthill.core.config import Config
 from anthill.core.envelope import Envelope
-from anthill.core.errors import MailboxError, PeerError, ProtocolError, SignatureError
+from anthill.core.errors import (
+    AntHillError,
+    MailboxError,
+    PeerError,
+    ProtocolError,
+    SignatureError,
+)
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
 from anthill.discovery.registry import PeerRecord, PeerRegistry
 from anthill.security.signing import verify_envelope
+from anthill.web.actions import (
+    ConfigRequest,
+    RunRequest,
+    SendRequest,
+    is_local_client,
+    read_config,
+    send_message,
+    start_run,
+    write_config,
+)
+from anthill.web.endpoints import DELIVER_PATH, PANEL_PATH
 from anthill.web.panel import build_snapshot
 
-DELIVER_PATH = "/deliver"
-PANEL_PATH = "/panel"
 PANEL_HTML = Path(__file__).parent / "static" / "panel.html"
 PANEL_REFRESH = 2.0
 
@@ -45,10 +68,13 @@ def create_app(
     peers: PeerRegistry,
     log: EventLog,
     panel: bool = False,
+    panel_writable: bool = False,
 ) -> FastAPI:
     app = FastAPI(title=f"anthill:{config.node.name}", docs_url=None, redoc_url=None)
     if panel:
         _mount_panel(app, layout=layout, config=config, peers=peers)
+    if panel and panel_writable:
+        _mount_panel_actions(app, layout=layout, config=config, log=log)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -150,11 +176,10 @@ def _deposit(env: Envelope, layout: NodeLayout, log: EventLog) -> Any:
 
 
 def _mount_panel(app: FastAPI, *, layout: NodeLayout, config: Config, peers: PeerRegistry) -> None:
-    """只读面板（03-tech-design §9）。
+    """面板的只读部分（03-tech-design §9）。
 
-    **只读**是刻意的：确认、审批、派活一律留在 CLI。面板不提供任何写入口，
-    它就没法成为攻击面 —— 一个只会 `GET` 的页面，最坏也就是被人看到状态。
-    调用方还会把它限制在回环地址上（见 serve_cmd）。
+    默认就只有这些 `GET` —— 一个只会读的页面，最坏也就是被人看到状态。
+    写入口是另外挂的（`_mount_panel_actions`），默认不开。
     """
 
     @app.get(PANEL_PATH, response_class=HTMLResponse)
@@ -178,3 +203,58 @@ def _mount_panel(app: FastAPI, *, layout: NodeLayout, config: Config, peers: Pee
                 await asyncio.sleep(PANEL_REFRESH)
         except (WebSocketDisconnect, RuntimeError):
             return  # 页面关了，正常退出
+
+
+def _mount_panel_actions(
+    app: FastAPI, *, layout: NodeLayout, config: Config, log: EventLog
+) -> None:
+    """面板的写入口（`anthill serve --panel-write` 才挂）。
+
+    **逐请求校验来源是回环**，而不是依赖「我们绑的是 127.0.0.1 所以应该安全」——
+    反向代理、端口转发、配置写错，任何一种都会让那个假设悄悄失效。
+    能改配置 ≈ 能在这台机器上执行命令，这个前提值得多一道显式检查。
+
+    确认与审批仍然只在 CLI：面板能发起任务，但不能替你批准危险操作。
+    """
+
+    def _guard(request: Request) -> None:
+        if not is_local_client(request.client.host if request.client else None):
+            raise HTTPException(status_code=403, detail="面板的写操作只允许本机访问")
+
+    @app.post(f"{PANEL_PATH}/api/run", status_code=202)
+    async def panel_run(request: Request, body: RunRequest = Body(...)) -> dict[str, Any]:
+        _guard(request)
+        return await _acted(start_run(layout, config, body, log))
+
+    @app.post(f"{PANEL_PATH}/api/send", status_code=202)
+    async def panel_send(request: Request, body: SendRequest = Body(...)) -> dict[str, Any]:
+        _guard(request)
+        return await _acted(send_message(layout, config, body, log))
+
+    @app.get(f"{PANEL_PATH}/api/config")
+    async def panel_config(request: Request) -> dict[str, Any]:
+        _guard(request)
+        try:
+            return read_config(layout)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"读不出配置：{exc}") from exc
+
+    @app.put(f"{PANEL_PATH}/api/config")
+    async def panel_config_write(
+        request: Request, body: ConfigRequest = Body(...)
+    ) -> dict[str, Any]:
+        _guard(request)
+        try:
+            result = write_config(layout, body)
+        except AntHillError as exc:
+            # 配置不合法就原样退回，磁盘一个字都不改
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        log.info("panel.config_written")
+        return result
+
+
+async def _acted(coro: Any) -> dict[str, Any]:
+    try:
+        return await coro  # type: ignore[no-any-return]
+    except AntHillError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

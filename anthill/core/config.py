@@ -340,6 +340,14 @@ role = "worker"
 # role = "reviewer"
 # provider = "deepseek"
 # tools = ["read_file", "list_dir", "send_message", "finish"]
+#
+# ---- 把已有的终端 Agent 接进来（Claude Code / Codex / aider…）----
+# 有 command 就走适配器，不需要 provider；它自己的权限体系我们不代管。
+# [agents.cc]
+# role = "worker"
+# command = ["claude", "-p"]
+# command_timeout = 900.0
+# chat_turns = 6         # 同一话题最多接几轮，防止两个 Agent 聊不完
 
 # 给上面的 coordinator 配一个 provider，它就会拆解任务、按依赖派活、汇总结果：
 #   anthill run "给 utils/date.py 补单测，并让 reviewer 过一遍"
