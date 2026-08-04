@@ -18,7 +18,7 @@
 | [01-architecture.md](./01-architecture.md) | 总体架构：核心概念、分层设计、三种传输的统一模型 | 理解全局 |
 | [02-protocol.md](./02-protocol.md) | 通信协议：消息信封、邮箱目录规范、回执机制、可靠性设计 | 开发前必读 |
 | [03-tech-design.md](./03-tech-design.md) | 技术设计：技术选型、模块划分、Agent 内核、编排器、安全设计 | 开发时对照 |
-| [04-roadmap.md](./04-roadmap.md) | 里程碑与任务清单：M0–M8，每步的验收标准 | 排期用 |
+| [04-roadmap.md](./04-roadmap.md) | 里程碑与任务清单：M0–M9，每步的验收标准 | 排期用 |
 | [05-resume-interview.md](./05-resume-interview.md) | 简历写法与面试问答要点 | 秋招前复习 |
 
 ## 思想来源（借鉴映射）
@@ -37,7 +37,8 @@
    让 Claude Code 这类现成 CLI 也能作为一种 Agent 挂进邮箱网络。
 3. **一切皆邮箱**：三种传输（同机文件 / 局域网 / SSH）只负责"把信封文件送达对方邮箱目录"，
    Agent 消费消息的方式完全一致 —— 这是整个架构最漂亮的一层抽象。
-4. **默认不广播**：LAN 发现是显式 opt-in，且有 allowlist + 消息签名，
+4. **可见 ≠ 可通信**：同网段能互相看见（可关成零发包零监听），
+   但互投消息必须先人工配对；配对后每条消息都签名，
    避免一台机器上的多个 Agent 互相干扰。
 5. **多模型接入**：Anthropic SDK + OpenAI 兼容接口（覆盖 OpenAI/DeepSeek/Qwen/GLM），
    不同角色可配置不同模型（如 DeepSeek 写码、Claude 审查）。

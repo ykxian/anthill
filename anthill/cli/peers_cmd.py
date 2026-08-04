@@ -1,11 +1,14 @@
 """`anthill peers list / invite / trust / forget`。
 
-配对流程（借鉴 SSH 的 known_hosts，但密钥要带外交换）：
+配对有两条路，都要人在两边各看一眼（TOFU 的核对点）：
 
-    # 服务器上
-    anthill peers invite laptop          → 打印一串配对令牌
-    # 笔记本上（令牌通过你已经信任的通道传过来）
-    anthill peers trust --token <令牌>   → 核对指纹后写入 peers 列表
+    # 推荐：六位 PIN，密钥双方各自推导，不上网线（见 security/pairing.py）
+    A 机  anthill peers pair
+    B 机  anthill peers pair --to A --pin 428193
+
+    # 老办法：令牌里含密钥明文，必须走一条你已经信任的通道传
+    A 机  anthill peers invite laptop          → 打印一串配对令牌
+    B 机  anthill peers trust --token <令牌>
 """
 
 from __future__ import annotations
@@ -16,11 +19,13 @@ import typer
 from rich.table import Table
 
 from anthill.cli.common import console, fail, load
+from anthill.cli.pair_cmd import pair_command
 from anthill.core.errors import AntHillError
 from anthill.discovery.registry import PeerRegistry
 from anthill.security.keys import PairingToken, new_key
 
 peers_app = typer.Typer(no_args_is_help=True, help="对端节点与信任关系")
+peers_app.command("pair")(pair_command)
 
 DEFAULT_HTTP_PORT = 45778
 

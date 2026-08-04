@@ -24,9 +24,9 @@ def status_command(
     layout, config = load(workspace)
 
     discovery = (
-        "[yellow]enabled[/yellow]"
+        "[green]enabled（同网段可见；互投消息仍需配对）[/green]"
         if config.discovery.enabled
-        else "[green]disabled（默认静默）[/green]"
+        else "[dim]disabled（完全静默：不发包不监听）[/dim]"
     )
     console.print(
         Panel(

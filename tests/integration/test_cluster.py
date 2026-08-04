@@ -295,14 +295,22 @@ async def test_an_unreachable_peer_is_marked_not_hidden_and_does_not_block(
     assert cluster["nodes"][0]["reachable"] is True  # 本机照常
 
 
-async def test_untrusted_peers_are_not_fetched(local: Bundle) -> None:
-    """发现 ≠ 可通信，也 ≠ 可以去读它的状态。"""
+async def test_untrusted_peers_are_listed_but_never_read_from(local: Bundle) -> None:
+    """发现 ≠ 可通信，也 ≠ 可以去读它的状态。
+
+    列出来是为了让人一眼看到「这台可以配对」，但**一个字节都不去取**。
+    判据：真去连了的话，理由会是 ConnectError（那个端口没人听）。
+    """
     layout, config, peers = local
     peers.observe(node="stranger", endpoint="http://127.0.0.1:1", agents=())
 
     cluster = await build_cluster(layout, config, peers, quiet_log())
 
-    assert [n["node"] for n in cluster["nodes"]] == ["laptop"]
+    stranger = next(n for n in cluster["nodes"] if n["node"] == "stranger")
+    assert stranger["pairable"] is True
+    assert stranger["reachable"] is False
+    assert "还没配对" in stranger["reason"]
+    assert "ConnectError" not in stranger["reason"]
 
 
 async def test_a_second_look_at_a_dead_peer_comes_from_cache(local: Bundle) -> None:

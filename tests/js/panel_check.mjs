@@ -31,7 +31,13 @@ const $ = (id) => {
   if (!elements.has(id)) elements.set(id, blank());
   return elements.get(id);
 };
-const document = { getElementById: $, title: "" };
+const document = {
+  getElementById: $,
+  title: "",
+  querySelectorAll: () => [],
+  addEventListener() {},
+};
+const window = { prompt: () => null, alert() {} };
 const location = { protocol: "http:", host: "panel.test", pathname: "/panel" };
 const fetch = async () => {
   throw new Error("测试里不连网");
@@ -45,13 +51,14 @@ const noop = () => 0;
 
 const panel = new Function(
   "document",
+  "window",
   "location",
   "fetch",
   "WebSocket",
   "setInterval",
   "setTimeout",
   `${script}\nreturn { state, applyCluster, applyLocal };`,
-)(document, location, fetch, WebSocket, noop, noop);
+)(document, window, location, fetch, WebSocket, noop, noop);
 
 // ---- 数据 ----
 
@@ -151,12 +158,31 @@ for (const name of ["laptop", "lab", "server"]) {
   assert.ok(topo.includes(name), `拓扑里少了节点 ${name}`);
 }
 assert.ok(topo.includes("连不上"), "连不上的节点没有标出来");
+
 assert.ok(topo.includes("All connection attempts failed"), "没有告诉人连不上的原因");
 assert.ok($("runs-body").innerHTML.includes("lab"), "编排任务没标出它跑在哪台机器上");
 
 const stream = $("stream-body").innerHTML;
 assert.ok(stream.includes("serve.start") && stream.includes("msg.received"), "事件没有跨节点汇总");
 assert.equal($("topo-count").textContent, "3 个节点 · 2/2 在跑");
+
+// 只是「见过」的节点也该出现在拓扑里，好让人知道它可以配对
+panel.applyCluster({
+  node: "laptop",
+  nodes: [
+    { node: "laptop", local: true, reachable: true, agents: [] },
+    {
+      node: "陌生的",
+      local: false,
+      reachable: false,
+      pairable: true,
+      reason: "见过，还没配对",
+      agents: [],
+    },
+  ],
+});
+assert.ok($("topo-body").innerHTML.includes("陌生的"), "见过但没配对的节点没显示出来");
+panel.applyCluster(CLUSTER);
 
 // 跨零点：事件按完整时间戳排，不能按显示用的 HH:MM:SS
 panel.applyCluster({

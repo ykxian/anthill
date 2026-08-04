@@ -53,6 +53,11 @@ def serve_command(
         "--panel-write",
         help="允许面板发起任务与改配置；只能配合回环地址使用",
     ),
+    remote_admin: bool = typer.Option(
+        False,
+        "--remote-admin",
+        help="允许已信任的对端在它的面板上直接改本机 node.toml（≈ 让它能在本机执行命令）",
+    ),
     summary: bool = typer.Option(
         True,
         "--summary/--no-summary",
@@ -94,6 +99,11 @@ def serve_command(
         console.print("[dim]面板已关闭：绑的不是回环地址；确实要开就加 --panel[/dim]")
     if not summary:
         console.print("[dim]不共享状态：别人的总控面板会把本机显示成不可用[/dim]")
+    if remote_admin or config.security.remote_admin:
+        console.print(
+            "[yellow]远端管理已开[/yellow]：已信任的对端可以直接改本机 node.toml "
+            "[dim]—— 这约等于让它能在本机执行命令[/dim]"
+        )
 
     try:
         asyncio.run(
@@ -108,6 +118,7 @@ def serve_command(
                 panel=show_panel,
                 panel_write=panel_write,
                 summary=summary,
+                remote_admin=remote_admin,
             )
         )
     except KeyboardInterrupt:
@@ -128,6 +139,7 @@ async def _serve(
     panel: bool = False,
     panel_write: bool = False,
     summary: bool = True,
+    remote_admin: bool = False,
 ) -> None:
     app = create_app(
         layout=layout,
@@ -137,6 +149,8 @@ async def _serve(
         panel=panel,
         panel_writable=panel_write,
         summary=summary,
+        advertise=endpoint,
+        remote_admin=remote_admin or config.security.remote_admin,
     )
     server = uvicorn.Server(
         uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False)

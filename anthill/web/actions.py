@@ -32,6 +32,7 @@ from anthill.core.payloads import ChatPayload, MessageType, TaskRequestPayload
 from anthill.core.router import Router, parse_address
 from anthill.core.states import DeliveryTracker
 from anthill.transport.registry import TransportRegistry
+from anthill.web.chat import record_outgoing
 
 CLI_AGENT = "cli"
 COORDINATOR_ROLE = "coordinator"
@@ -55,6 +56,8 @@ class SendRequest(BaseModel):
     body: str = Field(min_length=1, max_length=MAX_BODY_CHARS)
     kind: str = "chat"
     mentions: tuple[str, ...] = ()
+    thread: str = Field(default="", max_length=64)
+    """接着已有会话往下说；留空则新开一个。对方的 thread 记忆靠这个接上。"""
 
 
 class ConfigRequest(BaseModel):
@@ -111,7 +114,9 @@ async def send_message(
         kind=MessageType.TASK_REQUEST if request.kind == "task" else MessageType.CHAT,
         payload=payload,
         log=log,
+        thread=request.thread,
     )
+    record_outgoing(layout, env, request.body)
     log.info("panel.send", msg=env.id, to=request.to, kind=request.kind, thread=env.thread)
     return {"ok": True, "id": env.id, "thread": env.thread}
 
@@ -124,6 +129,7 @@ async def _send(
     kind: MessageType,
     payload: TaskRequestPayload | ChatPayload,
     log: EventLog,
+    thread: str = "",
 ) -> Any:
     """以 cli 这个 Agent 的身份发出去，所以回执与结果会落进它的邮箱、面板能看到。"""
     sender = Sender(
@@ -134,7 +140,9 @@ async def _send(
         tracker=DeliveryTracker(),
         log=log,
     )
-    return await sender.send_new(to=to, type=kind, payload=payload, thread=new_thread_id())
+    return await sender.send_new(
+        to=to, type=kind, payload=payload, thread=thread or new_thread_id()
+    )
 
 
 def read_config(layout: NodeLayout) -> dict[str, Any]:

@@ -102,8 +102,10 @@ be tested on their own, or handed to "human agents" (which is exactly how this p
 
 **Cross-machine over LAN (M4)**
 
-- **Silent by default**: with `discovery.enabled = false` nothing is sent, nothing is listened
-  to, and **no socket is even created**; `anthill serve` binds 127.0.0.1 unless told otherwise
+- **Visibility and reachability are separate**: nodes on a segment can see each other (on by
+  default since M9; with `discovery.enabled = false` nothing is sent, nothing is listened to,
+  and **no socket is even created**), but exchanging messages requires pairing first.
+  `anthill serve` binds 127.0.0.1 unless told otherwise
 - UDP multicast beacons (TTL=1, stays on the local segment), announcements carry public info only
 - **Discovery ≠ reachability**: a discovered node is only recorded; you must compare
   fingerprints and `peers trust` to exchange a key before messages can flow. TOFU — a node that
@@ -169,6 +171,20 @@ be tested on their own, or handed to "human agents" (which is exactly how this p
   node with cached data is served that data while a refresh runs in the background —
   measured at 0.18s to render after unplugging a machine. A snapshot that stopped updating
   is also marked unreachable: over SSH the file stays readable long after that node died.
+
+**Less friction (M9)**
+
+- **Visible by default**: nodes on the same segment see each other after `anthill serve`.
+  The line that matters is untouched — **visible is not reachable**; exchanging messages
+  still needs a human on both ends.
+- **Six-digit PIN pairing** (`anthill peers pair`) instead of copying a 148-character token.
+  Key exchange uses a PAKE (spake2), so **the key never travels over the wire** — sending a
+  PIN-encrypted key would be no encryption at all, since six digits brute-force offline in
+  seconds. Online guessing is capped at one attempt per window.
+- **Talk to any agent on any machine from the panel**: picking an agent is a conversation,
+  continuing the same thread so the agent's own memory lines up.
+- **Edit another machine's config from the panel** (`--remote-admin`): signed requests,
+  same validation and backup as local edits, and every change is audited.
 
 ## Quick start
 
@@ -283,7 +299,14 @@ uv run anthill serve            # on every other machine — no extra configurat
 └────────────────────────┘└──────────────────────────────────────────┘
 ```
 
-Once `peers trust` is set up there is nothing else to configure: reading a peer's state
+Pairing is a spoken number, not a pasted token:
+
+```bash
+uv run anthill peers pair                      # machine A:  4 7 9 4 8 6
+uv run anthill peers pair --to A --pin 479486  # machine B
+```
+
+Compare the fingerprints on both screens and you are done. Once paired there is nothing else to configure: reading a peer's state
 uses the same shared key as delivery. Write access (`--panel-write`) only ever applies to
 the control machine itself — runs it starts leave from the local `cli` agent and cross the
 network through signed delivery. **The control panel can read other machines' state; it
@@ -308,7 +331,8 @@ When no one can confirm (headless agentd), "needs confirmation" resolves to **de
 
 **Defaults that stay quiet:**
 
-- `discovery.enabled = false` — no packets, no listeners, no socket
+- discovery makes nodes *visible*, never *trusted* — pairing is always a human step
+  (`discovery.enabled = false` still means no packets, no listeners, no socket)
 - `anthill serve` binds loopback; going wider requires `--host 0.0.0.0`
 - the panel is read-only and follows the loopback rule
 - config files never hold secrets, only the *names* of environment variables

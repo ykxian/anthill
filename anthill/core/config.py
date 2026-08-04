@@ -51,9 +51,19 @@ class NodeSection(_Section):
 
 
 class DiscoverySection(_Section):
-    """默认全关 —— 「不开启时节点完全静默」是核心需求（01-architecture §5.3）。"""
+    """默认**可见**，但默认**不可通信**。
 
-    enabled: bool = False
+    最初这里是默认全关的（不发包、不监听、连 socket 都不创建）。
+    实际用下来，「同网段的机器要先手动互相告知地址」这一步太劝退，
+    而广播包里本来就只有公开信息：节点名、Agent 名单、地址。
+
+    真正需要守住的那条线没有动 —— **发现 ≠ 可通信**：
+    看见只是让对方出现在你的列表里（`discovered`），要互投消息仍然必须
+    有人在两边各看一眼、核对指纹（`anthill peers pair`）。
+    确实不想被看见就 `enabled = false`，那时依旧是零发包零监听。
+    """
+
+    enabled: bool = True
     multicast_group: str = DEFAULT_MULTICAST_GROUP
     port: int = Field(default=DEFAULT_DISCOVERY_PORT, ge=1, le=65535)
 
@@ -179,6 +189,17 @@ class SecuritySection(_Section):
     """False 表示无人值守模式：high 风险直接拒绝而不是等人确认。"""
 
     max_output_bytes: int = Field(default=64_000, gt=0)
+
+    remote_admin: bool = False
+    """允许**已信任的对端**在它的总控面板上直接改本机的 node.toml。
+
+    默认关，而且这是个大开关，不是小配置：**能改 node.toml ≈ 能在本机执行命令**
+    （加一个带 run_shell 的 Agent 就行）。打开它等于把「信任一个对端」的含义
+    从「它能给我投消息、我的 Agent 会审」升级成「它能接管这台机器」。
+
+    打开之后就是直连，没有逐次审批 —— 想要逐次点头的话用 M5 那套
+    `approvals/` 审批流，两者是并列的两条路。
+    """
 
 
 class RuntimeSection(_Section):
@@ -307,11 +328,13 @@ workspace = "."
 # endpoint = "http://10.0.8.9:45778"   # 本机对外地址，跨机通信时告诉对方回信往哪发
 
 [discovery]
-enabled = false            # 默认不广播：不发包、不监听，同网段其他 Agent 与你互不可见
+enabled = true             # 同网段的 anthill 节点能互相看见（广播包里只有节点名/Agent 名单/地址）
 multicast_group = "239.77.77.7"
 port = 45777
-# 开启后也只是「能互相看见」。发现 ≠ 可通信：
-# 必须核对指纹并 `anthill peers trust --token <令牌>` 交换密钥后才能互投消息。
+# 看见 ≠ 能通信。要互投消息，仍然必须有人在两边各看一眼、核对指纹：
+#   A 机 anthill peers pair          → 显示六位 PIN
+#   B 机 anthill peers pair --to A --pin <PIN>
+# 不想被看见就改成 false —— 那时不发包、不监听、连 socket 都不创建。
 
 [runtime]
 poll_interval = 2.0        # watcher 降级为轮询时的扫描间隔（秒）
@@ -323,6 +346,9 @@ watch_mode = "auto"        # auto | inotify | poll（NFS 上会自动降级为 p
 # 一律要人点头；agentd 不在终端里跑时「没人能确认」就等于拒绝。
 confirm_high_risk = true
 shell_timeout = 120.0
+# remote_admin = true      # 允许已信任的对端在它的面板上直接改本机 node.toml。
+#                          # 想清楚再开：能改 node.toml ≈ 能在本机执行命令
+#                          #（加一个带 run_shell 的 Agent 就行）。
 # shell_allowlist = ["pytest", "ruff", "git status"]   # 名单内的命令降为 medium
 
 # ---- 模型 provider：只写环境变量名，不写密钥本身 ----

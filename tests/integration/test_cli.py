@@ -46,12 +46,14 @@ def test_init_force_rewrites(workspace: Path):
     assert Config.load_from(NodeLayout(workspace)).node.name == "renamed"
 
 
-def test_status_reports_discovery_is_off(workspace: Path):
+def test_status_says_visible_but_not_yet_reachable(workspace: Path):
+    """默认可见，但状态里必须写清「还要配对」—— 否则人会以为已经能互投消息了。"""
     result = runner.invoke(app, ["status", "-w", str(workspace)])
 
     assert result.exit_code == 0
     assert "clinode" in result.output
-    assert "disabled" in result.output  # 默认静默是核心需求，冒烟测试盯住它
+    assert "enabled" in result.output
+    assert "配对" in result.output
 
 
 def test_status_shows_peers_established_by_trust_not_only_configured_ones(workspace: Path):

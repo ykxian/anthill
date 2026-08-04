@@ -22,17 +22,28 @@ def test_agent_table_key_becomes_agent_name(config):
     assert config.agent("beta").role == "worker"
 
 
-def test_discovery_is_disabled_by_default(config):
-    assert config.discovery.enabled is False
+def test_discovery_is_visible_by_default(config):
+    """默认可见 —— 否则同网段两台机器要先手动互相告知地址，太劝退。
+
+    真正要守住的那条线（可见 ≠ 可通信）由 peers/beacon 那一层保证，
+    见 test_beacon.py::test_announcement_only_marks_discovered_never_trusted。
+    """
+    assert config.discovery.enabled is True
 
 
-def test_default_template_is_valid_and_silent(tmp_path: Path):
+def test_discovery_can_still_be_made_completely_silent(tmp_path: Path):
+    """想彻底隐身的路一直留着，而且是真的零发包零监听。"""
+    layout = write_config(tmp_path, '[node]\nname = "quiet"\n[discovery]\nenabled = false\n')
+
+    assert Config.load_from(layout).discovery.enabled is False
+
+
+def test_default_template_is_valid(tmp_path: Path):
     layout = write_config(tmp_path, default_node_toml("laptop-ykx"))
 
     loaded = Config.load_from(layout)
 
     assert loaded.node.name == "laptop-ykx"
-    assert loaded.discovery.enabled is False
     assert "cli" in loaded.agents
 
 

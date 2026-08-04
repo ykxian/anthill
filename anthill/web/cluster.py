@@ -181,12 +181,18 @@ async def build_cluster(
     log: EventLog,
     cache: ClusterCache | None = None,
 ) -> dict[str, Any]:
-    """本机 + 所有**已信任**的对端。未信任的只出现在拓扑里，不去拉它的状态。"""
+    """本机 + 所有**已信任**的对端。
+
+    只是「见过」的节点也列出来（好让人一眼看到「哦这台可以配对」），
+    但**绝不去读它的状态** —— 发现 ≠ 可通信，这条线在读取方向上同样成立。
+    """
     local = build_snapshot(layout, config, peers)
     local["written_at"] = now().isoformat()
 
     store = cache or ClusterCache()
-    targets = [p for p in peers.all() if p.trusted]
+    known = peers.all()
+    targets = [p for p in known if p.trusted]
+    seen_only = [_pairable(p) for p in known if not p.trusted]
     fetched = await asyncio.gather(
         *(store.node(peer, config, peers, log) for peer in targets),
         return_exceptions=True,
@@ -201,6 +207,7 @@ async def build_cluster(
                 else node
                 for peer, node in zip(targets, fetched, strict=True)
             ),
+            *seen_only,
         ],
     }
 
@@ -306,6 +313,14 @@ def _ok(node: str, snapshot: dict[str, Any], *, local: bool = False) -> dict[str
         "node": node,
         "local": local,
         "reachable": True,
+    }
+
+
+def _pairable(peer: PeerRecord) -> dict[str, Any]:
+    """同网段见过、但还没换过密钥的节点。"""
+    return {
+        **_down(peer, "见过，还没配对 —— 换过密钥才能互投消息"),
+        "pairable": True,
     }
 
 

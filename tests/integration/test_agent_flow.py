@@ -93,10 +93,13 @@ async def test_duplicate_delivery_is_processed_once_but_acked_every_time(layout,
     env = make_task(sender="cli", recipient="beta")
 
     async with running(layout, config, "beta"):
-        for _ in range(3):
+        # 一次一次来：同一个 id 就是同一个文件名，上一次还没被取走就重投，
+        # 等于把文件覆盖掉，watcher 只会看到一次 —— 那是测试自己造的竞态
+        for expected in (1, 2, 3):
             beta_box.deposit(env)  # 同一个 id，模拟发送方重试
-            await asyncio.sleep(0.05)
-        await wait_until(lambda: inbox_types(cli_box).count(MessageType.RECEIPT_ACCEPTED) == 3)
+            await wait_until(
+                lambda n=expected: inbox_types(cli_box).count(MessageType.RECEIPT_ACCEPTED) == n
+            )
 
     types = inbox_types(cli_box)
     assert types.count(MessageType.RECEIPT_ACCEPTED) == 3

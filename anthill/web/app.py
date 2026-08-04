@@ -15,6 +15,8 @@ agentd 完全不需要知道这条消息是从网线上来的。
 from __future__ import annotations
 
 import asyncio
+from base64 import b64decode, b64encode
+from binascii import Error as BinasciiError
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -30,7 +32,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import HTMLResponse
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from anthill.core.config import Config
 from anthill.core.envelope import Envelope
@@ -41,10 +43,25 @@ from anthill.core.errors import (
     ProtocolError,
     SignatureError,
 )
+from anthill.core.ids import is_valid_id
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
 from anthill.discovery.registry import PeerRecord, PeerRegistry
+from anthill.security.keys import PairingToken, fingerprint
+from anthill.security.pair_client import join as pair_join
+from anthill.security.pair_client import resolve as pair_resolve
+from anthill.security.pairing import (
+    CONFIRM_HOST,
+    CONFIRM_JOINER,
+    WINDOW_SECONDS,
+    PairingStore,
+    confirm_tag,
+    derive,
+    exchange,
+    new_pin,
+    tags_match,
+)
 from anthill.security.signing import verify_envelope, verify_request
 from anthill.web.actions import (
     ConfigRequest,
@@ -56,9 +73,27 @@ from anthill.web.actions import (
     start_run,
     write_config,
 )
+from anthill.web.admin import (
+    RemoteConfigRequest,
+    admin_enabled,
+    read_remote_config,
+    write_remote_config,
+)
+from anthill.web.admin import refuse_reason as _admin_refuse
+from anthill.web.chat import messages as chat_messages
+from anthill.web.chat import threads as chat_threads
 from anthill.web.cluster import ClusterCache, build_cluster, read_status
-from anthill.web.endpoints import DELIVER_PATH, PANEL_PATH, SUMMARY_PATH
+from anthill.web.endpoints import (
+    CONFIG_PATH,
+    DELIVER_PATH,
+    PAIR_CONFIRM_PATH,
+    PAIR_PATH,
+    PANEL_PATH,
+    SUMMARY_PATH,
+)
 from anthill.web.panel import build_snapshot
+from anthill.web.remote import read_config as remote_read_config
+from anthill.web.remote import write_config as remote_write_config
 
 PANEL_HTML = Path(__file__).parent / "static" / "panel.html"
 PANEL_REFRESH = 2.0
@@ -73,6 +108,8 @@ def create_app(
     panel: bool = False,
     panel_writable: bool = False,
     summary: bool = True,
+    advertise: str = "",
+    remote_admin: bool = False,
 ) -> FastAPI:
     app = FastAPI(
         title=f"anthill:{config.node.name}",
@@ -84,7 +121,7 @@ def create_app(
     if panel:
         _mount_panel(app, layout=layout, config=config, peers=peers, log=log)
     if panel and panel_writable:
-        _mount_panel_actions(app, layout=layout, config=config, log=log)
+        _mount_panel_actions(app, layout=layout, config=config, peers=peers, log=log)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -130,6 +167,68 @@ def create_app(
             raise HTTPException(status_code=401, detail=str(exc)) from exc
         return read_status(layout, config, peers)
 
+    def _signed(path: str, node: str, ts: str, sig: str) -> None:
+        """已信任对端 + 有效签名，两道都过才算数。和 /node/summary 同一套。"""
+        try:
+            _, key = peers.require_trusted(node)
+        except PeerError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        try:
+            verify_request(key, node=node, path=path, ts=ts, signature=sig)
+        except SignatureError as exc:
+            log.warn("admin.rejected", frm=node, path=path, reason=str(exc))
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    @app.get(CONFIG_PATH)
+    async def node_config(
+        x_anthill_node: str = Header(default=""),
+        x_anthill_ts: str = Header(default=""),
+        x_anthill_sig: str = Header(default=""),
+    ) -> dict[str, Any]:
+        """把本机 node.toml 给已信任的对端看。需要 remote_admin 打开。"""
+        _admin_open(config, remote_admin)
+        _signed(CONFIG_PATH, x_anthill_node, x_anthill_ts, x_anthill_sig)
+        return read_remote_config(layout, by=x_anthill_node, log=log)
+
+    @app.put(CONFIG_PATH)
+    async def node_config_write(
+        body: RemoteConfigRequest = Body(...),
+        x_anthill_node: str = Header(default=""),
+        x_anthill_ts: str = Header(default=""),
+        x_anthill_sig: str = Header(default=""),
+    ) -> dict[str, Any]:
+        """让已信任的对端直接改本机 node.toml。
+
+        **这是本项目权限最大的一个接口** —— 能改配置就能加一个带 run_shell 的
+        Agent。所以它默认根本不存在（404），要机器主人显式打开；
+        打开之后每一次读写都留审计日志。
+        """
+        _admin_open(config, remote_admin)
+        _signed(CONFIG_PATH, x_anthill_node, x_anthill_ts, x_anthill_sig)
+        try:
+            return write_remote_config(layout, body, by=x_anthill_node, log=log)
+        except AntHillError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(PAIR_PATH)
+    async def pair(body: PairRequest = Body(...)) -> dict[str, Any]:
+        """PIN 码配对的第一步。**只在本机开着窗口时才存在意义**。
+
+        没有窗口就是 409 —— 不是「密码错」，因为这时候根本没有可比对的东西。
+        窗口用过一次立刻作废：六位 PIN 经不起在线穷举，
+        而 PAKE 保证离线穷举无从下手（线路上没有密钥，也没有密文）。
+        """
+        return _pair_begin(layout, config, peers, log, body, endpoint=advertise)
+
+    @app.post(PAIR_CONFIRM_PATH)
+    async def pair_confirm(body: PairConfirmRequest = Body(...)) -> dict[str, Any]:
+        """第二步：对方证明它推导出了同一把钥匙，本机才真正落库。
+
+        少了这一步，PIN 打错会配成「看起来成功了、之后每条消息都验签失败」——
+        最难查的那种状态。SPAKE2 在口令不符时不报错，只是各得一把不同的钥匙。
+        """
+        return _pair_commit(layout, peers, log, body)
+
     @app.post(DELIVER_PATH, status_code=202)
     async def deliver(
         body: dict[str, Any] = Body(...),
@@ -152,6 +251,100 @@ def create_app(
         return {"ok": True, "id": env.id, "path": str(path)}
 
     return app
+
+
+class PairRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node: str = Field(min_length=1, max_length=64)
+    endpoint: str = Field(default="", max_length=200)
+    msg: str = Field(min_length=1, max_length=512)
+    """对方的 SPAKE2 消息，base64。"""
+
+
+class PairConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node: str = Field(min_length=1, max_length=64)
+    confirm: str = Field(min_length=1, max_length=128)
+
+
+def _pair_begin(
+    layout: NodeLayout,
+    config: Config,
+    peers: PeerRegistry,
+    log: EventLog,
+    body: PairRequest,
+    *,
+    endpoint: str,
+) -> dict[str, Any]:
+    store = PairingStore(layout.root)
+    window = store.current()
+    if window is None or window.used:
+        log.warn("pair.no_window", frm=body.node)
+        raise HTTPException(status_code=409, detail="本机现在没有开着的配对窗口")
+
+    try:
+        inbound = b64decode(body.msg, validate=True)
+    except (BinasciiError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"配对消息不是合法 base64：{exc}") from exc
+
+    state, outbound = exchange(window.pin)
+    try:
+        key = derive(state, inbound)
+    except PeerError as exc:
+        store.close()  # 一个窗口一次机会
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    store.hold(window, node=body.node, endpoint=body.endpoint, key=key)
+    log.info("pair.offered", node=body.node, fingerprint=fingerprint(key))
+    return {
+        "node": config.node.name,
+        "endpoint": endpoint,
+        "msg": b64encode(outbound).decode(),
+        "confirm": confirm_tag(key, CONFIRM_HOST),
+    }
+
+
+def _pair_commit(
+    layout: NodeLayout, peers: PeerRegistry, log: EventLog, body: PairConfirmRequest
+) -> dict[str, Any]:
+    store = PairingStore(layout.root)
+    window = store.current()
+    if window is None or not window.peer_key or window.peer_node != body.node:
+        raise HTTPException(status_code=409, detail="没有等待确认的配对")
+
+    key = bytes.fromhex(window.peer_key)
+    if not tags_match(body.confirm, confirm_tag(key, CONFIRM_JOINER)):
+        store.close()
+        log.warn("pair.rejected", node=body.node, reason="密钥确认不匹配（PIN 打错了？）")
+        raise HTTPException(status_code=401, detail="密钥确认不匹配：两边的 PIN 不一样")
+
+    store.close()
+    record = peers.trust(
+        PairingToken(node=window.peer_node, endpoint=window.peer_endpoint, key=key), replace=True
+    )
+    log.info("pair.trusted", node=record.node, fingerprint=record.fingerprint)
+    return {"ok": True, "node": record.node, "fingerprint": record.fingerprint}
+
+
+def _admin_open(config: Config, flag: bool = False) -> None:
+    """没打开远端管理时这个接口**根本不存在**（404），不是「存在但会拒绝」。
+
+    这一点和面板写入口是同一条原则：默认不挂，别给人留一个可以试探的门把手。
+    """
+    if not (flag or admin_enabled(config)):
+        raise HTTPException(status_code=404, detail=_admin_refuse(config))
+
+
+def _local_only(request: Request, *, what: str = "这个接口") -> None:
+    """逐请求校验来源是回环。
+
+    面板绑 0.0.0.0 时（跨机投递需要），这些接口会跟着暴露给整个网段 ——
+    而它们给出的是**所有**对端的状态和对话内容，不是本机那点公开信息。
+    """
+    if not is_local_client(request.client.host if request.client else None):
+        raise HTTPException(status_code=403, detail=f"{what}只允许本机访问")
 
 
 def _parse(body: dict[str, Any]) -> Envelope:
@@ -258,9 +451,21 @@ def _mount_panel(
         面板绑了 `0.0.0.0` 时，那等于把整个集群的状态摊给整个网段。
         页面拿到 403 会自动退回只看本机。
         """
-        if not is_local_client(request.client.host if request.client else None):
-            raise HTTPException(status_code=403, detail="总控视图只允许本机访问")
+        _local_only(request, what="总控视图")
         return await build_cluster(layout, config, peers, log, request.app.state.cluster_cache)
+
+    @app.get(f"{PANEL_PATH}/api/chats")
+    async def panel_chats(request: Request) -> dict[str, Any]:
+        """最近的会话列表。和总控视图同样只对本机开放 —— 这是对话内容。"""
+        _local_only(request)
+        return {"threads": chat_threads(layout)}
+
+    @app.get(f"{PANEL_PATH}/api/chat/{{thread}}")
+    async def panel_chat(request: Request, thread: str) -> dict[str, Any]:
+        _local_only(request)
+        if not is_valid_id(thread):
+            raise HTTPException(status_code=400, detail="thread 不是合法 ULID")
+        return {"thread": thread, "messages": chat_messages(layout, thread)}
 
     @app.websocket(f"{PANEL_PATH}/ws")
     async def panel_ws(websocket: WebSocket) -> None:
@@ -275,7 +480,7 @@ def _mount_panel(
 
 
 def _mount_panel_actions(
-    app: FastAPI, *, layout: NodeLayout, config: Config, log: EventLog
+    app: FastAPI, *, layout: NodeLayout, config: Config, peers: PeerRegistry, log: EventLog
 ) -> None:
     """面板的写入口（`anthill serve --panel-write` 才挂）。
 
@@ -300,26 +505,83 @@ def _mount_panel_actions(
         _guard(request)
         return await _acted(send_message(layout, config, body, log))
 
-    @app.get(f"{PANEL_PATH}/api/config")
-    async def panel_config(request: Request) -> dict[str, Any]:
+    @app.post(f"{PANEL_PATH}/api/pair/open", status_code=201)
+    async def panel_pair_open(request: Request) -> dict[str, Any]:
+        """在本机开一个配对窗口，把 PIN 显示在页面上让对方输。"""
+        _guard(request)
+        code = new_pin()
+        PairingStore(layout.root).open(code)
+        log.info("pair.window_opened")
+        return {"pin": code, "seconds": int(WINDOW_SECONDS)}
+
+    @app.post(f"{PANEL_PATH}/api/pair/join", status_code=201)
+    async def panel_pair_join(
+        request: Request, body: PairJoinRequest = Body(...)
+    ) -> dict[str, Any]:
+        """输入对方屏幕上的 PIN，把密钥换过来。"""
         _guard(request)
         try:
-            return read_config(layout)
+            record = await pair_join(
+                base=pair_resolve(peers, body.target),
+                my_node=config.node.name,
+                my_endpoint=config.node.endpoint,
+                pin=body.pin,
+                peers=peers,
+            )
+        except PeerError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "node": record.node, "fingerprint": record.fingerprint}
+
+    @app.get(f"{PANEL_PATH}/api/config")
+    async def panel_config(request: Request, node: str = "") -> dict[str, Any]:
+        """`?node=` 指定哪台机器；留空就是本机。"""
+        _guard(request)
+        if node and node != config.node.name:
+            return await _remote(remote_read_config(config, peers, node))
+        try:
+            return {"node": config.node.name, **read_config(layout)}
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"读不出配置：{exc}") from exc
 
     @app.put(f"{PANEL_PATH}/api/config")
     async def panel_config_write(
-        request: Request, body: ConfigRequest = Body(...)
+        request: Request, body: RemoteConfigWrite = Body(...)
     ) -> dict[str, Any]:
         _guard(request)
+        if body.node and body.node != config.node.name:
+            return await _remote(remote_write_config(config, peers, body.node, body.text))
         try:
-            result = write_config(layout, body)
+            result = write_config(layout, ConfigRequest(text=body.text))
         except AntHillError as exc:
             # 配置不合法就原样退回，磁盘一个字都不改
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         log.info("panel.config_written")
         return result
+
+
+class PairJoinRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target: str = Field(min_length=1, max_length=200)
+    """对方的节点名或地址。"""
+
+    pin: str = Field(min_length=4, max_length=16)
+
+
+class RemoteConfigWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=200_000)
+    node: str = Field(default="", max_length=64)
+    """改哪台机器的配置。留空 = 本机。"""
+
+
+async def _remote(coro: Any) -> dict[str, Any]:
+    """对端的拒绝原样透给页面 —— 「它没开远端管理」是用户要看懂的信息。"""
+    try:
+        return await coro  # type: ignore[no-any-return]
+    except AntHillError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 async def _acted(coro: Any) -> dict[str, Any]:

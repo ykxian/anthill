@@ -1,11 +1,13 @@
 """UDP 组播信标：周期性 announce 自己，同时收听别人（01-architecture §5.3）。
 
-**默认 `enabled = false`，此时不发包、不监听、连 socket 都不创建** ——
-这是用户明确提的需求：不开启时，同网段的其他 Agent 与你互不可见。
+默认开着 —— 否则同网段的两台机器要先手动互相告知地址，太劝退。
+广播包里只有公开信息：节点名、Agent 名单、地址。
+**`enabled = false` 时不发包、不监听、连 socket 都不创建**，这条路一直留着。
 
 用组播（239.x.x.x）而不是全网广播，且 TTL=1 不出本网段，是为了把打扰面压到最小。
 收到 announce 只会把对方记进 peers 列表（`discovered`），**不会**建立任何信任 ——
-真要互投消息，还得人肉核对指纹后 `anthill peers trust`。
+真要互投消息，还得有人在两边各看一眼、核对指纹（`anthill peers pair`）。
+这条线是这个功能的全部安全性所在，任何时候都不能因为"方便"而松掉。
 """
 
 from __future__ import annotations
