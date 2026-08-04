@@ -281,19 +281,39 @@ def test_everything_else_is_not_local(host: str | None) -> None:
 # ---------- CLI 开关 ----------
 
 
-def test_panel_write_refuses_a_non_loopback_host(tmp_path: Path) -> None:
-    """能改配置 ≈ 能在这台机器上执行命令，不该跟着 --host 0.0.0.0 一起对外。"""
+def test_panel_write_works_alongside_listening_for_other_machines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """跨机投递必须绑对外，写权限却只对本机开放 —— 这两件事以前在启动期是互斥的，
+    结果总控那台没法既收别的机器的消息、又在面板上操作。
+
+    现在不互斥了：守门的是**逐请求**的来源校验
+    （见 test_a_non_local_client_is_refused），启动期那道额外限制
+    挡不住任何真实攻击，只挡住了正常用法。
+    """
+    # Arrange：把真正起服务那一步换掉，只测参数校验这一关
     from typer.testing import CliRunner
 
+    import anthill.cli.serve_cmd as serve_mod
+
+    started: dict[str, object] = {}
+
+    async def fake_serve(*args: object, **kwargs: object) -> None:
+        started.update(kwargs)
+
+    monkeypatch.setattr(serve_mod, "_serve", fake_serve)
     runner = CliRunner()
     assert runner.invoke(cli_app, ["init", str(tmp_path), "--node-name", "n"]).exit_code == 0
 
+    # Act
     result = runner.invoke(
         cli_app, ["serve", "--host", "0.0.0.0", "--panel-write", "-w", str(tmp_path)]
     )
 
-    assert result.exit_code == 1
-    assert "回环" in result.output
+    # Assert
+    assert result.exit_code == 0, result.output
+    assert started["panel_write"] is True
+    assert "只对本机开放" in result.output  # 而且要把这件事说出来，别让人猜
 
 
 def test_panel_write_requires_the_panel_to_be_on(tmp_path: Path) -> None:
@@ -305,3 +325,69 @@ def test_panel_write_requires_the_panel_to_be_on(tmp_path: Path) -> None:
     result = runner.invoke(cli_app, ["serve", "--no-panel", "--panel-write", "-w", str(tmp_path)])
 
     assert result.exit_code == 1
+
+
+# ---------- 跨站发起的请求 ----------
+
+
+def lan_or_local(node: tuple[NodeLayout, Config, PeerRegistry], host: str) -> httpx.AsyncClient:
+    layout, config, peers = node
+    application = create_app(
+        layout=layout,
+        config=config,
+        peers=peers,
+        log=EventLog(None, agent="serve", echo=False),
+        panel=True,
+        panel_writable=True,
+    )
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=application, client=(host, 5555)),
+        base_url="http://panel.test",
+    )
+
+
+async def test_a_page_on_another_site_cannot_drive_the_panel(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    """纵深防御：即使请求确实来自本机（浏览器就是在本机跑的），
+    发起它的如果是别的站点，也不放行。"""
+    async with lan_or_local(node, "127.0.0.1") as client:
+        run = await client.post(
+            "/panel/api/run", json={"task": "x"}, headers={"Origin": "http://evil.example"}
+        )
+        cluster = await client.get("/panel/api/cluster", headers={"Origin": "http://evil.example"})
+
+    assert run.status_code == 403
+    assert cluster.status_code == 403
+
+
+async def test_the_panel_page_itself_is_allowed(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    """页面自己发的请求是同源的，不能被误伤。"""
+    async with lan_or_local(node, "127.0.0.1") as client:
+        response = await client.get("/panel/api/config", headers={"Origin": "http://panel.test"})
+
+    assert response.status_code == 200
+
+
+async def test_a_request_without_an_origin_still_works(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    """curl 和脚本不带 Origin —— 它们照样得先过「来自本机」那一关，不是白给。"""
+    async with lan_or_local(node, "127.0.0.1") as client:
+        assert (await client.get("/panel/api/config")).status_code == 200
+
+
+async def test_the_lan_is_still_refused_even_with_a_convincing_origin(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    """真正守门的是连接来源，头部怎么伪造都没用。"""
+    async with lan_or_local(node, "10.0.8.9") as client:
+        response = await client.put(
+            "/panel/api/config",
+            json={"text": "x = 1"},
+            headers={"Origin": "http://panel.test"},
+        )
+
+    assert response.status_code == 403

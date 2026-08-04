@@ -78,11 +78,8 @@ def serve_command(
     endpoint = advertise or f"http://{host}:{port}"
     # 面板默认只在回环上开：一旦 --host 0.0.0.0（为了让同网段投递进来），
     # 面板就会跟着暴露给整个网段。要那样必须显式 --panel，不给默认踩坑的机会。
-    show_panel = is_loopback(host) if panel is None else panel
-    if panel_write and not is_loopback(host):
-        # 能改配置 ≈ 能在这台机器上执行命令。这种权限不该跟着 --host 0.0.0.0 一起对外
-        log.close()
-        fail(f"--panel-write 只能配合回环地址使用，当前 --host {host}")
+    # --panel-write 本身就是个比 --panel 更明确的表态，不必再让人多写一个 --panel
+    show_panel = (is_loopback(host) or panel_write) if panel is None else panel
     if panel_write and not show_panel:
         log.close()
         fail("--panel-write 需要面板是开着的；去掉 --no-panel")
@@ -95,6 +92,12 @@ def serve_command(
     if show_panel:
         mode = "可发起任务与改配置" if panel_write else "只读"
         console.print(f"[bold]面板[/bold] {endpoint}/panel [dim]（{mode}）[/dim]")
+        if panel_write and not is_loopback(host):
+            # 绑对外是跨机投递的需要，写权限仍然只对本机开放 —— 说出来，别让人猜
+            console.print(
+                "[dim]      写操作只对本机开放：网段上的人访问这个地址会收到 403，"
+                "只有你在这台机器上开浏览器才通得过[/dim]"
+            )
     elif panel is None:
         console.print("[dim]面板已关闭：绑的不是回环地址；确实要开就加 --panel[/dim]")
     if not summary:
@@ -153,7 +156,17 @@ async def _serve(
         remote_admin=remote_admin or config.security.remote_admin,
     )
     server = uvicorn.Server(
-        uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False)
+        uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            log_level="warning",
+            access_log=False,
+            # 面板的写权限是按「连接来自本机」判的。proxy_headers 会让
+            # X-Forwarded-For 有机会改写那个值 —— 我们不在反向代理后面跑，
+            # 就别给这条路留口子。默认值恰好是安全的，但那是巧合，不该靠。
+            proxy_headers=False,
+        )
     )
     beacon = Beacon(
         settings=config.discovery,

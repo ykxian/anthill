@@ -67,8 +67,31 @@ class ConfigRequest(BaseModel):
 
 
 def is_local_client(host: str | None) -> bool:
-    """请求是不是来自本机。逐请求判，不依赖「我们绑的是回环」这个假设。"""
+    """请求是不是来自本机。逐请求判，不依赖「我们绑的是回环」这个假设。
+
+    判据是 TCP 连接的对端地址，**不看任何 HTTP 头** —— 头是客户端说了算的，
+    拿它当授权依据等于没有授权。uvicorn 那边也显式关掉了 proxy_headers，
+    免得 `X-Forwarded-For` 有机会影响这个值。
+    """
     return (host or "").strip().lower() in LOOPBACK_HOSTS
+
+
+def is_same_origin(origin: str | None, host_header: str | None) -> bool:
+    """跨站请求伪造的纵深防御。
+
+    说清楚它挡的**不是**一个现成的洞：写接口只收 JSON body，浏览器发跨源 JSON
+    请求前必须先预检，而本服务没有任何 CORS 响应头，预检就过不去 ——
+    所以那条路本来就是通不了的。这里只是不想把安全性寄托在那个间接保证上：
+    浏览器策略会变，而「同源才放行」是自己能守住的。
+
+    没有 Origin 头就放行 —— curl、脚本、以及同源 GET 本来就不带它，
+    而**这些请求还得先过回环那一关**，不是白给。
+    """
+    if not origin:
+        return True
+    if not host_header:
+        return False
+    return origin.split("://", 1)[-1].strip().lower() == host_header.strip().lower()
 
 
 def find_coordinator(config: Config) -> str:

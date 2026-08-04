@@ -448,7 +448,8 @@ coder    → reviewer  那就两处都改，我先写
 ### 面板上直接干活（M7）
 
 ```bash
-uv run anthill serve --panel-write     # 只能配合回环地址，绑 0.0.0.0 会直接拒绝启动
+uv run anthill serve --panel-write                 # 单机
+uv run anthill serve --host 0.0.0.0 --panel-write  # 跨机：既收别人的消息，又能在面板上操作
 ```
 
 面板上就能发起任务、给 Agent 发消息、在线改 `node.toml`（保存前会用启动期同一套
@@ -457,6 +458,12 @@ uv run anthill serve --panel-write     # 只能配合回环地址，绑 0.0.0.0 
 写权限 ≈ 在这台机器上执行命令（能改配置就能加一个带 `run_shell` 的 Agent），
 所以两道闸缺一不可：**显式开关**（默认关）+ **逐请求校验来源是回环地址** ——
 不是「我们没绑 0.0.0.0 所以应该安全」，反向代理或端口转发会让那个假设悄悄失效。
+
+正因为守门的是逐请求那一道，绑 `0.0.0.0` 和开写权限**可以同时用**：
+跨机投递需要对外监听，而写操作照样只有本机通得过（网段上的人拿到 403）。
+`X-Forwarded-For` 之类的头影响不了这个判断 —— 判据是 TCP 连接的对端地址，
+uvicorn 那边也显式关掉了 `proxy_headers`。另外还挡掉了跨站发起的请求
+（纵深防御：写接口只收 JSON，浏览器本来就要先预检，而我们没有任何 CORS 头）。
 危险操作的确认仍然只在 CLI。
 
 ### 一个面板管所有机器（M8）
@@ -465,8 +472,8 @@ uv run anthill serve --panel-write     # 只能配合回环地址，绑 0.0.0.0 
 它会把所有**已信任**的节点汇到同一页：
 
 ```bash
-uv run anthill serve --host 0.0.0.0 --panel   # 跨机要对外监听；面板那时要显式开
-uv run anthill serve --host 0.0.0.0           # 其他每台机器照常起
+uv run anthill serve --host 0.0.0.0 --panel-write   # 总控：收别人的消息 + 面板上能操作
+uv run anthill serve --host 0.0.0.0                 # 其他每台机器照常起
 ```
 
 同网段的节点会自己出现在拓扑里（标成「见过，还没配对」）。换密钥只要念一串数字：

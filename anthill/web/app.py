@@ -68,6 +68,7 @@ from anthill.web.actions import (
     RunRequest,
     SendRequest,
     is_local_client,
+    is_same_origin,
     read_config,
     send_message,
     start_run,
@@ -345,6 +346,8 @@ def _local_only(request: Request, *, what: str = "这个接口") -> None:
     """
     if not is_local_client(request.client.host if request.client else None):
         raise HTTPException(status_code=403, detail=f"{what}只允许本机访问")
+    if not is_same_origin(request.headers.get("origin"), request.headers.get("host")):
+        raise HTTPException(status_code=403, detail=f"拒绝跨站读取{what}")
 
 
 def _parse(body: dict[str, Any]) -> Envelope:
@@ -492,8 +495,15 @@ def _mount_panel_actions(
     """
 
     def _guard(request: Request) -> None:
+        """两道：连接必须来自本机，且请求不能是别的站点发起的。
+
+        第一道是真正的那道闸（TCP 对端地址，客户端伪造不了）。
+        第二道是纵深防御，见 `actions.is_same_origin` 的说明。
+        """
         if not is_local_client(request.client.host if request.client else None):
             raise HTTPException(status_code=403, detail="面板的写操作只允许本机访问")
+        if not is_same_origin(request.headers.get("origin"), request.headers.get("host")):
+            raise HTTPException(status_code=403, detail="拒绝跨站发起的写操作")
 
     @app.post(f"{PANEL_PATH}/api/run", status_code=202)
     async def panel_run(request: Request, body: RunRequest = Body(...)) -> dict[str, Any]:

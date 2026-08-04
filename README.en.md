@@ -283,8 +283,8 @@ its own permission system, and AntHill does not proxy it.
 ### One panel for every machine
 
 ```bash
-uv run anthill serve            # on your laptop: http://127.0.0.1:45778/panel
-uv run anthill serve            # on every other machine — no extra configuration
+uv run anthill serve --host 0.0.0.0 --panel-write   # control machine
+uv run anthill serve --host 0.0.0.0                 # every other machine
 ```
 
 ```text
@@ -334,7 +334,8 @@ When no one can confirm (headless agentd), "needs confirmation" resolves to **de
 - discovery makes nodes *visible*, never *trusted* — pairing is always a human step
   (`discovery.enabled = false` still means no packets, no listeners, no socket)
 - `anthill serve` binds loopback; going wider requires `--host 0.0.0.0`
-- the panel is read-only and follows the loopback rule
+- the panel is read-only by default; write access is an explicit flag plus a per-request
+  check that the connection came from loopback (so it composes with `--host 0.0.0.0`)
 - config files never hold secrets, only the *names* of environment variables
 - the only secret on disk is `peers.json` (shared HMAC keys), mode `0600`
 - SSH host-key verification has no "skip" switch
