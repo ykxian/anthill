@@ -521,7 +521,7 @@ async def test_the_status_loop_keeps_going_when_a_write_fails(
     import anthill.cli.serve_cmd as serve_mod
     from anthill.core.errors import MailboxError
 
-    layout, config, peers = local
+    layout, config, _ = local
     attempts = 0
 
     def explode(*_: object) -> None:
@@ -530,6 +530,9 @@ async def test_the_status_loop_keeps_going_when_a_write_fails(
         raise MailboxError("磁盘满了")
 
     monkeypatch.setattr(serve_mod, "write_status", explode)
+    from anthill.web.context import NodeContext, NodeRegistry
+
+    registry = NodeRegistry([NodeContext(layout, config)])
     stop = asyncio.Event()
 
     # Act：跑几轮之后叫停
@@ -540,7 +543,7 @@ async def test_the_status_loop_keeps_going_when_a_write_fails(
 
     await asyncio.wait_for(  # 循环要是提前退了，别把测试挂死在这儿
         asyncio.gather(
-            serve_mod._status_loop(layout, config, peers, quiet_log(), stop, interval=0.001),
+            serve_mod._status_loop(registry, quiet_log(), stop, interval=0.001),
             stop_soon(),
         ),
         timeout=10,
@@ -552,13 +555,18 @@ async def test_the_status_loop_keeps_going_when_a_write_fails(
 
 async def test_no_summary_skips_writing_the_status_file(local: Bundle) -> None:
     import anthill.cli.serve_cmd as serve_mod
+    from anthill.web.context import NodeContext, NodeRegistry
 
-    layout, config, peers = local
+    layout, config, _ = local
     stop = asyncio.Event()
     stop.set()
 
     await serve_mod._status_loop(
-        layout, config, peers, quiet_log(), stop, interval=0.001, enabled=False
+        NodeRegistry([NodeContext(layout, config)]),
+        quiet_log(),
+        stop,
+        interval=0.001,
+        enabled=False,
     )
 
     assert not (layout.root / STATUS_FILE).exists()

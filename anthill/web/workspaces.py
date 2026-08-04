@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -71,12 +72,17 @@ def forget(path: Path) -> None:
     _write([item for item in _read() if item.get("path") != str(path)])
 
 
-def listing(current: NodeLayout | None = None) -> list[dict[str, Any]]:
-    """清单 + 每个工作区当下的状态。当前这个 serve 用的那个会标出来。"""
+def listing(attached: Iterable[Path] = (), primary: Path | None = None) -> list[dict[str, Any]]:
+    """清单 + 每个工作区当下的状态。
+
+    `attached` 是本进程正照看着的那些工作区 —— 它们可能还没进过清单
+    （命令行直接 `-w` 起的那个就是），补进来，省得面板上看不见自己。
+    """
     known = _read()
-    if current is not None and not any(i.get("path") == str(current.workspace) for i in known):
-        # 命令行直接起的那个可能没进过清单，补上，省得面板上看不见自己
-        known = [*known, {"path": str(current.workspace), "port": 0}]
+    for path in attached:
+        if not any(i.get("path") == str(path) for i in known):
+            known = [*known, {"path": str(path), "port": 0}]
+    live = {str(p) for p in attached}
     out = []
     for item in known:
         path = Path(str(item.get("path", "")))
@@ -87,10 +93,11 @@ def listing(current: NodeLayout | None = None) -> list[dict[str, Any]]:
                 "port": int(item.get("port", 0) or 0),
                 "exists": is_workspace(path),
                 "node": _node_name(path),
-                "current": current is not None and path == current.workspace,
+                "attached": str(path) in live,
+                "current": primary is not None and path == primary,
             }
         )
-    return sorted(out, key=lambda w: (not w["current"], w["path"]))
+    return sorted(out, key=lambda w: (not w["current"], not w["attached"], w["path"]))
 
 
 def _node_name(path: Path) -> str:

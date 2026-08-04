@@ -40,7 +40,6 @@ from anthill.core.logging import EventLog
 from anthill.core.paths import NodeLayout
 from anthill.discovery.registry import PeerRecord, PeerRegistry
 from anthill.security.signing import sign_request
-from anthill.web.endpoints import SUMMARY_PATH
 from anthill.web.panel import build_snapshot
 from anthill.web.status import NodeStatus
 
@@ -273,18 +272,20 @@ async def _pull(peer: PeerRecord, config: Config, peers: PeerRegistry) -> bytes:
 
 
 async def _pull_http(peer: PeerRecord, config: Config, peers: PeerRegistry) -> bytes:
-    import httpx
+    from anthill.transport.http import peer_client
 
     _, key = peers.require_trusted(peer.node)
+    # 指名道姓地问：对面一台机器上可能照看着好几个节点
+    path = f"/node/{peer.node}/summary"
     stamp = now().isoformat()
     headers = {
         "X-AntHill-Node": config.node.name,
         "X-AntHill-Ts": stamp,
-        "X-AntHill-Sig": sign_request(key, node=config.node.name, path=SUMMARY_PATH, ts=stamp),
+        "X-AntHill-Sig": sign_request(key, node=config.node.name, path=path, ts=stamp),
     }
-    url = peer.endpoint.rstrip("/") + SUMMARY_PATH
+    url = peer.endpoint.rstrip("/") + path
     async with (
-        httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client,
+        peer_client(HTTP_TIMEOUT) as client,
         client.stream("GET", url, headers=headers) as response,
     ):
         if response.status_code != 200:

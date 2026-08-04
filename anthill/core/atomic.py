@@ -11,12 +11,26 @@
 
 from __future__ import annotations
 
+import itertools
 import os
 from pathlib import Path
 
 from anthill.core.errors import MailboxError
 
 PART_SUFFIX = ".part"
+_SEQ = itertools.count()
+
+
+def _part_name(name: str) -> str:
+    """临时文件名必须**每次都不一样**。
+
+    信封的文件名是 ULID，天生不撞；但 `peers.json` / `status.json` 这些是固定名字，
+    固定的 `.part` 会让两个写者撞在一起：A 写好 `x.part`，B 也写 `x.part` 并先
+    rename 走了，A 再 rename 就找不到自己的临时文件 —— 报一个莫名其妙的
+    「No such file or directory」。一个节点上跑着 serve 和好几个 agentd，
+    这种并发是常态，不是意外。
+    """
+    return f"{name}.{os.getpid()}-{next(_SEQ)}{PART_SUFFIX}"
 
 
 def ensure_same_filesystem(tmp_dir: Path, dst_dir: Path) -> None:
@@ -39,7 +53,7 @@ def ensure_same_filesystem(tmp_dir: Path, dst_dir: Path) -> None:
 def atomic_write(tmp_dir: Path, dst_dir: Path, name: str, data: bytes) -> Path:
     """把 `data` 原子地落到 `dst_dir/name`，返回最终路径。"""
     ensure_same_filesystem(tmp_dir, dst_dir)
-    part = tmp_dir / f"{name}{PART_SUFFIX}"
+    part = tmp_dir / _part_name(name)
     dst = dst_dir / name
     try:
         with open(part, "wb") as fh:

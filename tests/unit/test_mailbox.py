@@ -175,3 +175,23 @@ def test_envelope_survives_disk_round_trip(mailbox, make_task):
 
     assert isinstance(restored, Envelope)
     assert restored.payload == env.payload
+
+
+def test_two_writers_to_the_same_file_do_not_steal_each_others_temp(tmp_path: Path):
+    """固定名字的文件（peers.json / status.json）会被好几个进程同时写。
+
+    临时文件名要是固定的，A 写好 `x.part`、B 也写 `x.part` 并先 rename 走，
+    A 再 rename 就找不到自己的东西 —— 报一个莫名其妙的 FileNotFound。
+    一个节点上跑着 serve 和好几个 agentd，这种并发是常态，不是意外。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def write(index: int) -> Path:
+        return atomic_write(tmp_path, tmp_path, "shared.json", f"{index}".encode())
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(write, range(60)))
+
+    assert all(result == tmp_path / "shared.json" for result in results)
+    assert (tmp_path / "shared.json").read_text(encoding="utf-8").isdigit()
+    assert not list(tmp_path.glob("*.part"))  # 没有残留

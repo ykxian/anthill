@@ -22,6 +22,7 @@ from anthill.security.pairing import (
     exchange,
     tags_match,
 )
+from anthill.transport.http import peer_client
 from anthill.web.endpoints import PAIR_CONFIRM_PATH, PAIR_PATH
 
 TIMEOUT = 10.0
@@ -49,7 +50,7 @@ async def join(
     只是两边各得一把不同的钥匙，不验就会配成「之后每条消息都验签失败」。
     """
     state, outbound = exchange(pin)
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+    async with peer_client(TIMEOUT) as client:
         body = await _offer(client, base, my_node, my_endpoint, outbound)
         try:
             key = derive(state, b64decode(str(body["msg"]), validate=True))

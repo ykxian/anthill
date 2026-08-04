@@ -133,18 +133,31 @@ async def test_adopting_an_existing_workspace_does_not_overwrite_it(
     assert state.json()["node"] == "oldnode"
 
 
-def test_switching_workspace_at_runtime_is_refused(tmp_path: Path) -> None:
-    """只支持从「没有」到「有」这一次。
+def test_two_workspaces_cannot_share_a_node_name(tmp_path: Path) -> None:
+    """一个进程可以照看好几个节点 —— 但名字必须能区分开。
 
-    peers 与密钥是跟着工作区走的，中途换等于换身份 ——
-    已经跑着的 agentd、已经建立的信任关系全都对不上。想换就重启一次 serve。
+    收件人写在信封上（`to.node`），两个工作区同名的话，
+    一封信该往哪个邮箱放就说不清了。
     """
-    first = tmp_path / "a"
-    config = create_workspace(NodeLayout(first), node_name="a")
-    ctx = NodeContext(NodeLayout(first), config, PeerRegistry(NodeLayout(first).root))
+    from anthill.web.context import NodeRegistry
 
-    with pytest.raises(AntHillError, match="重启"):
-        ctx.adopt(NodeLayout(tmp_path / "b"))
+    for sub in ("a", "b"):
+        create_workspace(NodeLayout(tmp_path / sub), node_name="samename")
+    registry = NodeRegistry([NodeContext(NodeLayout(tmp_path / "a"))])
+
+    with pytest.raises(AntHillError, match="不能同名"):
+        registry.attach(NodeLayout(tmp_path / "b"))
+
+
+def test_attaching_the_same_workspace_twice_is_a_no_op(tmp_path: Path) -> None:
+    from anthill.web.context import NodeRegistry
+
+    create_workspace(NodeLayout(tmp_path / "a"), node_name="a")
+    registry = NodeRegistry([NodeContext(NodeLayout(tmp_path / "a"))])
+
+    registry.attach(NodeLayout(tmp_path / "a"))
+
+    assert registry.names() == ["a"]
 
 
 async def test_setup_is_not_exposed_to_the_network(unconfigured: object) -> None:
@@ -248,3 +261,180 @@ async def test_an_illegal_node_name_leaves_no_half_built_workspace(
     assert response.status_code == 400
     assert "非法节点名" in response.json()["detail"]
     assert not is_workspace(target)
+
+
+# ---------- 一个进程照看多个节点 ----------
+
+
+def two_nodes(tmp_path: Path) -> object:
+    """一个 serve、一个端口、两个工作区。"""
+    from anthill.web.context import NodeContext, NodeRegistry
+
+    contexts = []
+    for name in ("boxa", "boxb"):
+        layout = NodeLayout(tmp_path / name)
+        create_workspace(layout, node_name=name)
+        contexts.append(NodeContext(layout))
+    registry = NodeRegistry(contexts)
+    return create_app(
+        registry=registry,
+        log=EventLog(None, agent="serve", echo=False),
+        panel=True,
+        panel_writable=True,
+    )
+
+
+async def test_one_process_announces_every_node_it_looks_after(tmp_path: Path) -> None:
+    async with client(two_nodes(tmp_path)) as api:
+        health = (await api.get("/health")).json()
+
+    assert health["node"] == "boxa"  # 主节点
+    assert [n["node"] for n in health["nodes"]] == ["boxa", "boxb"]
+
+
+async def test_delivery_is_routed_by_the_recipient_on_the_envelope(tmp_path: Path) -> None:
+    """这就是多路复用成立的原因：**路由键本来就写在信封上**。
+
+    一个进程按 `to.node` 分派到对应工作区的邮箱，用**那个节点自己的** peers 验签。
+    """
+    # Arrange：两个节点各自信任 lab，用的是两把**不同**的钥匙
+    from anthill.core.envelope import Address, Envelope
+    from anthill.core.ids import now
+    from anthill.core.mailbox import Mailbox
+    from anthill.core.payloads import ChatPayload, MessageType
+    from anthill.security.keys import PairingToken, new_key
+    from anthill.security.signing import sign_envelope
+
+    app = two_nodes(tmp_path)
+    keys = {}
+    for name in ("boxa", "boxb"):
+        keys[name] = new_key()
+        PeerRegistry(NodeLayout(tmp_path / name).root).trust(
+            PairingToken(node="lab", endpoint="", key=keys[name])
+        )
+
+    def envelope(to_node: str, key: bytes) -> Envelope:
+        return sign_envelope(
+            Envelope(
+                from_=Address(node="lab", agent="cli"),
+                to=Address(node=to_node, agent="echo"),
+                type=MessageType.CHAT,
+                thread="01J0000000000000000000000B",
+                ts=now(),
+                payload=ChatPayload(body=f"给 {to_node}"),
+            ),
+            key,
+        )
+
+    # Act
+    async with client(app) as api:
+        for name in ("boxa", "boxb"):
+            sent = await api.post(
+                "/deliver", json=envelope(name, keys[name]).model_dump(mode="json")
+            )
+            assert sent.status_code == 202, sent.text
+        stranger = await api.post(
+            "/deliver", json=envelope("boxc", keys["boxa"]).model_dump(mode="json")
+        )
+
+    # Assert：各进各的邮箱，一封都没串
+    for name in ("boxa", "boxb"):
+        box = Mailbox(NodeLayout(tmp_path / name).mailbox_dir("echo"))
+        assert len(box.list_new()) == 1
+    assert stranger.status_code == 421  # 不认识的节点：不代转
+
+
+async def test_a_key_that_works_for_one_node_does_not_work_for_another(
+    tmp_path: Path,
+) -> None:
+    """密钥跟着工作区走 —— 验签必须用**收件那个节点**的 peers，不能用主节点的。"""
+    from anthill.core.envelope import Address, Envelope
+    from anthill.core.ids import now
+    from anthill.core.payloads import ChatPayload, MessageType
+    from anthill.security.keys import PairingToken, new_key
+    from anthill.security.signing import sign_envelope
+
+    app = two_nodes(tmp_path)
+    boxa_key = new_key()
+    PeerRegistry(NodeLayout(tmp_path / "boxa").root).trust(
+        PairingToken(node="lab", endpoint="", key=boxa_key)
+    )
+    PeerRegistry(NodeLayout(tmp_path / "boxb").root).trust(
+        PairingToken(node="lab", endpoint="", key=new_key())
+    )
+
+    # 用 boxa 的钥匙签，却寄给 boxb
+    forged = sign_envelope(
+        Envelope(
+            from_=Address(node="lab", agent="cli"),
+            to=Address(node="boxb", agent="echo"),
+            type=MessageType.CHAT,
+            thread="01J0000000000000000000000C",
+            ts=now(),
+            payload=ChatPayload(body="冒充"),
+        ),
+        boxa_key,
+    )
+
+    async with client(app) as api:
+        response = await api.post("/deliver", json=forged.model_dump(mode="json"))
+
+    assert response.status_code == 401
+
+
+async def test_the_panel_can_address_each_local_node(tmp_path: Path) -> None:
+    app = two_nodes(tmp_path)
+
+    async with client(app) as api:
+        default = (await api.get("/panel/api/state")).json()
+        named = (await api.get("/panel/api/state?node=boxb")).json()
+        missing = await api.get("/panel/api/state?node=nope")
+
+    assert default["node"] == "boxa"
+    assert named["node"] == "boxb"
+    assert missing.status_code == 404
+
+
+async def test_a_named_summary_is_signed_for_that_node_only(tmp_path: Path) -> None:
+    """一台机器上有好几个节点，所以签名里必须带上「问的是哪个」。"""
+    from anthill.core.ids import now as _now
+    from anthill.security.keys import PairingToken, new_key
+    from anthill.security.signing import sign_request
+
+    app = two_nodes(tmp_path)
+    key = new_key()
+    for name in ("boxa", "boxb"):
+        PeerRegistry(NodeLayout(tmp_path / name).root).trust(
+            PairingToken(node="lab", endpoint="", key=key)
+        )
+
+    def headers(path: str) -> dict[str, str]:
+        stamp = _now().isoformat()
+        return {
+            "X-AntHill-Node": "lab",
+            "X-AntHill-Ts": stamp,
+            "X-AntHill-Sig": sign_request(key, node="lab", path=path, ts=stamp),
+        }
+
+    async with client(app) as api:
+        good = await api.get("/node/boxb/summary", headers=headers("/node/boxb/summary"))
+        # 拿给 boxb 的签名去问 boxa
+        borrowed = await api.get("/node/boxa/summary", headers=headers("/node/boxb/summary"))
+
+    assert good.status_code == 200
+    assert good.json()["node"] == "boxb"
+    assert borrowed.status_code == 401
+
+
+def test_a_wildcard_bind_is_never_advertised_as_an_address() -> None:
+    """`0.0.0.0` 是「监听哪儿」，不是「别人怎么找到我」。
+
+    真出过：serve 用 --host 0.0.0.0 起，把 `http://0.0.0.0:45778` 广播了出去，
+    对端老老实实记下来，然后永远连不上 —— 而且报错很难懂
+    （机器上配了代理的话，是一个空的 502）。
+    """
+    from anthill.cli.serve_cmd import WILDCARD_HOSTS
+    from anthill.core.workspace import local_ip
+
+    assert "0.0.0.0" in WILDCARD_HOSTS
+    assert local_ip() not in WILDCARD_HOSTS

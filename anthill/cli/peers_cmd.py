@@ -21,6 +21,7 @@ from rich.table import Table
 from anthill.cli.common import console, fail, load
 from anthill.cli.pair_cmd import pair_command
 from anthill.core.errors import AntHillError
+from anthill.core.workspace import local_ip
 from anthill.discovery.registry import PeerRegistry
 from anthill.security.keys import PairingToken, new_key
 
@@ -78,7 +79,7 @@ def invite(
     layout, config = load(workspace)
     registry = _registry(workspace)
     key = new_key()
-    mine = endpoint or f"http://{_local_ip()}:{DEFAULT_HTTP_PORT}"
+    mine = endpoint or f"http://{local_ip()}:{DEFAULT_HTTP_PORT}"
 
     # 双方用同一把共享密钥（HMAC 是对称的），所以这边也要把对方记上
     registry.trust(PairingToken(node=node, endpoint="", key=key), replace=True)
@@ -133,15 +134,3 @@ def forget(
         console.print(f"[bold green]✓[/bold green] 已移除 {node}（连同共享密钥）")
     else:
         console.print(f"[dim]peers 列表里本来就没有 {node}[/dim]")
-
-
-def _local_ip() -> str:
-    """猜一个对外可达的本机 IP。连不上就退化成 127.0.0.1，让人自己用 --endpoint 指定。"""
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        try:
-            sock.connect(("10.255.255.255", 1))  # 不发包，只让内核挑一条路由
-            return str(sock.getsockname()[0])
-        except OSError:
-            return "127.0.0.1"

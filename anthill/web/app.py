@@ -67,7 +67,7 @@ from anthill.web.admin import (
 from anthill.web.admin import refuse_reason as _admin_refuse
 from anthill.web.agents import start_agent, stop_agent
 from anthill.web.cluster import ClusterCache, read_status
-from anthill.web.context import NOT_READY, NodeContext
+from anthill.web.context import NOT_READY, NodeContext, NodeRegistry
 from anthill.web.endpoints import (
     AGENTS_PATH,
     CONFIG_PATH,
@@ -87,6 +87,7 @@ def create_app(
     layout: NodeLayout | None = None,
     config: Config | None = None,
     peers: PeerRegistry | None = None,
+    registry: NodeRegistry | None = None,
     log: EventLog,
     panel: bool = False,
     panel_writable: bool = False,
@@ -94,51 +95,71 @@ def create_app(
     advertise: str = "",
     remote_admin: bool = False,
 ) -> FastAPI:
+    nodes = registry if registry is not None else _bootstrap(layout, config)
     app = FastAPI(
-        title=f"anthill:{config.node.name if config else '未配置'}",
+        title=f"anthill:{nodes.primary_name}",
         docs_url=None,
         redoc_url=None,
         lifespan=_lifespan,
     )
     app.state.cluster_cache = ClusterCache()
 
-    # node.toml 是运行期可改的（面板加 Agent、远端管理、人手动编辑），
-    # 所以不能一直捧着启动那一刻读到的那份 —— 见 ConfigRef 与 NodeContext 的说明。
-    # layout 为 None 表示「还没配工作区」，节点端点一律 503，面板只出设置界面。
-    ctx = NodeContext(layout, config, peers)
-    app.state.ctx = ctx
-
-    def cfg() -> Config:
-        return ctx.config
+    app.state.nodes = nodes
 
     def ready() -> None:
-        if not ctx.ready:
+        if not nodes.ready:
             raise HTTPException(status_code=503, detail=NOT_READY)
 
+    def target(name: str) -> NodeContext:
+        """按名字取本进程照看的某个节点。名字不对就 421「这信不该寄到这儿」。"""
+        ready()
+        ctx = nodes.get(name) if name else nodes.primary
+        if ctx is None:
+            raise HTTPException(
+                status_code=421,
+                detail=f"本机没有名为 {name!r} 的节点（这里有：{'、'.join(nodes.names())}）",
+            )
+        return ctx
+
     if panel:
-        mount_panel(app, ctx=ctx, log=log)
+        mount_panel(app, nodes=nodes, log=log)
     if panel and panel_writable:
-        mount_panel_actions(app, ctx=ctx, log=log)
+        mount_panel_actions(app, nodes=nodes, log=log)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
         """给对端探活用。只暴露公开信息：节点名与 Agent 名单，绝不含密钥或路径。"""
         ready()
         return {
-            "node": cfg().node.name,
-            "agents": sorted(cfg().agents),
+            "node": nodes.primary_name,
+            "nodes": [
+                {"node": ctx.name, "agents": sorted(ctx.config.agents)} for ctx in nodes.all()
+            ],
+            "agents": sorted(nodes.primary.config.agents),
             "proto": Envelope.model_fields["proto"].default,
         }
 
-    @app.get(SUMMARY_PATH)
-    async def node_summary(
-        x_anthill_node: str = Header(default=""),
-        x_anthill_ts: str = Header(default=""),
-        x_anthill_sig: str = Header(default=""),
-    ) -> dict[str, Any]:
-        """把本节点的状态给**已信任的对端**看，供它做总控面板。
+    def _signed(request: Request, ctx: NodeContext, node: str, ts: str, sig: str) -> None:
+        """已信任对端 + 有效签名，两道都过才算数。
 
-        认证跟投递同一把共享密钥：签 `节点 + 路径 + 时间戳`，30 秒防重放窗。
+        **签名签的是请求的完整路径** —— 一台机器上现在可能有好几个节点，
+        路径里带着「问的是哪个节点」，所以一次签名换不到另一个节点的东西。
+        校验用的是**收件那个节点自己的** peers 列表：密钥是跟着工作区走的。
+        """
+        try:
+            _, key = ctx.peers.require_trusted(node)
+        except PeerError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        try:
+            verify_request(key, node=node, path=request.url.path, ts=ts, signature=sig)
+        except SignatureError as exc:
+            log.warn("request.rejected", frm=node, path=request.url.path, reason=str(exc))
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    def _summary(request: Request, name: str, headers: tuple[str, str, str]) -> dict[str, Any]:
+        """把某个节点的状态给**已信任的对端**看，供它做总控面板。
+
+        认证跟投递同一把共享密钥，30 秒防重放窗。
 
         **说清楚给出去的是什么**：Agent 名单与积压、编排任务的目标与每步交付、
         最近若干条日志（含 `error` 字段，里面可能带本机路径或某个 peer 的
@@ -146,101 +167,146 @@ def create_app(
         换句话说：把一个节点标成 trusted，意味着它既能给你投消息，
         也能看你在干什么。不想共享就用 `anthill serve --no-summary`。
         """
-        ready()
         if not summary:
             raise HTTPException(status_code=404, detail="本节点没有开放状态共享")
-        try:
-            _, key = ctx.peers.require_trusted(x_anthill_node)
-        except PeerError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        try:
-            verify_request(
-                key,
-                node=x_anthill_node,
-                path=SUMMARY_PATH,
-                ts=x_anthill_ts,
-                signature=x_anthill_sig,
-            )
-        except SignatureError as exc:
-            log.warn("summary.rejected", frm=x_anthill_node, reason=str(exc))
-            raise HTTPException(status_code=401, detail=str(exc)) from exc
-        return read_status(ctx.layout, cfg(), ctx.peers)
+        ctx = target(name)
+        _signed(request, ctx, *headers)
+        return read_status(ctx.layout, ctx.config, ctx.peers)
 
-    def _signed(path: str, node: str, ts: str, sig: str) -> None:
-        """已信任对端 + 有效签名，两道都过才算数。和 /node/summary 同一套。"""
-        try:
-            _, key = ctx.peers.require_trusted(node)
-        except PeerError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        try:
-            verify_request(key, node=node, path=path, ts=ts, signature=sig)
-        except SignatureError as exc:
-            log.warn("admin.rejected", frm=node, path=path, reason=str(exc))
-            raise HTTPException(status_code=401, detail=str(exc)) from exc
-
-    @app.get(CONFIG_PATH)
-    async def node_config(
+    @app.get(SUMMARY_PATH)
+    async def node_summary(
+        request: Request,
         x_anthill_node: str = Header(default=""),
         x_anthill_ts: str = Header(default=""),
         x_anthill_sig: str = Header(default=""),
     ) -> dict[str, Any]:
-        """把本机 node.toml 给已信任的对端看。需要 remote_admin 打开。"""
-        ready()
-        _admin_open(cfg(), remote_admin)
-        _signed(CONFIG_PATH, x_anthill_node, x_anthill_ts, x_anthill_sig)
-        return read_remote_config(ctx.layout, by=x_anthill_node, log=log)
+        """不指名时说的是主节点 —— 一台机器只有一个工作区时就是全部。"""
+        return _summary(request, "", (x_anthill_node, x_anthill_ts, x_anthill_sig))
 
-    @app.put(CONFIG_PATH)
-    async def node_config_write(
-        body: RemoteConfigRequest = Body(...),
+    @app.get("/node/{name}/summary")
+    async def node_summary_named(
+        request: Request,
+        name: str,
         x_anthill_node: str = Header(default=""),
         x_anthill_ts: str = Header(default=""),
         x_anthill_sig: str = Header(default=""),
     ) -> dict[str, Any]:
-        """让已信任的对端直接改本机 node.toml。
+        """一台机器可以照看好几个节点，所以要能指名道姓地问。"""
+        return _summary(request, name, (x_anthill_node, x_anthill_ts, x_anthill_sig))
+
+    def _config_read(request: Request, name: str, headers: tuple[str, str, str]) -> dict[str, Any]:
+        ctx = target(name)
+        _admin_open(ctx.config, remote_admin)
+        _signed(request, ctx, *headers)
+        return read_remote_config(ctx.layout, by=headers[0], log=log)
+
+    def _config_write(
+        request: Request, name: str, body: RemoteConfigRequest, headers: tuple[str, str, str]
+    ) -> dict[str, Any]:
+        """让已信任的对端直接改某个节点的 node.toml。
 
         **这是本项目权限最大的一个接口** —— 能改配置就能加一个带 run_shell 的
         Agent。所以它默认根本不存在（404），要机器主人显式打开；
         打开之后每一次读写都留审计日志。
         """
-        ready()
-        _admin_open(cfg(), remote_admin)
-        _signed(CONFIG_PATH, x_anthill_node, x_anthill_ts, x_anthill_sig)
+        ctx = target(name)
+        _admin_open(ctx.config, remote_admin)
+        _signed(request, ctx, *headers)
         try:
-            return write_remote_config(ctx.layout, body, by=x_anthill_node, log=log)
+            return write_remote_config(ctx.layout, body, by=headers[0], log=log)
         except AntHillError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post(f"{AGENTS_PATH}/{{name}}/{{action}}", status_code=202)
-    async def node_agent_control(
+    @app.get(CONFIG_PATH)
+    async def node_config(
+        request: Request,
+        x_anthill_node: str = Header(default=""),
+        x_anthill_ts: str = Header(default=""),
+        x_anthill_sig: str = Header(default=""),
+    ) -> dict[str, Any]:
+        return _config_read(request, "", (x_anthill_node, x_anthill_ts, x_anthill_sig))
+
+    @app.get("/node/{name}/config")
+    async def node_config_named(
         request: Request,
         name: str,
+        x_anthill_node: str = Header(default=""),
+        x_anthill_ts: str = Header(default=""),
+        x_anthill_sig: str = Header(default=""),
+    ) -> dict[str, Any]:
+        return _config_read(request, name, (x_anthill_node, x_anthill_ts, x_anthill_sig))
+
+    @app.put(CONFIG_PATH)
+    async def node_config_write(
+        request: Request,
+        body: RemoteConfigRequest = Body(...),
+        x_anthill_node: str = Header(default=""),
+        x_anthill_ts: str = Header(default=""),
+        x_anthill_sig: str = Header(default=""),
+    ) -> dict[str, Any]:
+        return _config_write(request, "", body, (x_anthill_node, x_anthill_ts, x_anthill_sig))
+
+    @app.put("/node/{name}/config")
+    async def node_config_write_named(
+        request: Request,
+        name: str,
+        body: RemoteConfigRequest = Body(...),
+        x_anthill_node: str = Header(default=""),
+        x_anthill_ts: str = Header(default=""),
+        x_anthill_sig: str = Header(default=""),
+    ) -> dict[str, Any]:
+        return _config_write(request, name, body, (x_anthill_node, x_anthill_ts, x_anthill_sig))
+
+    def _agent_control(
+        request: Request, name: str, agent: str, action: str, headers: tuple[str, str, str]
+    ) -> dict[str, Any]:
+        """让已信任的对端启停某个节点的 agentd。需要 remote_admin 打开。
+
+        权限级别和改 node.toml 是同一档 —— 能改配置本来就约等于能执行命令，
+        所以走同一道闸，不另设一个。
+        """
+        ctx = target(name)
+        _admin_open(ctx.config, remote_admin)
+        _signed(request, ctx, *headers)
+        if action not in ("start", "stop"):
+            raise HTTPException(status_code=404, detail=f"不认识的动作 {action!r}")
+        try:
+            result = (
+                start_agent(ctx.layout, ctx.config, agent)
+                if action == "start"
+                else stop_agent(ctx.layout, agent)
+            )
+        except AntHillError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        log.warn("admin.agent_" + action, by=headers[0], node=ctx.name, agent=agent)
+        return result
+
+    @app.post(f"{AGENTS_PATH}/{{agent}}/{{action}}", status_code=202)
+    async def node_agent_control(
+        request: Request,
+        agent: str,
         action: str,
         x_anthill_node: str = Header(default=""),
         x_anthill_ts: str = Header(default=""),
         x_anthill_sig: str = Header(default=""),
     ) -> dict[str, Any]:
-        """让已信任的对端启停本机的 agentd。需要 remote_admin 打开。
+        return _agent_control(
+            request, "", agent, action, (x_anthill_node, x_anthill_ts, x_anthill_sig)
+        )
 
-        权限级别和改 node.toml 是同一档 —— 能改配置本来就约等于能执行命令，
-        所以走同一道闸，不另设一个。
-        **签名签的是完整路径**（含 Agent 名和动作），一次签名换不来另一个动作。
-        """
-        ready()
-        _admin_open(cfg(), remote_admin)
-        _signed(request.url.path, x_anthill_node, x_anthill_ts, x_anthill_sig)
-        if action not in ("start", "stop"):
-            raise HTTPException(status_code=404, detail=f"不认识的动作 {action!r}")
-        try:
-            result = (
-                start_agent(ctx.layout, cfg(), name)
-                if action == "start"
-                else stop_agent(ctx.layout, name)
-            )
-        except AntHillError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        log.warn("admin.agent_" + action, by=x_anthill_node, agent=name)
-        return result
+    @app.post("/node/{name}/agents/{{agent}}/{{action}}", status_code=202)
+    async def node_agent_control_named(
+        request: Request,
+        name: str,
+        agent: str,
+        action: str,
+        x_anthill_node: str = Header(default=""),
+        x_anthill_ts: str = Header(default=""),
+        x_anthill_sig: str = Header(default=""),
+    ) -> dict[str, Any]:
+        return _agent_control(
+            request, name, agent, action, (x_anthill_node, x_anthill_ts, x_anthill_sig)
+        )
 
     @app.post(PAIR_PATH)
     async def pair(body: PairRequest = Body(...)) -> dict[str, Any]:
@@ -250,8 +316,8 @@ def create_app(
         窗口用过一次立刻作废：六位 PIN 经不起在线穷举，
         而 PAKE 保证离线穷举无从下手（线路上没有密钥，也没有密文）。
         """
-        ready()
-        return _pair_begin(ctx.layout, cfg(), ctx.peers, log, body, endpoint=advertise)
+        ctx = target(body.for_node)
+        return _pair_begin(ctx.layout, ctx.config, ctx.peers, log, body, endpoint=advertise)
 
     @app.post(PAIR_CONFIRM_PATH)
     async def pair_confirm(body: PairConfirmRequest = Body(...)) -> dict[str, Any]:
@@ -260,7 +326,7 @@ def create_app(
         少了这一步，PIN 打错会配成「看起来成功了、之后每条消息都验签失败」——
         最难查的那种状态。SPAKE2 在口令不符时不报错，只是各得一把不同的钥匙。
         """
-        ready()
+        ctx = target(body.for_node)
         return _pair_commit(ctx.layout, ctx.peers, log, body)
 
     @app.post(DELIVER_PATH, status_code=202)
@@ -268,15 +334,30 @@ def create_app(
         body: dict[str, Any] = Body(...),
         x_anthill_endpoint: str = Header(default=""),
     ) -> dict[str, Any]:
+        """收信。**收件人写在信封上，所以一个进程可以替好几个节点收。**
+
+        `to.node` 就是分派键：找到本进程照看的那个节点，用**它自己的** peers
+        验签、往**它自己的**邮箱里放。工作区之间是隔离的，这里也不例外。
+        """
         ready()
         env = _parse(body)
+        ctx = nodes.get(env.to.node)
+        if ctx is None:
+            # 不当跳板：只收发给本机某个节点的信，绝不代为转投第三方
+            log.warn("lan.rejected", msg=env.id, to=str(env.to), reason="misrouted")
+            raise HTTPException(
+                status_code=421,
+                detail=f"本机没有名为 {env.to.node!r} 的节点"
+                f"（这里有：{'、'.join(nodes.names())}），不代转",
+            )
         peer, key = _trusted_key(ctx.peers, env, log)
         _verify(env, key, log)
-        _check_recipient(env, cfg(), log)
+        _check_recipient(env, ctx.config, log)
         path = _deposit(env, ctx.layout, log)
         _learn_return_path(ctx.peers, peer, x_anthill_endpoint, log)
         log.info(
             "lan.received",
+            node=ctx.name,
             msg=env.id,
             frm=str(env.from_),
             to=str(env.to),
@@ -292,6 +373,8 @@ class PairRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     node: str = Field(min_length=1, max_length=64)
+    for_node: str = Field(default="", max_length=64)
+    """要和本机的哪个节点配对。留空 = 主节点。"""
     endpoint: str = Field(default="", max_length=200)
     msg: str = Field(min_length=1, max_length=512)
     """对方的 SPAKE2 消息，base64。"""
@@ -301,6 +384,7 @@ class PairConfirmRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     node: str = Field(min_length=1, max_length=64)
+    for_node: str = Field(default="", max_length=64)
     confirm: str = Field(min_length=1, max_length=128)
 
 
@@ -384,6 +468,15 @@ def _local_only(request: Request, *, what: str = "这个接口") -> None:
         raise HTTPException(status_code=403, detail=f"拒绝跨站读取{what}")
 
 
+def _bootstrap(layout: NodeLayout | None, config: Config | None) -> NodeRegistry:
+    """兼容老的调用方式：直接给 layout/config 就是「只照看这一个节点」。
+
+    给 None 就是「还没配工作区」—— 名册是空的，节点端点一律 503。
+    """
+    del config  # ConfigRef 会自己按 mtime 读，启动那份没必要留着
+    return NodeRegistry([NodeContext(layout)] if layout is not None else [])
+
+
 def _parse(body: dict[str, Any]) -> Envelope:
     try:
         return Envelope.model_validate(body)
@@ -408,13 +501,7 @@ def _verify(env: Envelope, key: bytes, log: EventLog) -> None:
 
 
 def _check_recipient(env: Envelope, config: Config, log: EventLog) -> None:
-    if env.to.node != config.node.name:
-        # 不当跳板：只收发给自己的信，绝不代为转投第三方
-        log.warn("lan.rejected", msg=env.id, to=str(env.to), reason="misrouted")
-        raise HTTPException(
-            status_code=421,
-            detail=f"本节点是 {config.node.name}，这条消息是发给 {env.to.node} 的，不代转",
-        )
+    """收件节点在分派那一步已经定了，这里只管「那个节点上有没有这个 Agent」。"""
     if env.to.is_role or env.to.is_broadcast:
         return  # 角色/广播地址由本机路由层解析，端点这里不展开
     if env.to.agent not in config.agents:

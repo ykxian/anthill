@@ -16,7 +16,7 @@ from anthill.core.errors import AntHillError, PeerError
 from anthill.core.ids import now
 from anthill.discovery.registry import PeerRegistry
 from anthill.security.signing import sign_request
-from anthill.web.endpoints import AGENTS_PATH, CONFIG_PATH
+from anthill.transport.http import peer_client
 
 TIMEOUT = 10.0
 MAX_CONFIG_BYTES = 512 * 1024
@@ -50,8 +50,8 @@ async def control_agent(
     """启停别台机器上的 agentd。和改它的配置同一道闸（remote_admin）。"""
     if action not in ("start", "stop"):
         raise AntHillError(f"不认识的动作 {action!r}")
-    url, headers = _signed_for(config, peers, node, f"{AGENTS_PATH}/{agent}/{action}")
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+    url, headers = _signed_for(config, peers, node, f"/node/{node}/agents/{agent}/{action}")
+    async with peer_client(TIMEOUT) as client:
         try:
             response = await client.post(url, headers=headers)
         except httpx.HTTPError as exc:
@@ -61,8 +61,8 @@ async def control_agent(
 
 
 async def read_config(config: Config, peers: PeerRegistry, node: str) -> dict[str, Any]:
-    url, headers = _signed_for(config, peers, node, CONFIG_PATH)
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+    url, headers = _signed_for(config, peers, node, f"/node/{node}/config")
+    async with peer_client(TIMEOUT) as client:
         try:
             response = await client.get(url, headers=headers)
         except httpx.HTTPError as exc:
@@ -73,8 +73,8 @@ async def read_config(config: Config, peers: PeerRegistry, node: str) -> dict[st
 
 
 async def write_config(config: Config, peers: PeerRegistry, node: str, text: str) -> dict[str, Any]:
-    url, headers = _signed_for(config, peers, node, CONFIG_PATH)
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+    url, headers = _signed_for(config, peers, node, f"/node/{node}/config")
+    async with peer_client(TIMEOUT) as client:
         try:
             response = await client.put(url, headers=headers, json={"text": text})
         except httpx.HTTPError as exc:

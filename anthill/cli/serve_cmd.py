@@ -25,15 +25,17 @@ from anthill.core.config import Config
 from anthill.core.errors import AntHillError
 from anthill.core.logging import EventLog
 from anthill.core.paths import NodeLayout
-from anthill.core.workspace import load_or_create
+from anthill.core.workspace import load_or_create, local_ip
 from anthill.discovery.beacon import Announcement, Beacon
-from anthill.discovery.registry import PeerRegistry
 from anthill.web.app import create_app
 from anthill.web.cluster import write_status
+from anthill.web.context import NodeContext, NodeRegistry
+from anthill.web.workspaces import listing as known_workspaces
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 45778
 LOOPBACK = ("127.0.0.1", "localhost", "::1", "")
+WILDCARD_HOSTS = ("0.0.0.0", "::", "*")
 STATUS_INTERVAL = 5.0
 
 
@@ -93,26 +95,23 @@ def serve_command(
     建在哪、叫什么名字都会打印出来。
     """
     layout, config, created = _load_or_setup(workspace)
+    nodes = _registry(layout, config, quiet=quiet)
     # 还没配工作区时没地方写日志，只回显
     log = EventLog(
         layout.log_file("serve") if layout else None,
         agent=f"serve:{config.node.name if config else '未配置'}",
         echo=not quiet,
     )
-    peers = None
-    if layout is not None:
-        try:
-            peers = PeerRegistry(layout.root)
-        except AntHillError as exc:
-            log.close()
-            fail(str(exc))
 
     busy = port_taken(host, port)
     if busy:
         log.close()
         fail(f"{busy}\n  多半是上一个 anthill serve 还开着；换个端口：--port {port + 1}")
 
-    endpoint = advertise or f"http://{host}:{port}"
+    # 绑通配符是「监听哪儿」，不是「别人怎么找到我」—— 广播 0.0.0.0 出去，
+    # 对端记下来之后永远连不上，报错还很难懂
+    reachable = local_ip() if host in WILDCARD_HOSTS else host
+    endpoint = advertise or f"http://{reachable}:{port}"
     # 面板默认只在回环上开：一旦 --host 0.0.0.0（为了让同网段投递进来），
     # 面板就会跟着暴露给整个网段。要那样必须显式 --panel，不给默认踩坑的机会。
     # --panel-write 本身就是个比 --panel 更明确的表态，不必再让人多写一个 --panel
@@ -162,9 +161,7 @@ def serve_command(
     try:
         asyncio.run(
             _serve(
-                layout,
-                config,
-                peers,
+                nodes,
                 log,
                 host=host,
                 port=port,
@@ -182,6 +179,28 @@ def serve_command(
         fail(f"{exc}\n  端口被占的话，换一个：--port 45779")
     finally:
         log.close()
+
+
+def _registry(layout: NodeLayout | None, config: Config | None, *, quiet: bool) -> NodeRegistry:
+    """本进程要照看哪些节点：命令行指的那个 + 清单里登记过的其它工作区。
+
+    **一台机器一个 serve 就够了** —— 路由键 `to.node` 就在信封里，
+    一个进程按名字分派到不同工作区的邮箱即可，不必一个工作区一个进程、一个端口。
+    """
+    nodes = NodeRegistry()
+    if layout is not None:
+        nodes.add(NodeContext(layout, config), primary=True)
+    for entry in known_workspaces():
+        path = Path(str(entry["path"]))
+        if not entry["exists"] or (layout is not None and path == layout.workspace):
+            continue
+        try:
+            nodes.attach(NodeLayout(path))
+        except AntHillError as exc:
+            # 清单里一条坏记录不该让整个 serve 起不来
+            if not quiet:
+                console.print(f"[yellow]![/yellow] 跳过工作区 {path}：{exc}")
+    return nodes
 
 
 def _load_or_setup(workspace: Path | None) -> tuple[NodeLayout | None, Config | None, bool]:
@@ -208,9 +227,7 @@ def _load_or_setup(workspace: Path | None) -> tuple[NodeLayout | None, Config | 
 
 
 async def _serve(
-    layout: NodeLayout | None,
-    config: Config | None,
-    peers: PeerRegistry | None,
+    nodes: NodeRegistry,
     log: EventLog,
     *,
     host: str,
@@ -222,15 +239,13 @@ async def _serve(
     remote_admin: bool = False,
 ) -> None:
     app = create_app(
-        layout=layout,
-        config=config,
-        peers=peers,
+        registry=nodes,
         log=log,
         panel=panel,
         panel_writable=panel_write,
         summary=summary,
         advertise=endpoint,
-        remote_admin=remote_admin or (config is not None and config.security.remote_admin),
+        remote_admin=remote_admin or any(c.config.security.remote_admin for c in nodes.all()),
     )
     server = uvicorn.Server(
         uvicorn.Config(
@@ -245,19 +260,18 @@ async def _serve(
             proxy_headers=False,
         )
     )
-    # 没配工作区就没有身份可广播、也没有状态可写 —— 那两条循环空转即可
-    beacon = (
+    # 照看几个节点就广播几个身份 —— 同网段的人该看见的是「节点」，不是「进程」
+    beacons = [
         Beacon(
-            settings=config.discovery,
+            settings=ctx.config.discovery,
             announcement=Announcement(
-                node=config.node.name, endpoint=endpoint, agents=tuple(sorted(config.agents))
+                node=ctx.name, endpoint=endpoint, agents=tuple(sorted(ctx.config.agents))
             ),
-            peers=peers,
+            peers=ctx.peers,
             log=log,
         )
-        if config is not None and peers is not None
-        else None
-    )
+        for ctx in nodes.all()
+    ]
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -267,18 +281,16 @@ async def _serve(
 
     log.info(
         "serve.start",
-        node=config.node.name if config else "未配置",
+        node=nodes.primary_name,
+        nodes="、".join(nodes.names()) or "（无）",
         endpoint=endpoint,
         host=host,
         port=port,
     )
     tasks = [
         asyncio.create_task(server.serve(), name="http"),
-        asyncio.create_task(beacon.run(stop) if beacon is not None else stop.wait(), name="beacon"),
-        asyncio.create_task(
-            _status_loop(layout, config, peers, log, stop, enabled=summary),
-            name="status",
-        ),
+        *(asyncio.create_task(b.run(stop), name=f"beacon:{i}") for i, b in enumerate(beacons)),
+        asyncio.create_task(_status_loop(nodes, log, stop, enabled=summary), name="status"),
         asyncio.create_task(stop.wait(), name="stop"),
     ]
     try:
@@ -317,9 +329,7 @@ def _report_crashes(tasks: list[asyncio.Task[Any]], results: list[Any], log: Eve
 
 
 async def _status_loop(
-    layout: NodeLayout | None,
-    config: Config | None,
-    peers: PeerRegistry | None,
+    nodes: NodeRegistry,
     log: EventLog,
     stop: asyncio.Event,
     *,
@@ -335,14 +345,15 @@ async def _status_loop(
     都只该让「别人看不到我的状态」，不该让这台机器停止收消息。
     所以这里接住所有异常 —— 少一份状态是小事，节点掉线是大事。
     """
-    if not enabled or layout is None or config is None or peers is None:
+    if not enabled:
         await stop.wait()
         return
     while not stop.is_set():
-        try:
-            write_status(layout, config, peers)
-        except Exception as exc:
-            log.warn("status.write_failed", error=f"{type(exc).__name__}: {exc}")
+        for ctx in nodes.all():
+            try:
+                write_status(ctx.layout, ctx.config, ctx.peers)
+            except Exception as exc:
+                log.warn("status.write_failed", node=ctx.name, error=f"{type(exc).__name__}: {exc}")
         with suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=interval)
             return

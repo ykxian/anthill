@@ -21,6 +21,7 @@ from anthill.core.logging import EventLog
 from anthill.discovery.registry import PeerRegistry
 from anthill.security.signing import sign_envelope
 from anthill.transport.base import DeliveryResult, Destination, Transport
+from anthill.transport.http import peer_client
 from anthill.web.endpoints import DELIVER_PATH
 
 DEFAULT_TIMEOUT = 15.0
@@ -44,7 +45,7 @@ class LanTransport(Transport):
         self._advertise = advertise
         self._peers = peers
         self._log = log
-        self._client = client or httpx.AsyncClient(timeout=timeout)
+        self._client = client or peer_client(timeout)
 
     async def deliver(self, env: Envelope, dest: Destination) -> DeliveryResult:
         try:

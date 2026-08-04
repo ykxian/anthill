@@ -19,6 +19,20 @@ from anthill.core.paths import NodeLayout
 BOARD_SEED = "# BOARD\n\n> 当前协作状态快照，由 coordinator 单写者维护。\n"
 
 
+def local_ip() -> str:
+    """猜一个**对外可达**的本机 IP。连不上就退化成 127.0.0.1。
+
+    `0.0.0.0` 是绑定用的通配符，不是地址 —— 把它当 endpoint 广播出去，
+    对端记下来之后永远连不上（而且报错还很难懂：走代理的话是一个空的 502）。
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        try:
+            sock.connect(("10.255.255.255", 1))  # 不发包，只让内核挑一条路由
+            return str(sock.getsockname()[0])
+        except OSError:
+            return "127.0.0.1"
+
+
 def default_node_name() -> str:
     """默认拿主机名 —— 局域网里一眼能对上是哪台机器。"""
     raw = socket.gethostname().split(".")[0].lower()

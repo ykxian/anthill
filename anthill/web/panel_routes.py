@@ -43,9 +43,10 @@ from anthill.web.agents import AgentSpec, add_agent, remove_agent, start_agent, 
 from anthill.web.chat import messages as chat_messages
 from anthill.web.chat import threads as chat_threads
 from anthill.web.cluster import build_cluster
-from anthill.web.context import NodeContext
+from anthill.web.context import NodeRegistry
 from anthill.web.endpoints import PANEL_PATH
 from anthill.web.panel import build_snapshot
+from anthill.web.remote import control_agent as remote_control_agent
 from anthill.web.remote import read_config as remote_read_config
 from anthill.web.remote import write_config as remote_write_config
 from anthill.web.setup import browse
@@ -71,7 +72,17 @@ def local_only(request: Request, *, what: str = "这个接口") -> None:
         raise HTTPException(status_code=403, detail=f"拒绝跨站读取{what}")
 
 
-def mount_panel(app: FastAPI, *, ctx: NodeContext, log: EventLog) -> None:
+def _pick(nodes: NodeRegistry, name: str) -> Any:
+    """面板上的 `?node=` 指的是**本机**哪个节点；不给就是主节点。"""
+    if not nodes.ready:
+        raise HTTPException(status_code=409, detail="本节点还没配好工作区")
+    ctx = nodes.get(name) if name else nodes.primary
+    if ctx is None:
+        raise HTTPException(status_code=404, detail=f"本机没有名为 {name!r} 的节点")
+    return ctx
+
+
+def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog) -> None:
     """面板的只读部分（03-tech-design §9）。
 
     默认就只有这些 `GET` —— 一个只会读的页面，最坏也就是被人看到状态。
@@ -90,11 +101,15 @@ def mount_panel(app: FastAPI, *, ctx: NodeContext, log: EventLog) -> None:
         """本机还没配好工作区时，页面靠这个知道该显示设置界面。"""
         local_only(request, what="设置界面")
         return {
-            "ready": ctx.ready,
-            "node": ctx.node_name,
-            "workspace": str(ctx.layout.workspace) if ctx.ready else "",
+            "ready": nodes.ready,
+            "node": nodes.primary_name,
+            "nodes": [{"node": c.name, "workspace": str(c.layout.workspace)} for c in nodes.all()],
+            "workspace": str(nodes.primary.layout.workspace) if nodes.ready else "",
             "home": str(setup_home()),
-            "workspaces": list_workspaces(ctx.layout if ctx.ready else None),
+            "workspaces": list_workspaces(
+                [c.layout.workspace for c in nodes.all()],
+                nodes.primary.layout.workspace if nodes.ready else None,
+            ),
         }
 
     @app.get(f"{PANEL_PATH}/api/setup/browse")
@@ -107,7 +122,9 @@ def mount_panel(app: FastAPI, *, ctx: NodeContext, log: EventLog) -> None:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get(f"{PANEL_PATH}/api/state")
-    async def panel_state() -> dict[str, Any]:
+    async def panel_state(node: str = "") -> dict[str, Any]:
+        """`?node=` 指本机哪个节点；一台机器可以照看好几个。"""
+        ctx = _pick(nodes, node)
         return build_snapshot(ctx.layout, ctx.config, ctx.peers)
 
     @app.get(f"{PANEL_PATH}/api/cluster")
@@ -120,22 +137,32 @@ def mount_panel(app: FastAPI, *, ctx: NodeContext, log: EventLog) -> None:
         页面拿到 403 会自动退回只看本机。
         """
         local_only(request, what="总控视图")
-        return await build_cluster(
-            ctx.layout, ctx.config, ctx.peers, log, request.app.state.cluster_cache
-        )
+        if not nodes.ready:
+            return {"node": nodes.primary_name, "nodes": []}
+        # 本机照看的每个节点都是一格，各自再带上它自己信任的对端
+        views = [
+            await build_cluster(c.layout, c.config, c.peers, log, request.app.state.cluster_cache)
+            for c in nodes.all()
+        ]
+        merged: list[dict[str, Any]] = []
+        for view in views:
+            for entry in view["nodes"]:
+                if not any(e["node"] == entry["node"] for e in merged):
+                    merged.append(entry)
+        return {"node": nodes.primary_name, "nodes": merged}
 
     @app.get(f"{PANEL_PATH}/api/chats")
-    async def panel_chats(request: Request) -> dict[str, Any]:
+    async def panel_chats(request: Request, node: str = "") -> dict[str, Any]:
         """最近的会话列表。和总控视图同样只对本机开放 —— 这是对话内容。"""
         local_only(request)
-        return {"threads": chat_threads(ctx.layout)}
+        return {"threads": chat_threads(_pick(nodes, node).layout)}
 
     @app.get(f"{PANEL_PATH}/api/chat/{{thread}}")
-    async def panel_chat(request: Request, thread: str) -> dict[str, Any]:
+    async def panel_chat(request: Request, thread: str, node: str = "") -> dict[str, Any]:
         local_only(request)
         if not is_valid_id(thread):
             raise HTTPException(status_code=400, detail="thread 不是合法 ULID")
-        return {"thread": thread, "messages": chat_messages(ctx.layout, thread)}
+        return {"thread": thread, "messages": chat_messages(_pick(nodes, node).layout, thread)}
 
     @app.websocket(f"{PANEL_PATH}/ws")
     async def panel_ws(websocket: WebSocket) -> None:
@@ -143,13 +170,17 @@ def mount_panel(app: FastAPI, *, ctx: NodeContext, log: EventLog) -> None:
         await websocket.accept()
         try:
             while True:
+                ctx = nodes.primary if nodes.ready else None
+                if ctx is None:
+                    await asyncio.sleep(PANEL_REFRESH)
+                    continue
                 await websocket.send_json(build_snapshot(ctx.layout, ctx.config, ctx.peers))
                 await asyncio.sleep(PANEL_REFRESH)
         except (WebSocketDisconnect, RuntimeError):
             return  # 页面关了，正常退出
 
 
-def mount_panel_actions(app: FastAPI, *, ctx: NodeContext, log: EventLog) -> None:
+def mount_panel_actions(app: FastAPI, *, nodes: NodeRegistry, log: EventLog) -> None:
     """面板的写入口（`anthill serve --panel-write` 才挂）。
 
     **逐请求校验来源是回环**，而不是依赖「我们绑的是 127.0.0.1 所以应该安全」——
@@ -171,23 +202,31 @@ def mount_panel_actions(app: FastAPI, *, ctx: NodeContext, log: EventLog) -> Non
             raise HTTPException(status_code=403, detail="拒绝跨站发起的写操作")
 
     @app.post(f"{PANEL_PATH}/api/run", status_code=202)
-    async def panel_run(request: Request, body: RunRequest = Body(...)) -> dict[str, Any]:
+    async def panel_run(
+        request: Request, body: RunRequest = Body(...), node: str = ""
+    ) -> dict[str, Any]:
         _guard(request)
+        ctx = _pick(nodes, node)
         return await _acted(start_run(ctx.layout, ctx.config, body, log))
 
     @app.post(f"{PANEL_PATH}/api/send", status_code=202)
-    async def panel_send(request: Request, body: SendRequest = Body(...)) -> dict[str, Any]:
+    async def panel_send(
+        request: Request, body: SendRequest = Body(...), node: str = ""
+    ) -> dict[str, Any]:
+        """`?node=` 是**以本机哪个节点的身份**发；收件人写在 body.to 里。"""
         _guard(request)
+        ctx = _pick(nodes, node)
         return await _acted(send_message(ctx.layout, ctx.config, body, log))
 
     @app.post(f"{PANEL_PATH}/api/pair/open", status_code=201)
-    async def panel_pair_open(request: Request) -> dict[str, Any]:
-        """在本机开一个配对窗口，把 PIN 显示在页面上让对方输。"""
+    async def panel_pair_open(request: Request, node: str = "") -> dict[str, Any]:
+        """在本机某个节点上开一个配对窗口，把 PIN 显示在页面上让对方输。"""
         _guard(request)
+        ctx = _pick(nodes, node)
         code = new_pin()
         PairingStore(ctx.layout.root).open(code)
-        log.info("pair.window_opened")
-        return {"pin": code, "seconds": int(WINDOW_SECONDS)}
+        log.info("pair.window_opened", node=ctx.name)
+        return {"pin": code, "seconds": int(WINDOW_SECONDS), "node": ctx.name}
 
     @app.post(f"{PANEL_PATH}/api/pair/join", status_code=201)
     async def panel_pair_join(
@@ -195,6 +234,7 @@ def mount_panel_actions(app: FastAPI, *, ctx: NodeContext, log: EventLog) -> Non
     ) -> dict[str, Any]:
         """输入对方屏幕上的 PIN，把密钥换过来。"""
         _guard(request)
+        ctx = _pick(nodes, body.as_node)
         try:
             record = await pair_join(
                 base=pair_resolve(ctx.peers, body.target),
@@ -217,12 +257,13 @@ def mount_panel_actions(app: FastAPI, *, ctx: NodeContext, log: EventLog) -> Non
         _guard(request)
         try:
             created = create_workspace_entry(body)
-            if not ctx.ready:
-                ctx.adopt(NodeLayout(Path(str(created["path"]))), node_name=body.node_name)
+            attached = nodes.attach(
+                NodeLayout(Path(str(created["path"]))), node_name=body.node_name
+            )
         except AntHillError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        log.info("panel.workspace_adopted", path=str(created["path"]))
-        return {**created, "ready": ctx.ready, "node": ctx.node_name}
+        log.info("panel.workspace_attached", node=attached.name, path=str(created["path"]))
+        return {**created, "ready": nodes.ready, "node": attached.name}
 
     @app.delete(f"{PANEL_PATH}/api/setup/workspace")
     async def panel_workspace_delete(
@@ -230,54 +271,71 @@ def mount_panel_actions(app: FastAPI, *, ctx: NodeContext, log: EventLog) -> Non
     ) -> dict[str, Any]:
         """默认只从清单里移除；`purge=true` 才真的删 `.anthill/`（会带走密钥与邮箱）。"""
         _guard(request)
-        if ctx.ready and Path(path).expanduser().resolve() == ctx.layout.workspace:
-            raise HTTPException(status_code=400, detail="这就是当前 serve 在用的工作区，删不得")
+        wanted = Path(path).expanduser().resolve()
+        held = next((c for c in nodes.all() if c.layout.workspace == wanted), None)
+        if held is not None and held.name == nodes.primary_name:
+            raise HTTPException(status_code=400, detail="这是本进程的主节点，删不得（重启换一个）")
         try:
+            if held is not None:
+                nodes.detach(held.name)  # 先不再照看它，再动盘
             return delete_workspace(path, purge=purge)
         except AntHillError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post(f"{PANEL_PATH}/api/agents", status_code=201)
-    async def panel_agent_add(request: Request, body: AgentSpec = Body(...)) -> dict[str, Any]:
+    async def panel_agent_add(
+        request: Request, body: AgentSpec = Body(...), node: str = ""
+    ) -> dict[str, Any]:
         """加一个 Agent。改的是 node.toml，所以走和手改配置一样的校验与备份。"""
         _guard(request)
+        ctx = _pick(nodes, node)
         return _agent_edit(ctx.layout, log, lambda fresh: add_agent(ctx.layout, fresh, body))
 
     @app.delete(f"{PANEL_PATH}/api/agents/{{name}}")
-    async def panel_agent_remove(request: Request, name: str) -> dict[str, Any]:
+    async def panel_agent_remove(request: Request, name: str, node: str = "") -> dict[str, Any]:
         _guard(request)
+        ctx = _pick(nodes, node)
         return _agent_edit(ctx.layout, log, lambda fresh: remove_agent(ctx.layout, fresh, name))
 
-    @app.post(f"{PANEL_PATH}/api/agents/{{name}}/start", status_code=202)
-    async def panel_agent_start(request: Request, name: str) -> dict[str, Any]:
-        """在本机把这个 agentd 拉起来 —— 单机场景下这是最后一处非用终端不可的事。"""
-        _guard(request)
-        fresh = Config.load_from(ctx.layout)  # 可能刚在面板上加过 Agent
-        try:
-            result = start_agent(ctx.layout, fresh, name)
-        except AntHillError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        log.info("panel.agent_started", agent=name, pid=str(result.get("pid", "")))
-        return result
+    @app.post(f"{PANEL_PATH}/api/agents/{{name}}/{{action}}", status_code=202)
+    async def panel_agent_control(
+        request: Request, name: str, action: str, node: str = ""
+    ) -> dict[str, Any]:
+        """启停 agentd。`?node=` 可以是本机的某个节点，也可以是某台远端。
 
-    @app.post(f"{PANEL_PATH}/api/agents/{{name}}/stop", status_code=202)
-    async def panel_agent_stop(request: Request, name: str) -> dict[str, Any]:
+        远端那一档走的是和「改它的配置」同一道闸（对方的 `remote_admin`）——
+        能改 node.toml 本来就约等于能在那台机器上执行命令，不必再分一级。
+        """
         _guard(request)
+        if action not in ("start", "stop"):
+            raise HTTPException(status_code=404, detail=f"不认识的动作 {action!r}")
+        if node and nodes.get(node) is None:
+            speaker = nodes.speaker_for(node)
+            return await _remote(
+                remote_control_agent(speaker.config, speaker.peers, node, name, action)
+            )
+        ctx = _pick(nodes, node)
         try:
-            result = stop_agent(ctx.layout, name)
+            result = (
+                start_agent(ctx.layout, ctx.config, name)
+                if action == "start"
+                else stop_agent(ctx.layout, name)
+            )
         except AntHillError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        log.info("panel.agent_stopped", agent=name)
+        log.info(f"panel.agent_{action}", node=ctx.name, agent=name)
         return result
 
     @app.get(f"{PANEL_PATH}/api/config")
     async def panel_config(request: Request, node: str = "") -> dict[str, Any]:
         """`?node=` 指定哪台机器；留空就是本机。"""
         _guard(request)
-        if node and node != ctx.config.node.name:
-            return await _remote(remote_read_config(ctx.config, ctx.peers, node))
+        if node and nodes.get(node) is None:
+            speaker = nodes.speaker_for(node)
+            return await _remote(remote_read_config(speaker.config, speaker.peers, node))
+        ctx = _pick(nodes, node)
         try:
-            return {"node": ctx.config.node.name, **read_config(ctx.layout)}
+            return {"node": ctx.name, **read_config(ctx.layout)}
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"读不出配置：{exc}") from exc
 
@@ -286,8 +344,12 @@ def mount_panel_actions(app: FastAPI, *, ctx: NodeContext, log: EventLog) -> Non
         request: Request, body: RemoteConfigWrite = Body(...)
     ) -> dict[str, Any]:
         _guard(request)
-        if body.node and body.node != ctx.config.node.name:
-            return await _remote(remote_write_config(ctx.config, ctx.peers, body.node, body.text))
+        if body.node and nodes.get(body.node) is None:
+            speaker = nodes.speaker_for(body.node)
+            return await _remote(
+                remote_write_config(speaker.config, speaker.peers, body.node, body.text)
+            )
+        ctx = _pick(nodes, body.node)
         try:
             result = write_config(ctx.layout, ConfigRequest(text=body.text))
         except AntHillError as exc:
@@ -303,6 +365,9 @@ class PairJoinRequest(BaseModel):
 
     target: str = Field(min_length=1, max_length=200)
     """对方的节点名或地址。"""
+
+    as_node: str = Field(default="", max_length=64)
+    """以本机哪个节点的身份配对。留空 = 主节点。"""
 
     pin: str = Field(min_length=4, max_length=16)
 
