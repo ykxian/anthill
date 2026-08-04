@@ -28,6 +28,7 @@ from anthill.core.workspace import ensure_mailboxes
 from anthill.security.pair_client import join as pair_join
 from anthill.security.pair_client import resolve as pair_resolve
 from anthill.security.pairing import WINDOW_SECONDS, PairingStore, new_pin
+from anthill.security.panel_token import matches, presented
 from anthill.web.actions import (
     ConfigRequest,
     RunRequest,
@@ -60,16 +61,34 @@ PANEL_HTML = Path(__file__).parent / "static" / "panel.html"
 PANEL_REFRESH = 2.0
 
 
-def local_only(request: Request, *, what: str = "这个接口") -> None:
-    """逐请求校验来源是回环 + 不是跨站发起的。
+def authorize(request: Request, token: str, *, what: str = "这个接口") -> None:
+    """两条路任选其一：**连接来自本机**，或者**带着有效的面板令牌**。
 
-    面板绑 0.0.0.0 时（跨机投递需要），这些接口会跟着暴露给整个网段 ——
-    而它们给出的是**所有**对端的状态和对话内容，不是本机那点公开信息。
+    只认回环的话，一台没有显示器的机器就永远操作不了 —— 你没法在它上面开浏览器。
+    令牌是那台机器自己生成的（`--panel-token`），分量等同于「能在它上面执行命令」。
+
+    跨站检查一直都在：即使请求确实来自本机，发起它的如果是别的站点也不放行。
     """
-    if not is_local_client(request.client.host if request.client else None):
-        raise HTTPException(status_code=403, detail=f"{what}只允许本机访问")
     if not is_same_origin(request.headers.get("origin"), request.headers.get("host")):
-        raise HTTPException(status_code=403, detail=f"拒绝跨站读取{what}")
+        raise HTTPException(status_code=403, detail=f"拒绝跨站访问{what}")
+    if is_local_client(request.client.host if request.client else None):
+        return
+    given = presented(
+        {k.lower(): v for k, v in request.headers.items()},
+        dict(request.cookies),
+        request.query_params.get("token", ""),
+    )
+    if token and matches(given, token):
+        return
+    raise HTTPException(
+        status_code=401 if token else 403,
+        detail=(
+            f"{what}需要面板令牌 —— 那台机器上用 `anthill serve --panel-token` 起，"
+            "把打印出来的令牌填进面板"
+            if token
+            else f"{what}只允许本机访问；没有显示器的机器请用 --panel-token 起"
+        ),
+    )
 
 
 def _pick(nodes: NodeRegistry, name: str) -> Any:
@@ -82,7 +101,7 @@ def _pick(nodes: NodeRegistry, name: str) -> Any:
     return ctx
 
 
-def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog) -> None:
+def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog, token: str = "") -> None:
     """面板的只读部分（03-tech-design §9）。
 
     默认就只有这些 `GET` —— 一个只会读的页面，最坏也就是被人看到状态。
@@ -99,7 +118,7 @@ def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog) -> None:
     @app.get(f"{PANEL_PATH}/api/setup")
     async def panel_setup(request: Request) -> dict[str, Any]:
         """本机还没配好工作区时，页面靠这个知道该显示设置界面。"""
-        local_only(request, what="设置界面")
+        authorize(request, token, what="设置界面")
         return {
             "ready": nodes.ready,
             "node": nodes.primary_name,
@@ -115,15 +134,22 @@ def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog) -> None:
     @app.get(f"{PANEL_PATH}/api/setup/browse")
     async def panel_browse(request: Request, path: str = "") -> dict[str, Any]:
         """挑工作区放哪用的目录浏览器。只列目录，只对本机开放。"""
-        local_only(request, what="目录浏览")
+        authorize(request, token, what="目录浏览")
         try:
             return browse(path)
         except AntHillError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get(f"{PANEL_PATH}/api/state")
-    async def panel_state(node: str = "") -> dict[str, Any]:
-        """`?node=` 指本机哪个节点；一台机器可以照看好几个。"""
+    async def panel_state(request: Request, node: str = "") -> dict[str, Any]:
+        """`?node=` 指本机哪个节点；一台机器可以照看好几个。
+
+        **这也要认证。** 它给出的是编排任务的正文和最近的日志 ——
+        和 `/node/summary` 给对端看的是同一批东西，那边要签名，这边不该裸奔。
+        以前它是敞着的（面板绑 0.0.0.0 时给网段上的人留个只读视图），
+        现在有了令牌就没必要再留这个口子。
+        """
+        authorize(request, token, what="节点状态")
         ctx = _pick(nodes, node)
         return build_snapshot(ctx.layout, ctx.config, ctx.peers)
 
@@ -136,7 +162,7 @@ def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog) -> None:
         面板绑了 `0.0.0.0` 时，那等于把整个集群的状态摊给整个网段。
         页面拿到 403 会自动退回只看本机。
         """
-        local_only(request, what="总控视图")
+        authorize(request, token, what="总控视图")
         if not nodes.ready:
             return {"node": nodes.primary_name, "nodes": []}
         # 本机照看的每个节点都是一格，各自再带上它自己信任的对端
@@ -154,12 +180,12 @@ def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog) -> None:
     @app.get(f"{PANEL_PATH}/api/chats")
     async def panel_chats(request: Request, node: str = "") -> dict[str, Any]:
         """最近的会话列表。和总控视图同样只对本机开放 —— 这是对话内容。"""
-        local_only(request)
+        authorize(request, token)
         return {"threads": chat_threads(_pick(nodes, node).layout)}
 
     @app.get(f"{PANEL_PATH}/api/chat/{{thread}}")
     async def panel_chat(request: Request, thread: str, node: str = "") -> dict[str, Any]:
-        local_only(request)
+        authorize(request, token)
         if not is_valid_id(thread):
             raise HTTPException(status_code=400, detail="thread 不是合法 ULID")
         return {"thread": thread, "messages": chat_messages(_pick(nodes, node).layout, thread)}
@@ -180,7 +206,9 @@ def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog) -> None:
             return  # 页面关了，正常退出
 
 
-def mount_panel_actions(app: FastAPI, *, nodes: NodeRegistry, log: EventLog) -> None:
+def mount_panel_actions(
+    app: FastAPI, *, nodes: NodeRegistry, log: EventLog, token: str = ""
+) -> None:
     """面板的写入口（`anthill serve --panel-write` 才挂）。
 
     **逐请求校验来源是回环**，而不是依赖「我们绑的是 127.0.0.1 所以应该安全」——
@@ -191,15 +219,7 @@ def mount_panel_actions(app: FastAPI, *, nodes: NodeRegistry, log: EventLog) -> 
     """
 
     def _guard(request: Request) -> None:
-        """两道：连接必须来自本机，且请求不能是别的站点发起的。
-
-        第一道是真正的那道闸（TCP 对端地址，客户端伪造不了）。
-        第二道是纵深防御，见 `actions.is_same_origin` 的说明。
-        """
-        if not is_local_client(request.client.host if request.client else None):
-            raise HTTPException(status_code=403, detail="面板的写操作只允许本机访问")
-        if not is_same_origin(request.headers.get("origin"), request.headers.get("host")):
-            raise HTTPException(status_code=403, detail="拒绝跨站发起的写操作")
+        authorize(request, token, what="面板的写操作")
 
     @app.post(f"{PANEL_PATH}/api/run", status_code=202)
     async def panel_run(

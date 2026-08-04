@@ -306,6 +306,29 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 12px; }
 <footer id="footer">只读面板 —— 确认与操作留在 CLI。数据来自 <code>.anthill/</code> 下的文件。</footer>
 
 <script>
+// ---- 面板令牌：从别的机器操作一台没有显示器的机器时要带上 ----
+// 第一次用 ?token=... 落地，随即存进 localStorage 并从地址栏抹掉 ——
+// URL 会进浏览器历史和 referer，不该长期待在那儿。
+const TOKEN_KEY = "anthill.panel.token";
+const auth = { token: "" };
+
+function pickUpToken() {
+  const url = new URL(location.href);
+  const fresh = url.searchParams.get("token");
+  if (fresh) {
+    try { localStorage.setItem(TOKEN_KEY, fresh); } catch (err) { /* 隐私模式 */ }
+    url.searchParams.delete("token");
+    history.replaceState(null, "", url.toString());
+    auth.token = fresh;
+    return;
+  }
+  try { auth.token = localStorage.getItem(TOKEN_KEY) || ""; } catch (err) { auth.token = ""; }
+}
+
+function authHeaders(extra) {
+  return auth.token ? { ...extra, "X-AntHill-Panel": auth.token } : { ...extra };
+}
+
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => (
   { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -500,8 +523,9 @@ async function poll() {
   polling = true;
   try {
     // 总控视图只对本机开放（403）；面板开在 0.0.0.0 时退回只看本机
-    const res = await fetch("api/cluster");
-    const fallback = res.status === 403 ? await fetch("api/state") : null;
+    const res = await fetch("api/cluster", { headers: authHeaders() });
+    const fallback =
+      res.status === 403 ? await fetch("api/state", { headers: authHeaders() }) : null;
     const use = fallback || res;
     if (!use.ok) throw new Error(`HTTP ${use.status}`);
     applyCluster(await use.json());
@@ -578,7 +602,7 @@ function renderChat() {
 async function loadChat() {
   if (!chat.thread) { chat.messages = []; renderChat(); return; }
   try {
-    const res = await fetch(scoped(`api/chat/${encodeURIComponent(chat.thread)}`));
+    const res = await fetch(scoped(`api/chat/${encodeURIComponent(chat.thread)}`), { headers: authHeaders() });
     if (!res.ok) return;
     chat.messages = (await res.json()).messages || [];
     renderChat();
@@ -588,7 +612,7 @@ async function loadChat() {
 async function pickThreadFor(target) {
   // 接着跟这个 Agent 最近的那次对话往下说，thread 记忆才连得上
   try {
-    const res = await fetch(scoped("api/chats"));
+    const res = await fetch(scoped("api/chats"), { headers: authHeaders() });
     if (!res.ok) return "";
     const found = ((await res.json()).threads || []).find((t) => String(t.with || "").endsWith(target));
     return found ? found.thread : "";
@@ -750,8 +774,8 @@ async function refreshSetup() {
 let canWrite = false;
 async function api(path, options) {
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers: authHeaders({ "Content-Type": "application/json", ...(options || {}).headers }),
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
@@ -920,6 +944,7 @@ $("config-save").addEventListener("click", async () => {
   }
 });
 
+pickUpToken();
 refreshSetup();
 poll();
 setInterval(poll, CLUSTER_REFRESH);

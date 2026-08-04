@@ -39,7 +39,13 @@ const document = {
   addEventListener() {},
 };
 const window = { prompt: () => null, alert() {}, confirm: () => false };
-const location = { protocol: "http:", host: "panel.test", pathname: "/panel" };
+const localStorage = { getItem: () => null, setItem() {} };
+const history = { replaceState() {} };
+class URL {
+  constructor() { this.searchParams = { get: () => null, delete() {} }; }
+  toString() { return "http://panel.test/panel"; }
+}
+const location = { protocol: "http:", host: "panel.test", pathname: "/panel", href: "http://panel.test/panel" };
 const fetch = async () => {
   throw new Error("测试里不连网");
 };
@@ -53,6 +59,9 @@ const noop = () => 0;
 const panel = new Function(
   "document",
   "window",
+  "localStorage",
+  "history",
+  "URL",
   "location",
   "fetch",
   "WebSocket",
@@ -61,7 +70,7 @@ const panel = new Function(
   // setWrite：写权限开着时拓扑会多画启停/删除按钮和「加 Agent」表单，
   // 那几处也把外部数据拼进了 HTML，必须一起验
   `${script}\nreturn { state, applyCluster, applyLocal, renderWorkspaces, setWrite: (v) => { canWrite = v; } };`,
-)(document, window, location, fetch, WebSocket, noop, noop);
+)(document, window, localStorage, history, URL, location, fetch, WebSocket, noop, noop);
 
 // ---- 数据 ----
 

@@ -235,7 +235,7 @@ async def test_write_endpoints_are_absent_by_default(
     async with client_for(node, writable=False) as client:
         assert (await client.post("/panel/api/run", json={"task": "x"})).status_code == 404
         assert (await client.get("/panel/api/config")).status_code == 404
-        assert (await client.get("/panel/api/state")).status_code == 200  # 只读的还在
+        assert (await client.get("/panel/api/state")).status_code == 200  # 本机读照旧
 
 
 async def test_a_non_local_client_is_refused(
@@ -264,7 +264,9 @@ async def test_a_non_local_client_is_refused(
 
     assert run.status_code == 403
     assert config_write.status_code == 403
-    assert state.status_code == 200  # 只读的不受影响
+    # 状态里有编排任务的正文和最近的日志 —— 和 /node/summary 给对端看的是同一批
+    # 东西，那边要签名，这边不该对整个网段裸奔。没有令牌就是 403。
+    assert state.status_code == 403
     assert inbox(layout, "boss") == []
 
 

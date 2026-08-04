@@ -583,11 +583,12 @@ async def test_the_panel_exposes_the_cluster_view_to_the_local_machine(local: Bu
 
 
 async def test_the_cluster_view_is_refused_to_anyone_else(local: Bundle) -> None:
-    """面板绑 0.0.0.0 时，把**所有**对端的状态摊给整个网段是另一回事。"""
-    async with client_for(local, host="10.0.8.99") as client:
-        response = await client.get("/panel/api/cluster")
+    """面板绑 0.0.0.0 时，把**所有**对端的状态摊给整个网段是另一回事。
 
-    assert response.status_code == 403
-    # 只看本机的那个接口照常 —— 页面会自动退回去
-    async with client_for(local, host="10.0.8.99") as client:
-        assert (await client.get("/panel/api/state")).status_code == 200
+    没有面板令牌时，只看本机的那个接口同样要拦 —— 它给出的是编排任务的正文
+    和最近的日志，和 `/node/summary` 给对端看的是同一批东西，那边要签名。
+    要从别的机器上看，用 `--panel-token`（见 test_panel_token.py）。
+    """
+    for path in ("/panel/api/cluster", "/panel/api/state"):
+        async with client_for(local, host="10.0.8.99") as client:
+            assert (await client.get(path)).status_code == 403, path

@@ -94,6 +94,7 @@ def create_app(
     summary: bool = True,
     advertise: str = "",
     remote_admin: bool = False,
+    panel_token: str = "",
 ) -> FastAPI:
     nodes = registry if registry is not None else _bootstrap(layout, config)
     app = FastAPI(
@@ -122,9 +123,9 @@ def create_app(
         return ctx
 
     if panel:
-        mount_panel(app, nodes=nodes, log=log)
+        mount_panel(app, nodes=nodes, log=log, token=panel_token)
     if panel and panel_writable:
-        mount_panel_actions(app, nodes=nodes, log=log)
+        mount_panel_actions(app, nodes=nodes, log=log, token=panel_token)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:

@@ -25,8 +25,10 @@ from anthill.core.config import Config
 from anthill.core.errors import AntHillError
 from anthill.core.logging import EventLog
 from anthill.core.paths import NodeLayout
-from anthill.core.workspace import load_or_create, local_ip
+from anthill.core.workspace import load_or_create as load_workspace
+from anthill.core.workspace import local_ip
 from anthill.discovery.beacon import Announcement, Beacon
+from anthill.security.panel_token import load_or_create, token_path
 from anthill.web.app import create_app
 from anthill.web.cluster import write_status
 from anthill.web.context import NodeContext, NodeRegistry
@@ -79,6 +81,11 @@ def serve_command(
         False,
         "--remote-admin",
         help="允许已信任的对端在它的面板上直接改本机 node.toml（≈ 让它能在本机执行命令）",
+    ),
+    panel_token: bool = typer.Option(
+        False,
+        "--panel-token",
+        help="给面板发一个访问令牌，好从别的机器上操作这台（没有显示器的机器需要）",
     ),
     summary: bool = typer.Option(
         True,
@@ -150,6 +157,15 @@ def serve_command(
             )
     elif panel is None:
         console.print("[dim]面板已关闭：绑的不是回环地址；确实要开就加 --panel[/dim]")
+    token = load_or_create() if panel_token else ""
+    if token:
+        console.print(
+            f"\n[bold]面板令牌[/bold]  [cyan]{token}[/cyan]\n"
+            f"[dim]  在别的机器上打开 {endpoint}/panel?token={token}\n"
+            f"  令牌存在 {token_path()}（0600）；换一个就删掉它重启\n"
+            "  它等价于「能在这台机器上执行命令」——"
+            "局域网不可信时请改用 ssh -L 转发端口，别让它在明文里裸奔[/dim]\n"
+        )
     if not summary:
         console.print("[dim]不共享状态：别人的总控面板会把本机显示成不可用[/dim]")
     if remote_admin or (config is not None and config.security.remote_admin):
@@ -170,6 +186,7 @@ def serve_command(
                 panel_write=panel_write,
                 summary=summary,
                 remote_admin=remote_admin,
+                panel_token=token,
             )
         )
     except KeyboardInterrupt:
@@ -215,7 +232,7 @@ def _load_or_setup(workspace: Path | None) -> tuple[NodeLayout | None, Config | 
     if workspace is not None:
         layout = NodeLayout(workspace.resolve())
         try:
-            config, created = load_or_create(layout)
+            config, created = load_workspace(layout)
         except AntHillError as exc:
             fail(str(exc))
         return layout, config, created
@@ -237,6 +254,7 @@ async def _serve(
     panel_write: bool = False,
     summary: bool = True,
     remote_admin: bool = False,
+    panel_token: str = "",
 ) -> None:
     app = create_app(
         registry=nodes,
@@ -246,6 +264,7 @@ async def _serve(
         summary=summary,
         advertise=endpoint,
         remote_admin=remote_admin or any(c.config.security.remote_admin for c in nodes.all()),
+        panel_token=panel_token,
     )
     server = uvicorn.Server(
         uvicorn.Config(
