@@ -14,6 +14,7 @@ from rich.table import Table
 from anthill.agent.runtime import AgentRuntime
 from anthill.agent.tools.base import Confirmer
 from anthill.cli.common import console, fail, is_running, load
+from anthill.core.config import AgentSection
 from anthill.core.errors import AntHillError
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
@@ -105,7 +106,7 @@ def list_agents(
     layout, config = load(workspace)
 
     table = Table(title=f"节点 {config.node.name}", header_style="bold cyan")
-    for column in ("Agent", "角色", "Provider", "状态", "待处理", "watcher"):
+    for column in ("Agent", "角色", "大脑", "状态", "待处理", "watcher"):
         table.add_column(column)
 
     for name, agent in sorted(config.agents.items()):
@@ -115,12 +116,25 @@ def list_agents(
         table.add_row(
             name,
             agent.role,
-            agent.provider or "[dim]echo[/dim]",
+            _brain(agent),
             "[green]running[/green]" if running else "[dim]stopped[/dim]",
             str(len(mailbox.list_new())),
             mode,
         )
     console.print(table)
+
+
+def _brain(agent: AgentSection) -> str:
+    """这个 Agent 的大脑是什么。
+
+    桥接 Agent 显示成 `echo` 会让人以为它不干活 —— 实际上它背后是一个人
+    （或一个常驻会话）。「在跑什么」这张表是排查时第一眼看的东西，不能误导。
+    """
+    if agent.bridge:
+        return "[cyan]bridge[/cyan]"
+    if agent.command:
+        return f"[cyan]{agent.command[0]}[/cyan]"
+    return agent.provider or "[dim]echo[/dim]"
 
 
 def _runtime_state(status_file: Path) -> tuple[bool, str]:

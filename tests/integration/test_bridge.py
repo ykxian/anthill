@@ -403,3 +403,19 @@ def test_a_real_title_is_kept_alongside_the_body() -> None:
     text = render_request(env)
 
     assert "补单测" in text and "12 个用例" in text
+
+
+def test_the_bridge_directories_exist_as_soon_as_the_agent_starts(
+    node: tuple[NodeLayout, Config],
+) -> None:
+    """人得先能告诉自己的 Claude Code「盯着这个目录」。
+
+    等第一条消息到了才建目录的话，配置的那一刻它还不存在。
+    """
+    layout, config = node
+
+    build_handler(layout=layout, config=config, agent_name="cc")
+
+    bridge = layout.agent_dir("cc") / "bridge"
+    assert (bridge / "inbox").is_dir()
+    assert (bridge / "outbox").is_dir()

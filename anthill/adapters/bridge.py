@@ -89,6 +89,10 @@ class BridgeHandler:
         self._root = root / BRIDGE_DIR
         self._agent = agent_name
         self._chat_turns = chat_turns
+        # 启动就把目录建出来：人得先能告诉自己的 Claude Code「盯着这个目录」，
+        # 而不是等第一条消息到了才发现目录还不存在
+        for name in (INBOX, OUTBOX, PENDING, DONE):
+            self.dir(name)
 
     @property
     def root(self) -> Path:

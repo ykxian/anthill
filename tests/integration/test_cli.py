@@ -121,3 +121,20 @@ def test_version(workspace: Path):
 
     assert result.exit_code == 0
     assert "anthill" in result.output
+
+
+def test_agent_list_shows_what_each_brain_actually_is(workspace: Path):
+    """桥接 Agent 显示成 echo 会让人以为它不干活 —— 背后其实是一个人。"""
+    toml = NodeLayout(workspace).node_toml
+    toml.write_text(
+        toml.read_text(encoding="utf-8")
+        + '\n[agents.cc]\nrole = "worker"\nbridge = true\n'
+        + '\n[agents.term]\nrole = "worker"\ncommand = ["claude", "-p"]\n',
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["agent", "list", "-w", str(workspace)])
+
+    assert result.exit_code == 0
+    assert "bridge" in result.output
+    assert "claude" in result.output
