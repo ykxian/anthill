@@ -60,7 +60,7 @@ const panel = new Function(
   "setTimeout",
   // setWrite：写权限开着时拓扑会多画启停/删除按钮和「加 Agent」表单，
   // 那几处也把外部数据拼进了 HTML，必须一起验
-  `${script}\nreturn { state, applyCluster, applyLocal, setWrite: (v) => { canWrite = v; } };`,
+  `${script}\nreturn { state, applyCluster, applyLocal, renderWorkspaces, setWrite: (v) => { canWrite = v; } };`,
 )(document, window, location, fetch, WebSocket, noop, noop);
 
 // ---- 数据 ----
@@ -250,5 +250,14 @@ panel.applyCluster({
 for (const pane of ["topo-body", "runs-body", "stream-body"]) {
   assert.ok(!$(pane).innerHTML.includes("<img"), `${pane} 里有没转义的对端数据`);
 }
+
+// 工作区清单里的路径与节点名同样是外部数据（磁盘上的目录名、别人写的 node.toml）
+panel.renderWorkspaces({
+  ready: true,
+  node: EVIL,
+  home: "/tmp",
+  workspaces: [{ name: EVIL, path: EVIL, node: EVIL, exists: true, current: false }],
+});
+assert.ok(!$("ws-list").innerHTML.includes("<img"), "工作区清单里有没转义的数据");
 
 console.log("ok");

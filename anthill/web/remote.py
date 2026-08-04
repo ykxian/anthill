@@ -16,32 +16,52 @@ from anthill.core.errors import AntHillError, PeerError
 from anthill.core.ids import now
 from anthill.discovery.registry import PeerRegistry
 from anthill.security.signing import sign_request
-from anthill.web.endpoints import CONFIG_PATH
+from anthill.web.endpoints import AGENTS_PATH, CONFIG_PATH
 
 TIMEOUT = 10.0
 MAX_CONFIG_BYTES = 512 * 1024
 
 
-def _headers(config: Config, peers: PeerRegistry, node: str) -> tuple[str, dict[str, str]]:
+def _signed_for(
+    config: Config, peers: PeerRegistry, node: str, path: str
+) -> tuple[str, dict[str, str]]:
+    """算出 `(完整 URL, 签名头)`。签名签的是**请求路径本身**，
+    所以一个「启动 coder」的签名换不来「启动别人」或者别的动作。"""
     try:
         peer, key = peers.require_trusted(node)
     except PeerError as exc:
         raise AntHillError(str(exc)) from exc
     if not peer.endpoint:
         raise AntHillError(
-            f"{node} 没有 HTTP 地址 —— SSH peer 的配置请直接在那台机器上改，"
-            "面板不代管（那侧的约定是不开任何新端口）"
+            f"{node} 没有 HTTP 地址 —— SSH peer 那侧的约定是不开任何新端口，"
+            "在那台机器上直接操作，面板不代管"
         )
     stamp = now().isoformat()
-    return peer.endpoint.rstrip("/") + CONFIG_PATH, {
+    return peer.endpoint.rstrip("/") + path, {
         "X-AntHill-Node": config.node.name,
         "X-AntHill-Ts": stamp,
-        "X-AntHill-Sig": sign_request(key, node=config.node.name, path=CONFIG_PATH, ts=stamp),
+        "X-AntHill-Sig": sign_request(key, node=config.node.name, path=path, ts=stamp),
     }
 
 
+async def control_agent(
+    config: Config, peers: PeerRegistry, node: str, agent: str, action: str
+) -> dict[str, Any]:
+    """启停别台机器上的 agentd。和改它的配置同一道闸（remote_admin）。"""
+    if action not in ("start", "stop"):
+        raise AntHillError(f"不认识的动作 {action!r}")
+    url, headers = _signed_for(config, peers, node, f"{AGENTS_PATH}/{agent}/{action}")
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        try:
+            response = await client.post(url, headers=headers)
+        except httpx.HTTPError as exc:
+            raise AntHillError(f"连不上 {node}：{exc}") from exc
+    _check(node, response, ok=(200, 202))
+    return {"node": node, **response.json()}
+
+
 async def read_config(config: Config, peers: PeerRegistry, node: str) -> dict[str, Any]:
-    url, headers = _headers(config, peers, node)
+    url, headers = _signed_for(config, peers, node, CONFIG_PATH)
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         try:
             response = await client.get(url, headers=headers)
@@ -53,7 +73,7 @@ async def read_config(config: Config, peers: PeerRegistry, node: str) -> dict[st
 
 
 async def write_config(config: Config, peers: PeerRegistry, node: str, text: str) -> dict[str, Any]:
-    url, headers = _headers(config, peers, node)
+    url, headers = _signed_for(config, peers, node, CONFIG_PATH)
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         try:
             response = await client.put(url, headers=headers, json={"text": text})
@@ -63,8 +83,10 @@ async def write_config(config: Config, peers: PeerRegistry, node: str, text: str
     return {"ok": True, "node": node, **response.json()}
 
 
-def _check(node: str, response: httpx.Response) -> None:
+def _check(node: str, response: httpx.Response, ok: tuple[int, ...] = (200,)) -> None:
     """把对端的拒绝翻译成人能看懂的话 —— 404 在这里有特定含义。"""
+    if response.status_code in ok:
+        return
     if response.status_code == 404:
         raise AntHillError(
             f"{node} 没有开放远端管理。让那台机器在 node.toml 里写\n"
@@ -74,7 +96,6 @@ def _check(node: str, response: httpx.Response) -> None:
         )
     if response.status_code == 403:
         raise AntHillError(f"{node} 不信任本节点 —— 先配对（anthill peers pair）")
-    if response.status_code != 200:
-        raise AntHillError(
-            f"{node} 拒绝了这次操作（HTTP {response.status_code}）：{response.text[:300]}"
-        )
+    raise AntHillError(
+        f"{node} 拒绝了这次操作（HTTP {response.status_code}）：{response.text[:300]}"
+    )

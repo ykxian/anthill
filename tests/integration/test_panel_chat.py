@@ -383,3 +383,85 @@ async def test_an_ssh_peer_is_not_administered_through_the_panel(tmp_path: Path)
 
     with pytest.raises(AntHillError, match="SSH"):
         await remote_mod.read_config(caller[1], caller[2], "server")
+
+
+# ---------- 远端启停 agentd ----------
+
+
+def signed_for(node_name: str, key: bytes, path: str) -> dict[str, str]:
+    stamp = now().isoformat()
+    return {
+        "X-AntHill-Node": node_name,
+        "X-AntHill-Ts": stamp,
+        "X-AntHill-Sig": sign_request(key, node=node_name, path=path, ts=stamp),
+    }
+
+
+async def test_a_trusted_peer_can_start_an_agent_once_admin_is_open(
+    paired: tuple[Bundle, bytes],
+) -> None:
+    bundle, key = paired
+    layout = bundle[0]
+    path = "/node/agents/coder/start"
+
+    async with client_for(bundle, admin=True) as client:
+        response = await client.post(path, headers=signed_for("lab", key, path))
+
+    assert response.status_code == 202, response.text
+    from anthill.web.agents import running_pid, stop_agent
+
+    try:
+        # agentd 起来到写下 runtime.json 有几百毫秒
+        await _wait_until(lambda: running_pid(layout, "coder") is not None)
+    finally:
+        stop_agent(layout, "coder")
+        await _wait_until(lambda: running_pid(layout, "coder") is None)
+
+
+async def test_remote_agent_control_is_absent_until_admin_is_open(
+    paired: tuple[Bundle, bytes],
+) -> None:
+    """和改配置同一道闸 —— 没开就是 404「这个接口不存在」。"""
+    bundle, key = paired
+    path = "/node/agents/coder/start"
+
+    async with client_for(bundle, admin=False) as client:
+        response = await client.post(path, headers=signed_for("lab", key, path))
+
+    assert response.status_code == 404
+
+
+async def test_a_signature_for_one_action_does_not_work_for_another(
+    paired: tuple[Bundle, bytes],
+) -> None:
+    """签名签的是完整路径 —— 「启动 coder」的签名换不来「启动别人」。"""
+    bundle, key = paired
+    borrowed = signed_for("lab", key, "/node/agents/coder/start")
+
+    async with client_for(bundle, admin=True) as client:
+        elsewhere = await client.post("/node/agents/cli/start", headers=borrowed)
+        other_action = await client.post("/node/agents/coder/stop", headers=borrowed)
+
+    assert elsewhere.status_code == 401
+    assert other_action.status_code == 401
+
+
+async def test_an_unknown_action_is_refused(paired: tuple[Bundle, bytes]) -> None:
+    bundle, key = paired
+    path = "/node/agents/coder/destroy"
+
+    async with client_for(bundle, admin=True) as client:
+        response = await client.post(path, headers=signed_for("lab", key, path))
+
+    assert response.status_code == 404
+
+
+async def _wait_until(check: object, timeout: float = 15.0) -> None:
+    import asyncio
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if check():  # type: ignore[operator]
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("等超时了")

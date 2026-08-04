@@ -61,12 +61,12 @@ header .node b { color: var(--text); font-weight: 600; }
 main {
   display: grid; gap: var(--gap); padding: var(--gap) 22px 26px;
   grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
-  grid-template-areas: "topo runs" "topo stream" "config config";
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas: "topo runs" "topo stream" "setup setup" "config config";
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   min-height: calc(100vh - 66px);
 }
 @media (max-width: 900px) {
-  main { grid-template-columns: 1fr; grid-template-areas: "topo" "runs" "stream" "config"; }
+  main { grid-template-columns: 1fr; grid-template-areas: "topo" "runs" "stream" "setup" "config"; }
 }
 section {
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
@@ -198,6 +198,20 @@ button[disabled] { opacity: 0.5; cursor: not-allowed; }
 .add-agent .line { display: flex; gap: 6px; }
 .add-agent input, .add-agent select { flex: 1; min-width: 0; }
 
+/* ---- 设置：还没配工作区，或者要管这台机器上的多个工作区 ---- */
+#setup { grid-area: setup; }
+#setup .body { display: grid; gap: 10px; }
+.ws { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 7px; }
+.ws:hover { background: var(--surface-2); }
+.ws .path { color: var(--dim); font-size: 12px; }
+.ws.now { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.crumbs { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 0 10px; }
+.crumbs code { color: var(--muted); }
+.dirs { max-height: 210px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.dir { display: flex; gap: 8px; align-items: center; padding: 5px 10px; cursor: pointer; }
+.dir:hover { background: var(--surface-2); }
+.dir .tag { font-size: 11px; color: var(--ok); }
+
 /* ---- 配置抽屉 ---- */
 #config { grid-area: config; }
 #config .drawer-head select { max-width: 180px; }
@@ -248,6 +262,29 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 12px; }
   </section>
 </main>
 
+  <section id="setup" hidden>
+    <h2>
+      <span class="drawer-head">工作区 <span class="count" id="setup-count"></span></span>
+      <span class="drawer-head">
+        <button class="ghost" id="setup-toggle" type="button">选一个目录…</button>
+      </span>
+    </h2>
+    <div class="body">
+      <div id="ws-list"></div>
+      <div id="picker" hidden>
+        <div class="crumbs"><span class="meta">当前位置</span><code id="crumb-path"></code>
+          <button class="ghost" id="crumb-up" type="button">上一级</button></div>
+        <div class="dirs" id="dir-list"></div>
+        <form class="actions" id="ws-form">
+          <input id="ws-name" placeholder="新建子目录名（留空 = 就用当前这个目录）" autocomplete="off" />
+          <input id="ws-node" placeholder="节点名，留空取主机名" autocomplete="off" />
+          <button type="submit">在这里建工作区</button>
+        </form>
+      </div>
+      <div class="hint" id="setup-hint" hidden></div>
+    </div>
+  </section>
+
   <section id="config" hidden>
     <h2>
       <span class="drawer-head">
@@ -280,12 +317,15 @@ function setConn(state, text) {
 
 function agentCard(a, node) {
   // 只有本机的 Agent 能在这里启停 —— 别的机器上的进程不归这个面板管
-  const ops = node.local && canWrite
+  // 远端那台也能启停 —— 走它自己的 remote_admin 开关，没开就会给一句明确的拒绝。
+  // 删 Agent 目前只对本机开放：那是改配置，另有一条路（配置抽屉选机器）。
+  const where = `data-agent="${esc(a.name)}" data-node="${esc(node.node)}"`;
+  const ops = canWrite
     ? `<span class="ops">
-         <button class="ghost" type="button" data-agent="${esc(a.name)}"
+         <button class="ghost" type="button" ${where}
                  data-op="${a.running ? "stop" : "start"}">${a.running ? "停" : "启动"}</button>
-         ${a.running ? "" : `<button class="ghost" type="button"
-                 data-agent="${esc(a.name)}" data-op="remove">删</button>`}
+         ${!a.running && node.local ? `<button class="ghost" type="button" ${where}
+                 data-op="remove">删</button>` : ""}
        </span>`
     : "";
   return `
@@ -570,6 +610,114 @@ for (const tab of document.querySelectorAll(".tab")) {
   });
 }
 
+// ---- 工作区：还没配好时这是唯一能做的事；配好之后用来管这台机器上的几个 ----
+const picker = { at: "", ready: true };
+
+function renderWorkspaces(info) {
+  ready.ready = info.ready;
+  $("setup-count").textContent = info.ready
+    ? `${info.workspaces.length} 个 · 当前 ${info.node}`
+    : "还没配 —— 挑一个目录";
+  $("ws-list").innerHTML = info.workspaces.length
+    ? info.workspaces.map((w) => `
+      <div class="ws ${w.current ? "now" : ""}">
+        <span class="dot ${w.current ? "on" : ""}"></span>
+        <span class="name">${esc(w.name)}</span>
+        <span class="pill">${esc(w.node || "未命名")}</span>
+        <span class="path grow truncate">${esc(w.path)}</span>
+        ${w.current
+          ? `<span class="meta">当前</span>`
+          : `<button class="ghost" type="button" data-ws="${esc(w.path)}" data-ws-op="forget">移出清单</button>
+             <button class="ghost" type="button" data-ws="${esc(w.path)}" data-ws-op="purge">删除</button>`}
+      </div>`).join("")
+    : `<div class="empty">这台机器上还没有工作区</div>`;
+  // 没配好时直接把目录浏览器摊开，别让人还要找
+  if (!info.ready && $("picker").hidden) openPicker(info.home);
+}
+
+const ready = { ready: true };
+
+async function openPicker(path) {
+  $("picker").hidden = false;
+  await browseTo(path || picker.at);
+}
+
+async function browseTo(path) {
+  try {
+    const info = await api(`panel/api/setup/browse?path=${encodeURIComponent(path || "")}`);
+    picker.at = info.path;
+    $("crumb-path").textContent = info.path;
+    $("crumb-up").dataset.path = info.parent;
+    $("crumb-up").disabled = !info.parent;
+    $("dir-list").innerHTML = info.entries.length
+      ? info.entries.map((e) => `
+        <div class="dir" data-dir="${esc(e.path)}">
+          <span>${esc(e.name)}</span>
+          ${e.is_workspace ? `<span class="tag">已是工作区</span>` : ""}
+        </div>`).join("")
+      : `<div class="empty">这里没有子目录</div>`;
+    say("setup-hint", "");
+  } catch (err) {
+    say("setup-hint", String(err.message || err), "bad");
+  }
+}
+
+$("setup-toggle").addEventListener("click", () => {
+  const hidden = $("picker").hidden;
+  $("picker").hidden = !hidden;
+  if (hidden) openPicker(picker.at);
+});
+
+$("crumb-up").addEventListener("click", (event) => browseTo(event.target.dataset.path));
+
+document.addEventListener("click", (event) => {
+  const dir = event.target.closest?.("[data-dir]");
+  if (dir) { browseTo(dir.dataset.dir); return; }
+  const ws = event.target.closest?.("[data-ws]");
+  if (ws) removeWorkspace(ws.dataset.ws, ws.dataset.wsOp === "purge");
+});
+
+async function removeWorkspace(path, purge) {
+  const what = purge
+    ? `连同 .anthill/ 一起删掉？\n\n${path}\n\n里面的密钥、邮箱、黑板都会没有。`
+    : `把 ${path} 移出清单？（文件不动）`;
+  if (!window.confirm(what)) return;
+  try {
+    await api(`panel/api/setup/workspace?path=${encodeURIComponent(path)}&purge=${purge}`,
+              { method: "DELETE" });
+    refreshSetup();
+  } catch (err) {
+    window.alert(String(err.message || err));
+  }
+}
+
+$("ws-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const sub = $("ws-name").value.trim();
+  const path = sub ? `${picker.at.replace(/\/$/, "")}/${sub}` : picker.at;
+  try {
+    await api("panel/api/setup/adopt", {
+      method: "POST",
+      body: JSON.stringify({ path, node_name: $("ws-node").value.trim() }),
+    });
+    $("ws-name").value = "";
+    if (!ready.ready) { location.reload(); return; }   // 刚从「未配置」活过来，整页重来最干净
+    refreshSetup();
+    poll();
+  } catch (err) {
+    say("setup-hint", String(err.message || err), "bad");
+  }
+});
+
+async function refreshSetup() {
+  try {
+    renderWorkspaces(await api("panel/api/setup"));
+    $("setup").hidden = false;
+  } catch (err) {
+    $("setup").hidden = true;   // 没有写权限就整块不显示，和其他写操作一致
+  }
+}
+
 // ---- 写操作：探测一次能力，不能写就整块不显示 ----
 let canWrite = false;
 async function api(path, options) {
@@ -666,7 +814,7 @@ document.addEventListener("click", (event) => {
   const pair = event.target.closest?.("[data-pair]");
   if (pair) { startPairing(pair.dataset.pair); return; }
   const op = event.target.closest?.("[data-agent]");
-  if (op) runAgentOp(op.dataset.agent, op.dataset.op, op);
+  if (op) runAgentOp(op.dataset.agent, op.dataset.op, op.dataset.node, op);
 });
 
 // 拓扑是每次轮询重画的，表单不能在渲染时挂监听（会重复挂），改成事件委托
@@ -688,12 +836,13 @@ document.addEventListener("submit", async (event) => {
   }
 });
 
-async function runAgentOp(name, op, button) {
+async function runAgentOp(name, op, node, button) {
   if (op === "remove" && !window.confirm(`把 ${name} 从 node.toml 里删掉？`)) return;
   button.disabled = true;
+  const at = node && node !== state.node ? `?node=${encodeURIComponent(node)}` : "";
   try {
     if (op === "remove") await api(`panel/api/agents/${encodeURIComponent(name)}`, { method: "DELETE" });
-    else await api(`panel/api/agents/${encodeURIComponent(name)}/${op}`, { method: "POST" });
+    else await api(`panel/api/agents/${encodeURIComponent(name)}/${op}${at}`, { method: "POST" });
     // 启停要几百毫秒才在 runtime.json 上体现出来，等一拍再刷
     setTimeout(poll, 700);
   } catch (err) {
@@ -743,6 +892,7 @@ $("config-save").addEventListener("click", async () => {
   }
 });
 
+refreshSetup();
 poll();
 setInterval(poll, CLUSTER_REFRESH);
 setInterval(() => { if (!$("chat-body").hidden) loadChat(); }, 2000);

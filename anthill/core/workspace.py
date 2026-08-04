@@ -11,6 +11,7 @@ import contextlib
 import socket
 
 from anthill.core.config import Config, default_node_toml
+from anthill.core.envelope import NODE_NAME_RE
 from anthill.core.errors import AntHillError, ConfigError
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
@@ -31,13 +32,18 @@ def create_workspace(layout: NodeLayout, *, node_name: str = "", force: bool = F
     已经有 node.toml 时默认拒绝 —— 这个函数会覆盖配置文件，
     而配置被无声覆盖是很难查的那种事故。
     """
+    name = node_name or default_node_name()
+    # 先验名字再动盘：不然会写出一份读不回来的 node.toml，
+    # 留下一个「看着像工作区、其实起不来」的目录
+    if not NODE_NAME_RE.match(name):
+        raise ConfigError(
+            f"非法节点名 {name!r} —— 只能用小写字母开头的 ASCII 字母/数字/`.`/`_`/`-`"
+        )
     layout.ensure_base()
     if layout.node_toml.is_file() and not force:
         raise ConfigError(f"{layout.node_toml} 已存在；要重建请显式要求覆盖")
 
-    layout.node_toml.write_text(
-        default_node_toml(node_name or default_node_name()), encoding="utf-8"
-    )
+    layout.node_toml.write_text(default_node_toml(name), encoding="utf-8")
     config = Config.load_from(layout)
     ensure_mailboxes(layout, config)
     (layout.blackboard / "BOARD.md").write_text(BOARD_SEED, encoding="utf-8")

@@ -92,13 +92,20 @@ def serve_command(
     新机器上装好就能直接开面板，不必先在终端跑一次 `anthill init`。
     建在哪、叫什么名字都会打印出来。
     """
-    layout, config, created = _load_or_init(workspace)
-    log = EventLog(layout.log_file("serve"), agent=f"serve:{config.node.name}", echo=not quiet)
-    try:
-        peers = PeerRegistry(layout.root)
-    except AntHillError as exc:
-        log.close()
-        fail(str(exc))
+    layout, config, created = _load_or_setup(workspace)
+    # 还没配工作区时没地方写日志，只回显
+    log = EventLog(
+        layout.log_file("serve") if layout else None,
+        agent=f"serve:{config.node.name if config else '未配置'}",
+        echo=not quiet,
+    )
+    peers = None
+    if layout is not None:
+        try:
+            peers = PeerRegistry(layout.root)
+        except AntHillError as exc:
+            log.close()
+            fail(str(exc))
 
     busy = port_taken(host, port)
     if busy:
@@ -113,15 +120,23 @@ def serve_command(
     if panel_write and not show_panel:
         log.close()
         fail("--panel-write 需要面板是开着的；去掉 --no-panel")
-    if created:
+    if created and layout is not None and config is not None:
         console.print(
-            f"[bold green]✓[/bold green] 没找到工作区，已在这里建了一个：[b]{layout.root}[/b]\n"
+            f"[bold green]✓[/bold green] 没找到工作区，已按 -w 建了一个：[b]{layout.root}[/b]\n"
             f"[dim]  节点名 {config.node.name}（取自主机名）· "
             f"Agent {', '.join(config.agents)} · 之后可以在面板上加[/dim]"
         )
+    elif layout is None:
+        console.print(
+            "[yellow]![/yellow] 这里还没有工作区 —— [b]先不建[/b]，"
+            "免得 .anthill 落在你没想要的目录里。\n"
+            "[dim]  打开面板挑一个目录（或者 anthill init 显式指定）[/dim]"
+        )
+    name = config.node.name if config else "（未配置）"
+    quiet_discovery = config is not None and not config.discovery.enabled
     console.print(
-        f"[bold green]▶[/bold green] {config.node.name} 接收端 [dim]{endpoint}[/dim]"
-        + ("" if config.discovery.enabled else "  [dim]（discovery 未开启，不广播）[/dim]")
+        f"[bold green]▶[/bold green] {name} 接收端 [dim]{endpoint}[/dim]"
+        + ("  [dim]（discovery 未开启，不广播）[/dim]" if quiet_discovery else "")
     )
     if host == DEFAULT_HOST:
         console.print("[dim]只绑回环；要让同网段的机器投递进来，用 --host 0.0.0.0[/dim]")
@@ -138,7 +153,7 @@ def serve_command(
         console.print("[dim]面板已关闭：绑的不是回环地址；确实要开就加 --panel[/dim]")
     if not summary:
         console.print("[dim]不共享状态：别人的总控面板会把本机显示成不可用[/dim]")
-    if remote_admin or config.security.remote_admin:
+    if remote_admin or (config is not None and config.security.remote_admin):
         console.print(
             "[yellow]远端管理已开[/yellow]：已信任的对端可以直接改本机 node.toml "
             "[dim]—— 这约等于让它能在本机执行命令[/dim]"
@@ -169,30 +184,33 @@ def serve_command(
         log.close()
 
 
-def _load_or_init(workspace: Path | None) -> tuple[NodeLayout, Config, bool]:
-    """有工作区就用，没有就地建一个。
+def _load_or_setup(workspace: Path | None) -> tuple[NodeLayout | None, Config | None, bool]:
+    """有工作区就用；没有就**什么都不建**，返回 None 进「未配置」状态。
 
-    显式给了 `-w` 就用那个目录；否则先往上找（可能在项目根），
-    找不到才在当前目录建 —— 别因为你 cd 进了子目录就多建一个。
+    上一版会就地建一个。装好就能用是对的，但「就地」这个决定不该由程序替人做 ——
+    你可能只是 cd 到了别处，结果 `.anthill` 撒在一个根本不想要的目录里。
+    现在改成：面板给个目录浏览器，你挑好地方再建。在那之前磁盘一个字都不写。
+
+    显式给了 `-w` 就用那个目录（那是明确的意思表示，没有就建）。
     """
     if workspace is not None:
         layout = NodeLayout(workspace.resolve())
-    else:
         try:
-            layout = NodeLayout.discover()
-        except AntHillError:
-            layout = NodeLayout(Path.cwd())
+            config, created = load_or_create(layout)
+        except AntHillError as exc:
+            fail(str(exc))
+        return layout, config, created
     try:
-        config, created = load_or_create(layout)
-    except AntHillError as exc:
-        fail(str(exc))
-    return layout, config, created
+        layout = NodeLayout.discover()
+    except AntHillError:
+        return None, None, False
+    return layout, Config.load_from(layout), False
 
 
 async def _serve(
-    layout: NodeLayout,
-    config: Config,
-    peers: PeerRegistry,
+    layout: NodeLayout | None,
+    config: Config | None,
+    peers: PeerRegistry | None,
     log: EventLog,
     *,
     host: str,
@@ -212,7 +230,7 @@ async def _serve(
         panel_writable=panel_write,
         summary=summary,
         advertise=endpoint,
-        remote_admin=remote_admin or config.security.remote_admin,
+        remote_admin=remote_admin or (config is not None and config.security.remote_admin),
     )
     server = uvicorn.Server(
         uvicorn.Config(
@@ -227,15 +245,18 @@ async def _serve(
             proxy_headers=False,
         )
     )
-    beacon = Beacon(
-        settings=config.discovery,
-        announcement=Announcement(
-            node=config.node.name,
-            endpoint=endpoint,
-            agents=tuple(sorted(config.agents)),
-        ),
-        peers=peers,
-        log=log,
+    # 没配工作区就没有身份可广播、也没有状态可写 —— 那两条循环空转即可
+    beacon = (
+        Beacon(
+            settings=config.discovery,
+            announcement=Announcement(
+                node=config.node.name, endpoint=endpoint, agents=tuple(sorted(config.agents))
+            ),
+            peers=peers,
+            log=log,
+        )
+        if config is not None and peers is not None
+        else None
     )
 
     stop = asyncio.Event()
@@ -244,12 +265,19 @@ async def _serve(
         with suppress(NotImplementedError, RuntimeError):
             loop.add_signal_handler(sig, stop.set)
 
-    log.info("serve.start", node=config.node.name, endpoint=endpoint, host=host, port=port)
+    log.info(
+        "serve.start",
+        node=config.node.name if config else "未配置",
+        endpoint=endpoint,
+        host=host,
+        port=port,
+    )
     tasks = [
         asyncio.create_task(server.serve(), name="http"),
-        asyncio.create_task(beacon.run(stop), name="beacon"),
+        asyncio.create_task(beacon.run(stop) if beacon is not None else stop.wait(), name="beacon"),
         asyncio.create_task(
-            _status_loop(layout, config, peers, log, stop, enabled=summary), name="status"
+            _status_loop(layout, config, peers, log, stop, enabled=summary),
+            name="status",
         ),
         asyncio.create_task(stop.wait(), name="stop"),
     ]
@@ -289,9 +317,9 @@ def _report_crashes(tasks: list[asyncio.Task[Any]], results: list[Any], log: Eve
 
 
 async def _status_loop(
-    layout: NodeLayout,
-    config: Config,
-    peers: PeerRegistry,
+    layout: NodeLayout | None,
+    config: Config | None,
+    peers: PeerRegistry | None,
     log: EventLog,
     stop: asyncio.Event,
     *,
@@ -307,7 +335,7 @@ async def _status_loop(
     都只该让「别人看不到我的状态」，不该让这台机器停止收消息。
     所以这里接住所有异常 —— 少一份状态是小事，节点掉线是大事。
     """
-    if not enabled:
+    if not enabled or layout is None or config is None or peers is None:
         await stop.wait()
         return
     while not stop.is_set():
