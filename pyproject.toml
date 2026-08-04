@@ -1,6 +1,6 @@
 [project]
 name = "anthill"
-version = "0.15.0"
+version = "0.16.0"
 description = "AntHill — 基于文件邮箱的分布式多 Agent 协同框架"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,6 +15,7 @@ dependencies = [
     "rich>=13.7",
     "typer>=0.12",
     "uvicorn>=0.30",
+    "websockets>=12",  # uvicorn 没有 ws 实现时，WS 升级请求会被当成 404
     "watchdog>=4.0",
 ]
 
@@ -30,6 +31,10 @@ llm = [
 [dependency-groups]
 dev = [
     "mypy>=1.11",
+    # 面板得在真浏览器里点一遍 —— 相对路径怎么解析、WS 通不通，
+    # curl 和 ASGI 传输都测不到（这两处都真出过 bug）。
+    # 浏览器本体要另装：uv run playwright install chromium；没装就自动跳过。
+    "playwright>=1.45",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",

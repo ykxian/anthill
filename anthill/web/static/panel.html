@@ -5,305 +5,426 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>AntHill 面板</title>
 <style>
-/* 视觉方向：贴着终端用的技术仪表盘。等宽字体为主，状态一律用语义色，
-   信息密度优先 —— 这是排查问题时开着的第二个窗口，不是营销页。 */
+/* ============================================================
+   视觉方向：温纸 + 技术排版。
+   参照 Claude / ChatGPT 网页版那种「像一份排得好的文档」的松弛感 ——
+   暖中性纸色、极轻的分隔、层叠代替描边、克制的强调色。
+   但这毕竟是排查问题时开着的第二个窗口，所以**数据密集处保持密度**：
+   松弛感给容器与留白，密度给日志、步骤、Agent 卡片。
+
+   字体：面板必须能在没有外网的服务器上打开，不能引任何外部资源。
+   系统字体不是偷懒，是硬约束下的选择 —— 但仍然有配对策略：
+     衬线   标识与栏目名（有性格，撑住层级）
+     无衬线 界面文字（可读）
+     等宽   **只**给机器数据：ID、路径、时间戳、日志
+   三档各司其职，而不是整页一种等宽。
+
+   颜色：强调色只表示「主行动 / 你在哪儿」；绿、琥珀、红严格只表状态，
+   别处一律不用彩色。
+   ============================================================ */
 :root {
-  color-scheme: dark light;
-  --bg: #0e0f13;
-  --surface: #16181f;
-  --surface-2: #1c1f28;
-  --line: #262a36;
-  --text: #e6e8ef;
-  --muted: #8b91a3;
-  --dim: #5d6376;
-  --accent: #f0a02c;      /* 蚁丘的琥珀色 */
-  --ok: #4ec9a0;
-  --warn: #e3b341;
-  --bad: #f2726f;
-  --idle: #6b7286;
+  color-scheme: light dark;
+
+  --paper: #f6f3ec;
+  --surface: #fffdf8;
+  --surface-2: #f0ece2;
+  --line: #e6e0d3;
+  --line-soft: #efeae0;
+
+  --ink: #2b2925;
+  --muted: #6d6659;
+  --dim: #9b9285;
+
+  --accent: #c1613a;
+  --accent-soft: #f4e6de;
+  --ok: #3f7d5c;
+  --warn: #a8762a;
+  --bad: #b3453d;
+  --idle: #b6ad9e;
+
+  --serif: ui-serif, Georgia, "Songti SC", "Noto Serif CJK SC", serif;
+  --sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-  --gap: 14px;
-  --radius: 10px;
+
+  --r-sm: 6px;
+  --r: 10px;
+  --r-lg: 14px;
+  --shadow: 0 1px 2px rgb(43 41 37 / 4%), 0 4px 14px -6px rgb(43 41 37 / 10%);
+  --fast: 140ms cubic-bezier(0.2, 0, 0, 1);
 }
-@media (prefers-color-scheme: light) {
+@media (prefers-color-scheme: dark) {
   :root {
-    --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f0f2f6; --line: #dfe3ea;
-    --text: #14161c; --muted: #5a6172; --dim: #868da0; --accent: #b96f06;
-    --ok: #16855f; --warn: #9a7212; --bad: #c33c39; --idle: #7b8296;
+    --paper: #191713;
+    --surface: #221f1a;
+    --surface-2: #2b2721;
+    --line: #38332b;
+    --line-soft: #302b24;
+    --ink: #ece6da;
+    --muted: #a79e8f;
+    --dim: #7b7264;
+    --accent: #e08a63;
+    --accent-soft: #3a2a20;
+    --ok: #6fb894;
+    --warn: #d6a44f;
+    --bad: #e0837b;
+    --idle: #5c554a;
+    --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 4px 14px -6px rgb(0 0 0 / 45%);
   }
 }
-* { box-sizing: border-box; }
-body {
-  margin: 0; background: var(--bg); color: var(--text);
-  font-family: var(--mono); font-size: 13px; line-height: 1.55;
-}
-a { color: var(--accent); }
 
-/* ---- 顶栏：节点身份是最大的一块字，其余都压小 ---- */
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font-family: var(--sans); font-size: 14px; line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+code { font-family: var(--mono); font-size: 0.92em; }
+
+/* ---- 顶栏：细、稳、不抢戏 ---- */
 header {
-  display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
-  padding: 18px 22px 14px; border-bottom: 1px solid var(--line);
-  background: linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%);
-  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; gap: 14px;
+  padding: 0 20px; height: 56px;
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--line-soft);
+  position: sticky; top: 0; z-index: 20;
 }
-header h1 {
-  margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.02em;
+.brand {
+  display: flex; align-items: baseline; gap: 9px;
+  font-family: var(--serif); font-size: 19px; letter-spacing: -0.01em;
 }
-header h1 .mark { color: var(--accent); }
-header .node { font-size: 13px; color: var(--muted); }
-header .node b { color: var(--text); font-weight: 600; }
-#conn { margin-left: auto; font-size: 12px; color: var(--muted); display: flex; gap: 7px; align-items: center; }
-#conn .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--idle); }
-#conn.live .dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+.brand .mark { color: var(--accent); font-size: 15px; }
+.brand .who { font-family: var(--sans); font-size: 13px; color: var(--muted); }
+.brand .who b { color: var(--ink); font-weight: 600; }
+header .spacer { flex: 1; }
+#conn {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--muted);
+  padding: 4px 11px; border-radius: 99px;
+  background: var(--surface-2); border: 1px solid var(--line-soft);
+}
+#conn .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--idle); }
+#conn.live .dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
 #conn.down .dot { background: var(--bad); }
 
-/* ---- bento：左栏拓扑，右侧上任务下消息流 ---- */
-main {
-  display: grid; gap: var(--gap); padding: var(--gap) 22px 26px;
-  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
-  grid-template-areas: "topo runs" "topo stream" "setup setup" "config config";
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
-  min-height: calc(100vh - 66px);
+/* ---- 骨架：侧栏 + 主区 ---- */
+.shell {
+  display: grid; grid-template-columns: 304px minmax(0, 1fr);
+  height: calc(100vh - 56px);
 }
 @media (max-width: 900px) {
-  main { grid-template-columns: 1fr; grid-template-areas: "topo" "runs" "stream" "setup" "config"; }
+  .shell { grid-template-columns: 1fr; height: auto; }
+  aside { border-right: none !important; border-bottom: 1px solid var(--line); }
 }
-section {
-  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
-  display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+aside {
+  border-right: 1px solid var(--line-soft);
+  overflow-y: auto; padding: 16px 12px 28px;
+  background: color-mix(in srgb, var(--surface) 45%, var(--paper));
 }
-#topo { grid-area: topo; } #runs { grid-area: runs; } #stream { grid-area: stream; }
-section > h2 {
-  margin: 0; padding: 11px 14px; font-size: 11px; font-weight: 600;
-  letter-spacing: 0.13em; text-transform: uppercase; color: var(--muted);
-  border-bottom: 1px solid var(--line); background: var(--surface-2);
-  display: flex; justify-content: space-between; align-items: center;
-}
-section > h2 .count { color: var(--dim); letter-spacing: 0; text-transform: none; }
-.body { overflow: auto; padding: 8px; flex: 1; min-height: 0; }
-.empty { color: var(--dim); padding: 18px 8px; text-align: center; }
+main { overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
 
-/* ---- 卡片：hover 有明确反馈，不是死的表格 ---- */
-.card {
-  border: 1px solid transparent; border-radius: 7px; padding: 8px 10px;
-  transition: background 140ms ease, border-color 140ms ease;
+/* ---- 栏目名：衬线 + 层级靠排版建立，不靠色块 ---- */
+.eyebrow {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 4px 8px 10px; font-family: var(--serif);
+  font-size: 15px; color: var(--ink);
 }
-.card:hover { background: var(--surface-2); border-color: var(--line); }
-.row { display: flex; align-items: baseline; gap: 8px; }
+.eyebrow .count { font-family: var(--sans); font-size: 11.5px; color: var(--dim); }
+
+/* ---- 标签页 ---- */
+.tabs {
+  display: flex; gap: 2px; padding: 10px 20px 0;
+  border-bottom: 1px solid var(--line-soft); background: var(--paper);
+}
+.tab {
+  appearance: none; background: none; border: none; cursor: pointer;
+  font-family: var(--sans); font-size: 13.5px; color: var(--muted);
+  padding: 8px 13px 11px; border-bottom: 2px solid transparent;
+  transition: color var(--fast), border-color var(--fast);
+}
+.tab:hover { color: var(--ink); }
+.tab.on { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+.tab:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-soft); border-radius: var(--r-sm); }
+
+.pane { flex: 1; overflow: auto; padding: 20px 22px 32px; min-height: 0; }
+.pane[hidden] { display: none; }
+@media (prefers-reduced-motion: no-preference) {
+  .pane:not([hidden]) { animation: rise 200ms cubic-bezier(0.2, 0, 0, 1); }
+  @keyframes rise { from { opacity: 0; transform: translateY(4px); } }
+}
+.hold { max-width: 940px; }
+
+/* ---- 通用零件 ---- */
+.row { display: flex; align-items: center; gap: 9px; }
 .grow { flex: 1; min-width: 0; }
-.name { font-weight: 600; }
-.meta { color: var(--dim); font-size: 12px; }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* ---- 状态点：颜色是唯一的状态语言，别处不再用装饰色 ---- */
-.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--idle); }
-.dot.on { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 20%, transparent); }
-.pill {
-  font-size: 11px; padding: 1px 7px; border-radius: 99px;
-  border: 1px solid var(--line); color: var(--muted); background: var(--surface-2);
+.empty {
+  color: var(--dim); padding: 30px 12px; text-align: center; font-size: 13px;
+  border: 1px dashed var(--line); border-radius: var(--r); background: var(--surface-2);
 }
-.pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
-.pill.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
-.pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
+.meta { color: var(--dim); font-size: 12px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--idle); }
+.dot.on { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 16%, transparent); }
+.pill {
+  font-size: 11px; padding: 1px 8px; border-radius: 99px; flex: none;
+  border: 1px solid var(--line); color: var(--muted); background: var(--surface);
+}
+.pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); }
+.pill.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, var(--line)); }
+.pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); }
 
-/* ---- 任务：步骤用左侧色条串起来，一眼看出卡在哪一步 ---- */
-.run { padding: 10px 12px; border-radius: 8px; background: var(--surface-2); margin-bottom: 8px; }
-.run > .row { margin-bottom: 6px; }
-.goal { font-weight: 600; }
-.steps { display: flex; flex-direction: column; gap: 3px; }
-.step { display: flex; gap: 9px; align-items: baseline; padding-left: 9px; border-left: 2px solid var(--line); }
+/* ---- 表单：焦点环用强调色的低透明度，不用浏览器默认蓝 ---- */
+input, select, textarea {
+  background: var(--surface); color: var(--ink);
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: 7px 10px; font-family: var(--sans); font-size: 13.5px;
+  transition: border-color var(--fast), box-shadow var(--fast);
+}
+textarea { font-family: var(--mono); font-size: 12.5px; line-height: 1.65; }
+input::placeholder { color: var(--dim); }
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+button {
+  appearance: none; cursor: pointer; font-family: var(--sans);
+  font-size: 13px; font-weight: 600; border-radius: var(--r-sm);
+  padding: 7px 14px; border: 1px solid transparent;
+  background: var(--accent); color: #fff;
+  transition: filter var(--fast), transform var(--fast), border-color var(--fast);
+}
+button:hover { filter: brightness(1.06); }
+button:active { transform: translateY(1px); }
+button:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
+button[disabled] { opacity: 0.45; cursor: not-allowed; transform: none; filter: none; }
+button.ghost {
+  background: transparent; color: var(--muted); border-color: var(--line);
+  font-weight: 500; padding: 4px 10px; font-size: 12px;
+}
+button.ghost:hover { color: var(--ink); border-color: var(--muted); background: var(--surface); }
+button.danger:hover { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
+
+.actions { display: flex; gap: 8px; align-items: center; }
+.actions input, .actions select { flex: 1; min-width: 0; }
+.hint { font-size: 12px; color: var(--dim); padding-top: 8px; }
+.hint.bad { color: var(--bad); }
+.hint.ok { color: var(--ok); }
+
+/* ---- 侧栏：节点分组 ---- */
+.node-group { margin-bottom: 14px; }
+.node-head { display: flex; align-items: center; gap: 8px; padding: 5px 9px; }
+.node-head .name { font-weight: 600; font-size: 13px; }
+.node-head .tag { font-size: 11px; color: var(--dim); }
+.node-group.down { opacity: 0.62; }
+.node-group.down .node-head .tag { color: var(--bad); }
+.node-note { font-size: 11.5px; color: var(--dim); padding: 2px 10px 6px; line-height: 1.5; }
+
+.card {
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  padding: 7px 10px; margin: 2px 0;
+  transition: background var(--fast), border-color var(--fast), box-shadow var(--fast);
+}
+.card:hover { background: var(--surface); border-color: var(--line-soft); box-shadow: var(--shadow); }
+.card .name { font-weight: 600; font-size: 13px; }
+.card .sub { color: var(--dim); font-size: 11.5px; padding-left: 16px; }
+.card .ops { display: flex; gap: 4px; opacity: 0; transition: opacity var(--fast); }
+.card:hover .ops, .card:focus-within .ops { opacity: 1; }
+
+.add-agent {
+  /* grid 子项默认 min-width:auto，会撑破侧栏 —— 显式给一列 minmax(0,1fr) */
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px;
+  padding: 9px 10px 4px; margin-top: 6px; border-top: 1px dashed var(--line);
+}
+.add-agent .cap { font-size: 11px; color: var(--dim); }
+.add-agent .line { display: flex; gap: 6px; min-width: 0; }
+.add-agent input, .add-agent select { flex: 1; min-width: 0; font-size: 12.5px; padding: 5px 8px; }
+.add-agent button { padding: 5px 12px; font-size: 12.5px; }
+
+/* ---- 任务看板：步骤用左侧色条串起来，一眼看出卡在哪一步 ---- */
+.run {
+  background: var(--surface); border: 1px solid var(--line-soft);
+  border-radius: var(--r); padding: 14px 16px; margin-bottom: 12px; box-shadow: var(--shadow);
+}
+.run > .row { margin-bottom: 9px; }
+.run .goal { font-size: 14.5px; font-weight: 600; }
+.run .where {
+  font-family: var(--mono); font-size: 11px; color: var(--dim);
+  background: var(--surface-2); padding: 1px 7px; border-radius: 99px; flex: none;
+}
+.steps { display: flex; flex-direction: column; gap: 4px; }
+.step {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 3px 0 3px 11px; border-left: 2px solid var(--line); font-size: 12.5px;
+}
 .step.running { border-left-color: var(--warn); }
 .step.done { border-left-color: var(--ok); }
 .step.failed { border-left-color: var(--bad); }
 .step.skipped { border-left-color: var(--dim); }
-.step .sid { color: var(--muted); min-width: 34px; }
-.step .who { color: var(--accent); min-width: 96px; }
+.step .sid { font-family: var(--mono); color: var(--dim); min-width: 30px; }
+.step .who { color: var(--accent); min-width: 90px; }
 .step .what { color: var(--muted); }
 
-/* ---- 消息流：等宽对齐的时间线 ---- */
-.event { display: flex; gap: 10px; padding: 2px 6px; border-radius: 5px; }
-.event:hover { background: var(--surface-2); }
+/* ---- 消息流：等宽对齐的时间线，密度优先 ---- */
+#stream-body { font-family: var(--mono); font-size: 12px; line-height: 1.75; }
+.event { display: flex; gap: 12px; padding: 1px 8px; border-radius: var(--r-sm); }
+.event:hover { background: var(--surface); }
 .event .ts { color: var(--dim); flex: none; }
-.event .who { color: var(--accent); flex: none; min-width: 92px; }
-.event .what { flex: none; min-width: 168px; }
+.event .where { color: var(--dim); flex: none; min-width: 74px; }
+.event .who { color: var(--accent); flex: none; min-width: 88px; }
+.event .what { flex: none; min-width: 160px; }
 .event .detail { color: var(--muted); }
 .event.warn .what { color: var(--warn); }
 .event.error .what { color: var(--bad); }
-/* ---- 节点分组：总控视图下，每台机器一组 ---- */
-.node-group { margin-bottom: 10px; }
-.node-head {
-  display: flex; align-items: baseline; gap: 8px; padding: 6px 10px 4px;
-  border-bottom: 1px dashed var(--line); margin-bottom: 4px;
-}
-.node-head .name { font-weight: 600; letter-spacing: 0.02em; }
-.node-head .tag { font-size: 11px; color: var(--dim); }
-.node-group.down { opacity: 0.72; }
-.node-group.down .node-head { border-bottom-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
-.where { color: var(--dim); flex: none; min-width: 84px; }
 
-/* ---- 操作条：写权限开着才出现 ---- */
-.actions { display: flex; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
-.actions input, .actions select, textarea {
-  background: var(--bg); color: var(--text); border: 1px solid var(--line);
-  border-radius: 7px; padding: 7px 10px; font-family: var(--mono); font-size: 13px;
-  transition: border-color 140ms ease, box-shadow 140ms ease;
-}
-.actions input { flex: 1; min-width: 0; }
-input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible {
-  outline: none; border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
-}
-button {
-  background: var(--accent); color: #1a1206; border: 1px solid transparent;
-  border-radius: 7px; padding: 7px 14px; font-family: var(--mono); font-size: 13px;
-  font-weight: 600; cursor: pointer; transition: filter 140ms ease, transform 80ms ease;
-}
-button:hover { filter: brightness(1.08); }
-button:active { transform: translateY(1px); }
-button.ghost { background: transparent; color: var(--muted); border-color: var(--line); }
-button.ghost:hover { color: var(--text); border-color: var(--muted); }
-button[disabled] { opacity: 0.5; cursor: not-allowed; }
-.hint { padding: 0 12px 10px; font-size: 12px; color: var(--dim); }
-.hint.bad { color: var(--bad); }
-.hint.ok { color: var(--ok); }
-
-/* ---- 标签页与对话 ---- */
-.tabs { display: flex; gap: 4px; }
-.tab {
-  background: transparent; color: var(--dim); border: 1px solid transparent;
-  border-radius: 6px; padding: 3px 10px; font-size: 11px; letter-spacing: 0.13em;
-  text-transform: uppercase; font-weight: 600;
-}
-.tab:hover { color: var(--text); }
-.tab.on { color: var(--text); background: var(--surface); border-color: var(--line); }
-.msg { padding: 7px 10px; border-radius: 9px; margin: 6px 0; max-width: 78%; font-size: 13px; }
-.msg .who { display: block; font-size: 10px; color: var(--dim); margin-bottom: 3px; }
-.msg .text { white-space: pre-wrap; word-break: break-word; }
-.msg.them { background: var(--surface-2); border: 1px solid var(--line); }
+/* ---- 对话：气泡靠对齐与底色区分，不用头像不用花边 ---- */
+#pane-chat:not([hidden]) { display: flex; flex-direction: column; padding-bottom: 0; }
+#chat-body { flex: 1; overflow: auto; display: flex; flex-direction: column; }
+#chat-body .empty { margin: auto 0; }
+.msg { padding: 9px 13px; border-radius: var(--r-lg); margin: 3px 0; max-width: 74%; }
+.msg .who { display: block; font-size: 11px; color: var(--dim); margin-bottom: 3px; }
+.msg .text { white-space: pre-wrap; word-break: break-word; font-size: 14px; }
+.msg.them { background: var(--surface); border: 1px solid var(--line-soft); align-self: flex-start; }
 .msg.mine {
-  margin-left: auto; background: color-mix(in srgb, var(--accent) 16%, var(--surface-2));
-  border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  align-self: flex-end; background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
 }
-.msg.sys { max-width: 100%; background: transparent; color: var(--dim); font-size: 11px; }
-#chat-body { display: flex; flex-direction: column; }
-.pair-pin {
-  font-size: 26px; letter-spacing: 0.28em; color: var(--accent);
-  padding: 6px 0 2px; font-weight: 700;
+.msg.sys {
+  align-self: center; max-width: 100%; background: none; border: none;
+  color: var(--dim); font-size: 11.5px; padding: 2px;
 }
-.node-head button { padding: 2px 8px; font-size: 11px; }
-.card .ops { display: flex; gap: 4px; opacity: 0; transition: opacity 120ms ease; }
-.card:hover .ops, .card:focus-within .ops { opacity: 1; }
-.card .ops button { padding: 1px 7px; font-size: 11px; }
-.add-agent { display: grid; gap: 6px; padding: 8px 10px; border-top: 1px dashed var(--line); }
-.add-agent .line { display: flex; gap: 6px; }
-.add-agent input, .add-agent select { flex: 1; min-width: 0; }
+.chat-bar {
+  border-top: 1px solid var(--line-soft); padding: 12px 0 16px;
+  background: var(--paper); position: sticky; bottom: 0;
+}
 
-/* ---- 设置：还没配工作区，或者要管这台机器上的多个工作区 ---- */
-#setup { grid-area: setup; }
-#setup .body { display: grid; gap: 10px; }
-.ws { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 7px; }
-.ws:hover { background: var(--surface-2); }
-.ws .path { color: var(--dim); font-size: 12px; }
-.ws.now { background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.crumbs { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 0 10px; }
+/* ---- 工作区 ---- */
+.ws {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  border: 1px solid var(--line-soft); border-radius: var(--r);
+  background: var(--surface); margin-bottom: 7px;
+  transition: box-shadow var(--fast), border-color var(--fast);
+}
+.ws:hover { box-shadow: var(--shadow); }
+.ws.now { border-color: color-mix(in srgb, var(--accent) 32%, transparent); background: var(--accent-soft); }
+.ws .name { font-weight: 600; }
+.ws .path { font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+.crumbs { display: flex; gap: 9px; align-items: center; padding: 4px 0 10px; flex-wrap: wrap; }
 .crumbs code { color: var(--muted); }
-.dirs { max-height: 210px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
-.dir { display: flex; gap: 8px; align-items: center; padding: 5px 10px; cursor: pointer; }
+.dirs {
+  max-height: 260px; overflow: auto; border: 1px solid var(--line);
+  border-radius: var(--r); background: var(--surface); margin-bottom: 12px;
+}
+.dir {
+  display: flex; gap: 9px; align-items: center; padding: 7px 12px; cursor: pointer;
+  border-bottom: 1px solid var(--line-soft); transition: background var(--fast);
+}
+.dir:last-child { border-bottom: none; }
 .dir:hover { background: var(--surface-2); }
 .dir .tag { font-size: 11px; color: var(--ok); }
 
-/* ---- 配置抽屉 ---- */
-#config { grid-area: config; }
-#config .drawer-head select { max-width: 180px; }
-#config textarea { width: 100%; min-height: 220px; resize: vertical; line-height: 1.5; }
-.drawer-head { display: flex; align-items: center; gap: 10px; }
-footer { padding: 0 22px 20px; color: var(--dim); font-size: 12px; }
+.card-block {
+  background: var(--surface); border: 1px solid var(--line-soft);
+  border-radius: var(--r); padding: 16px; box-shadow: var(--shadow);
+}
+.card-block h3 { margin: 0 0 4px; font-family: var(--serif); font-size: 15px; font-weight: 500; }
+.card-block .why { margin: 0 0 12px; font-size: 12.5px; color: var(--dim); }
+#config-text { width: 100%; min-height: 340px; resize: vertical; }
+footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
 </style>
 </head>
 <body>
 <header>
-  <h1><span class="mark">▲</span> AntHill</h1>
-  <span class="node">节点 <b id="node">…</b></span>
+  <span class="brand">
+    <span class="mark">▲</span> AntHill
+    <span class="who">节点 <b id="node">…</b></span>
+  </span>
   <select id="node-pick" aria-label="本机节点" hidden></select>
+  <span class="spacer"></span>
   <span id="conn"><span class="dot"></span><span id="conn-text">连接中</span></span>
 </header>
 
-<main>
-  <section id="topo">
-    <h2>拓扑 <span class="count" id="topo-count"></span></h2>
-    <div class="body" id="topo-body"></div>
-  </section>
+<div class="shell">
+  <aside>
+    <div class="eyebrow">拓扑 <span class="count" id="topo-count"></span></div>
+    <div id="topo-body"></div>
+  </aside>
 
-  <section id="runs">
-    <h2>任务看板 <span class="count" id="runs-count"></span></h2>
-    <form class="actions" id="run-form" hidden>
-      <input id="run-input" placeholder="交给 coordinator 一件事，回车发起…" autocomplete="off" />
-      <button type="submit">发起</button>
-    </form>
-    <div class="hint" id="run-hint" hidden></div>
-    <div class="body" id="runs-body"></div>
-  </section>
+  <main>
+    <nav class="tabs">
+      <button class="tab on" type="button" data-pane="runs">任务看板</button>
+      <button class="tab" type="button" data-pane="chat">对话</button>
+      <button class="tab" type="button" data-pane="events">消息流</button>
+      <button class="tab" type="button" data-pane="setup" hidden>工作区</button>
+      <button class="tab" type="button" data-pane="config" hidden>配置</button>
+    </nav>
 
-  <section id="stream">
-    <h2>
-      <span class="tabs">
-        <button class="tab on" type="button" data-pane="events">消息流</button>
-        <button class="tab" type="button" data-pane="chat">对话</button>
-      </span>
-      <span class="count" id="events-count"></span>
-    </h2>
-    <div class="body" id="stream-body"></div>
-    <div class="body" id="chat-body" hidden></div>
-    <form class="actions" id="chat-form" hidden>
-      <select id="chat-to" aria-label="跟谁说"></select>
-      <input id="chat-input" placeholder="说点什么，回车发送…" autocomplete="off" />
-      <button type="submit">发送</button>
-    </form>
-    <div class="hint" id="chat-hint" hidden></div>
-  </section>
-</main>
+    <section class="pane hold" id="pane-runs">
+      <div class="eyebrow">编排任务 <span class="count" id="runs-count"></span></div>
+      <form class="actions" id="run-form" hidden style="margin-bottom:14px">
+        <input id="run-input" placeholder="交给 coordinator 一件事，回车发起…" autocomplete="off" />
+        <button type="submit">发起</button>
+      </form>
+      <div class="hint" id="run-hint" hidden></div>
+      <div id="runs-body"></div>
+    </section>
 
-  <section id="setup" hidden>
-    <h2>
-      <span class="drawer-head">工作区 <span class="count" id="setup-count"></span></span>
-      <span class="drawer-head">
-        <button class="ghost" id="setup-toggle" type="button">选一个目录…</button>
-      </span>
-    </h2>
-    <div class="body">
-      <div id="ws-list"></div>
-      <div id="picker" hidden>
-        <div class="crumbs"><span class="meta">当前位置</span><code id="crumb-path"></code>
-          <button class="ghost" id="crumb-up" type="button">上一级</button></div>
-        <div class="dirs" id="dir-list"></div>
-        <form class="actions" id="ws-form">
-          <input id="ws-name" placeholder="新建子目录名（留空 = 就用当前这个目录）" autocomplete="off" />
-          <input id="ws-node" placeholder="节点名，留空取主机名" autocomplete="off" />
-          <button type="submit">在这里建工作区</button>
+    <section class="pane" id="pane-chat" hidden>
+      <div id="chat-body"></div>
+      <div class="chat-bar">
+        <form class="actions" id="chat-form" hidden>
+          <select id="chat-to" aria-label="跟谁说" style="flex:0 0 200px"></select>
+          <input id="chat-input" placeholder="说点什么，回车发送…" autocomplete="off" />
+          <button type="submit">发送</button>
         </form>
+        <div class="hint" id="chat-hint" hidden></div>
       </div>
-      <div class="hint" id="setup-hint" hidden></div>
-    </div>
-  </section>
+    </section>
 
-  <section id="config" hidden>
-    <h2>
-      <span class="drawer-head">
-        node.toml
-        <select id="config-node" aria-label="改哪台机器"></select>
-        <span class="count">改坏了所有 agentd 都起不来，保存前会先校验</span>
-      </span>
-      <span class="drawer-head">
-        <button class="ghost" id="config-reload" type="button">重新读取</button>
-        <button id="config-save" type="button">保存</button>
-      </span>
-    </h2>
-    <div class="body">
-      <textarea id="config-text" spellcheck="false"></textarea>
-      <div class="hint" id="config-hint"></div>
-    </div>
-  </section>
-<footer id="footer">只读面板 —— 确认与操作留在 CLI。数据来自 <code>.anthill/</code> 下的文件。</footer>
+    <section class="pane" id="pane-events" hidden>
+      <div class="eyebrow">消息流 <span class="count" id="events-count"></span></div>
+      <div id="stream-body"></div>
+    </section>
+
+    <section class="pane hold" id="pane-setup" hidden>
+      <div class="card-block">
+        <h3>这台机器上的工作区 <span class="meta" id="setup-count"></span></h3>
+        <p class="why">一个工作区就是一个节点。同一个 serve 进程按信封上的收件人分派，所以不必一个工作区起一个进程。</p>
+        <div id="ws-list"></div>
+        <div class="actions" style="margin-top:12px">
+          <button class="ghost" id="setup-toggle" type="button">选一个目录…</button>
+        </div>
+        <div id="picker" hidden style="margin-top:14px">
+          <div class="crumbs">
+            <span class="meta">当前位置</span><code id="crumb-path"></code>
+            <button class="ghost" id="crumb-up" type="button">上一级</button>
+          </div>
+          <div class="dirs" id="dir-list"></div>
+          <form class="actions" id="ws-form">
+            <input id="ws-name" placeholder="新建子目录名（留空 = 就用当前这个目录）" autocomplete="off" />
+            <input id="ws-node" placeholder="节点名" autocomplete="off" style="flex:0 0 150px" />
+            <button type="submit">在这里建工作区</button>
+          </form>
+        </div>
+        <div class="hint" id="setup-hint" hidden></div>
+      </div>
+    </section>
+
+    <section class="pane hold" id="pane-config" hidden>
+      <div class="card-block" id="config">
+        <h3>node.toml <select id="config-node" aria-label="改哪台机器" style="margin-left:8px"></select></h3>
+        <p class="why">改坏了所有 agentd 都起不来 —— 保存前会用启动期同一套规则校验，不合法磁盘一个字都不改，并留一份 node.toml.bak。</p>
+        <textarea id="config-text" spellcheck="false"></textarea>
+        <div class="actions" style="margin-top:10px">
+          <button id="config-save" type="button">保存</button>
+          <button class="ghost" id="config-reload" type="button">重新读取</button>
+        </div>
+        <div class="hint" id="config-hint"></div>
+      </div>
+    </section>
+
+    <footer id="footer">只读面板 —— 确认与审批留在 CLI。数据来自 <code>.anthill/</code> 下的文件。</footer>
+  </main>
+</div>
 
 <script>
 // ---- 面板令牌：从别的机器操作一台没有显示器的机器时要带上 ----
@@ -329,9 +450,23 @@ function authHeaders(extra) {
   return auth.token ? { ...extra, "X-AntHill-Panel": auth.token } : { ...extra };
 }
 
+// 页面挂在 /panel（**没有尾斜杠**），所以相对路径 `api/x` 会解析成 `/api/x` 而不是
+// `/panel/api/x` —— 一律用这个函数拼，别再写相对路径。
+const BASE = location.pathname.replace(/\/+$/, "");
+const u = (path) => `${BASE}/${path.replace(/^\/+/, "")}`;
+
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => (
   { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// 每 2~5 秒就整块重写 innerHTML 的代价：鼠标悬停状态没了，正要点的按钮
+// 会从指针底下被换掉，点击直接落空。内容没变就别动 DOM。
+function paint(el, html) {
+  if (el.dataset.sig === html) return false;
+  el.dataset.sig = html;
+  el.innerHTML = html;
+  return true;
+}
 
 function setConn(state, text) {
   const el = $("conn");
@@ -340,44 +475,42 @@ function setConn(state, text) {
 }
 
 function agentCard(a, node) {
-  // 只有本机的 Agent 能在这里启停 —— 别的机器上的进程不归这个面板管
-  // 远端那台也能启停 —— 走它自己的 remote_admin 开关，没开就会给一句明确的拒绝。
-  // 删 Agent 目前只对本机开放：那是改配置，另有一条路（配置抽屉选机器）。
+  // 远端那台也能启停 —— 走它自己的 remote_admin 开关，没开会给一句明确的拒绝。
+  // 删 Agent 只对本机开放：那是改配置，另有一条路（配置页选机器）。
   const where = `data-agent="${esc(a.name)}" data-node="${esc(node.node)}"`;
   const ops = canWrite
     ? `<span class="ops">
          <button class="ghost" type="button" ${where}
                  data-op="${a.running ? "stop" : "start"}">${a.running ? "停" : "启动"}</button>
-         ${!a.running && node.local ? `<button class="ghost" type="button" ${where}
+         ${!a.running && node.local ? `<button class="ghost danger" type="button" ${where}
                  data-op="remove">删</button>` : ""}
        </span>`
     : "";
+  const badges =
+    (a.queue ? `<span class="pill warn">待处理 ${esc(a.queue)}</span>` : "") +
+    (a.dead ? `<span class="pill bad">死信 ${esc(a.dead)}</span>` : "");
   return `
     <div class="card">
       <div class="row">
         <span class="dot ${a.running ? "on" : ""}"></span>
         <span class="name grow truncate">${esc(a.name)}</span>
-        ${ops}
-        <span class="pill">${esc(a.role)}</span>
+        ${ops}${badges}
       </div>
-      <div class="row meta">
-        <span class="grow truncate">${esc(a.provider)} · ${esc(a.watch_mode)}</span>
-        ${a.queue ? `<span class="pill warn">待处理 ${esc(a.queue)}</span>` : ""}
-        ${a.dead ? `<span class="pill bad">死信 ${esc(a.dead)}</span>` : ""}
-      </div>
+      <div class="sub truncate">${esc(a.role)} · ${esc(a.provider)} · ${esc(a.watch_mode)}</div>
     </div>`;
 }
 
 function addAgentForm() {
   return `
     <form class="add-agent" id="add-agent">
+      <div class="cap">加一个 Agent</div>
       <div class="line">
         <input id="agent-name" placeholder="新 Agent 的名字" autocomplete="off" />
         <select id="agent-brain">
-          <option value="echo">echo（只回显，用来跑通链路）</option>
-          <option value="bridge">bridge（你的 Claude Code 会话）</option>
-          <option value="command">command（claude -p 这类）</option>
-          <option value="provider">provider（自研 loop 接模型）</option>
+          <option value="echo">echo（只回显）</option>
+          <option value="bridge">bridge（你的会话）</option>
+          <option value="command">command（claude -p）</option>
+          <option value="provider">provider（接模型）</option>
         </select>
       </div>
       <div class="line">
@@ -392,7 +525,7 @@ function renderTopo(nodes) {
   const live = nodes.reduce((n, x) => n + (x.agents || []).filter(a => a.running).length, 0);
   $("topo-count").textContent = `${nodes.length} 个节点 · ${live}/${total} 在跑`;
 
-  $("topo-body").innerHTML = nodes.map(node => `
+  paint($("topo-body"), nodes.map(node => `
     <div class="node-group ${node.reachable ? "" : "down"}">
       <div class="node-head">
         <span class="dot ${node.reachable ? "on" : ""}"></span>
@@ -404,10 +537,10 @@ function renderTopo(nodes) {
       </div>
       ${node.reachable
         ? (node.agents || []).map((a) => agentCard(a, node)).join("") ||
-          `<div class="meta" style="padding:4px 10px">这个节点没有配置 Agent</div>`
-        : `<div class="meta" style="padding:4px 10px">${esc(node.reason || "")}</div>`}
+          `<div class="node-note">这个节点没有配置 Agent</div>`
+        : `<div class="node-note">${esc(node.reason || "")}</div>`}
       ${node.local && canWrite ? addAgentForm() : ""}
-    </div>`).join("") || `<div class="empty">还没有配置 Agent</div>`;
+    </div>`).join("") || `<div class="empty">还没有配置 Agent</div>`);
 }
 
 function renderRuns(nodes) {
@@ -415,10 +548,10 @@ function renderRuns(nodes) {
   const live = runs.filter(r => !r.finished);
   $("runs-count").textContent = `进行中 ${live.length} · 已完成 ${runs.length - live.length}`;
   if (!runs.length) {
-    $("runs-body").innerHTML = `<div class="empty">还没有编排任务 —— 试试 <code>anthill run "…"</code></div>`;
+    paint($("runs-body"), `<div class="empty">还没有编排任务 —— 上面发起一件，或者 <code>anthill run "…"</code></div>`);
     return;
   }
-  $("runs-body").innerHTML = [...live, ...runs.filter(r => r.finished).slice(-3)].map(r => `
+  paint($("runs-body"), [...live, ...runs.filter(r => r.finished).slice(-3)].map(r => `
     <div class="run">
       <div class="row">
         <span class="where">${esc(r.where)}</span>
@@ -434,7 +567,7 @@ function renderRuns(nodes) {
             <span class="what grow truncate">${esc(s.detail)}</span>
           </div>`).join("")}
       </div>
-    </div>`).join("");
+    </div>`).join(""));
 }
 
 function renderEvents(nodes) {
@@ -446,7 +579,7 @@ function renderEvents(nodes) {
   $("events-count").textContent = `最近 ${events.length} 条`;
   const body = $("stream-body");
   const pinned = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
-  body.innerHTML = events.length
+  const changed = paint(body, events.length
     ? events.map(e => `
       <div class="event ${esc(e.level)}">
         <span class="ts">${esc(e.ts)}</span>
@@ -455,8 +588,8 @@ function renderEvents(nodes) {
         <span class="what">${esc(e.event)}</span>
         <span class="detail truncate">${esc(e.detail)}</span>
       </div>`).join("")
-    : `<div class="empty">还没有事件</div>`;
-  if (pinned) body.scrollTop = body.scrollHeight;  // 贴底时才自动跟随，别打断正在往回翻的人
+    : `<div class="empty">还没有事件</div>`);
+  if (changed && pinned) body.scrollTop = body.scrollHeight;  // 贴底时才跟随，别打断正在往回翻的人
 }
 
 // 两路数据合成一张图：
@@ -522,10 +655,10 @@ async function poll() {
   if (polling) return;
   polling = true;
   try {
-    // 总控视图只对本机开放（403）；面板开在 0.0.0.0 时退回只看本机
-    const res = await fetch("api/cluster", { headers: authHeaders() });
+    // 总控视图只对本机（或带令牌）开放；拿不到就退回只看本机
+    const res = await fetch(u("api/cluster"), { headers: authHeaders() });
     const fallback =
-      res.status === 403 ? await fetch("api/state", { headers: authHeaders() }) : null;
+      res.status === 403 ? await fetch(u("api/state"), { headers: authHeaders() }) : null;
     const use = fallback || res;
     if (!use.ok) throw new Error(`HTTP ${use.status}`);
     applyCluster(await use.json());
@@ -602,7 +735,7 @@ function renderChat() {
 async function loadChat() {
   if (!chat.thread) { chat.messages = []; renderChat(); return; }
   try {
-    const res = await fetch(scoped(`api/chat/${encodeURIComponent(chat.thread)}`), { headers: authHeaders() });
+    const res = await fetch(u(scoped(`api/chat/${encodeURIComponent(chat.thread)}`)), { headers: authHeaders() });
     if (!res.ok) return;
     chat.messages = (await res.json()).messages || [];
     renderChat();
@@ -612,7 +745,7 @@ async function loadChat() {
 async function pickThreadFor(target) {
   // 接着跟这个 Agent 最近的那次对话往下说，thread 记忆才连得上
   try {
-    const res = await fetch(scoped("api/chats"), { headers: authHeaders() });
+    const res = await fetch(u(scoped("api/chats")), { headers: authHeaders() });
     if (!res.ok) return "";
     const found = ((await res.json()).threads || []).find((t) => String(t.with || "").endsWith(target));
     return found ? found.thread : "";
@@ -632,7 +765,7 @@ $("chat-form").addEventListener("submit", async (event) => {
   if (!body || !chat.to) return;
   say("chat-hint", "");
   try {
-    const sent = await api(scoped("panel/api/send"), {
+    const sent = await api(u(scoped("api/send")), {
       method: "POST",
       body: JSON.stringify({ to: chat.to, body, kind: "chat", thread: chat.thread || undefined }),
     });
@@ -644,19 +777,29 @@ $("chat-form").addEventListener("submit", async (event) => {
   }
 });
 
+// ---- 标签页 ----
+const PANES = ["runs", "chat", "events", "setup", "config"];
+
+function showPane(name) {
+  for (const pane of PANES) {
+    const section = $(`pane-${pane}`);
+    if (section) section.hidden = pane !== name;
+  }
+  for (const tab of document.querySelectorAll(".tab")) {
+    tab.classList.toggle("on", tab.dataset.pane === name);
+  }
+  if (name === "chat") { syncAgentPicker(); loadChat(); }
+  if (name === "setup") refreshSetup();
+  if (name === "config") loadConfig();
+}
+
 for (const tab of document.querySelectorAll(".tab")) {
-  tab.addEventListener("click", () => {
-    const pane = tab.dataset.pane;
-    for (const other of document.querySelectorAll(".tab")) other.classList.toggle("on", other === tab);
-    $("stream-body").hidden = pane !== "events";
-    $("chat-body").hidden = pane !== "chat";
-    $("chat-form").hidden = pane !== "chat" || !canWrite;
-    if (pane === "chat") { syncAgentPicker(); loadChat(); }
-  });
+  tab.addEventListener("click", () => showPane(tab.dataset.pane));
 }
 
 // ---- 工作区：还没配好时这是唯一能做的事；配好之后用来管这台机器上的几个 ----
 const picker = { at: "", ready: true };
+const ready = { ready: true };
 
 function renderWorkspaces(info) {
   ready.ready = info.ready;
@@ -664,7 +807,7 @@ function renderWorkspaces(info) {
   $("setup-count").textContent = info.ready
     ? `${info.workspaces.length} 个 · 当前 ${info.node}`
     : "还没配 —— 挑一个目录";
-  $("ws-list").innerHTML = info.workspaces.length
+  paint($("ws-list"), info.workspaces.length
     ? info.workspaces.map((w) => `
       <div class="ws ${w.current ? "now" : ""}">
         <span class="dot ${w.current ? "on" : ""}"></span>
@@ -674,14 +817,12 @@ function renderWorkspaces(info) {
         ${w.current
           ? `<span class="meta">当前</span>`
           : `<button class="ghost" type="button" data-ws="${esc(w.path)}" data-ws-op="forget">移出清单</button>
-             <button class="ghost" type="button" data-ws="${esc(w.path)}" data-ws-op="purge">删除</button>`}
+             <button class="ghost danger" type="button" data-ws="${esc(w.path)}" data-ws-op="purge">删除</button>`}
       </div>`).join("")
-    : `<div class="empty">这台机器上还没有工作区</div>`;
+    : `<div class="empty">这台机器上还没有工作区</div>`);
   // 没配好时直接把目录浏览器摊开，别让人还要找
   if (!info.ready && $("picker").hidden) openPicker(info.home);
 }
-
-const ready = { ready: true };
 
 async function openPicker(path) {
   $("picker").hidden = false;
@@ -690,7 +831,7 @@ async function openPicker(path) {
 
 async function browseTo(path) {
   try {
-    const info = await api(`panel/api/setup/browse?path=${encodeURIComponent(path || "")}`);
+    const info = await api(u(`api/setup/browse?path=${encodeURIComponent(path || "")}`));
     picker.at = info.path;
     $("crumb-path").textContent = info.path;
     $("crumb-up").dataset.path = info.parent;
@@ -722,11 +863,16 @@ $("setup-toggle").addEventListener("click", () => {
 
 $("crumb-up").addEventListener("click", (event) => browseTo(event.target.dataset.path));
 
+// 拓扑与清单每次轮询都重画，所以一律用事件委托，别在渲染时挂监听（会重复挂）
 document.addEventListener("click", (event) => {
   const dir = event.target.closest?.("[data-dir]");
   if (dir) { browseTo(dir.dataset.dir); return; }
   const ws = event.target.closest?.("[data-ws]");
-  if (ws) removeWorkspace(ws.dataset.ws, ws.dataset.wsOp === "purge");
+  if (ws) { removeWorkspace(ws.dataset.ws, ws.dataset.wsOp === "purge"); return; }
+  const pair = event.target.closest?.("[data-pair]");
+  if (pair) { startPairing(pair.dataset.pair); return; }
+  const op = event.target.closest?.("[data-agent]");
+  if (op) runAgentOp(op.dataset.agent, op.dataset.op, op.dataset.node, op);
 });
 
 async function removeWorkspace(path, purge) {
@@ -735,7 +881,7 @@ async function removeWorkspace(path, purge) {
     : `把 ${path} 移出清单？（文件不动）`;
   if (!window.confirm(what)) return;
   try {
-    await api(`panel/api/setup/workspace?path=${encodeURIComponent(path)}&purge=${purge}`,
+    await api(u(`api/setup/workspace?path=${encodeURIComponent(path)}&purge=${purge}`),
               { method: "DELETE" });
     refreshSetup();
   } catch (err) {
@@ -748,7 +894,7 @@ $("ws-form").addEventListener("submit", async (event) => {
   const sub = $("ws-name").value.trim();
   const path = sub ? `${picker.at.replace(/\/$/, "")}/${sub}` : picker.at;
   try {
-    await api("panel/api/setup/adopt", {
+    await api(u("api/setup/adopt"), {
       method: "POST",
       body: JSON.stringify({ path, node_name: $("ws-node").value.trim() }),
     });
@@ -763,15 +909,13 @@ $("ws-form").addEventListener("submit", async (event) => {
 
 async function refreshSetup() {
   try {
-    renderWorkspaces(await api("panel/api/setup"));
-    $("setup").hidden = false;
-  } catch (err) {
-    $("setup").hidden = true;   // 没有写权限就整块不显示，和其他写操作一致
-  }
+    renderWorkspaces(await api(u("api/setup")));
+  } catch (err) { /* 没有写权限时这个标签页本来就不显示 */ }
 }
 
 // ---- 写操作：探测一次能力，不能写就整块不显示 ----
 let canWrite = false;
+
 async function api(path, options) {
   const res = await fetch(path, {
     ...options,
@@ -791,17 +935,22 @@ function say(id, text, kind) {
 
 async function enableActions() {
   try {
-    // 能读到配置就说明写入口挂着；读不到（404/403）就保持只读形态
-    const { text } = await api(scoped("panel/api/config"));
-    $("config-text").value = text;
+    // 探一个**只在写入口挂着时才存在**的路由。api/setup 是只读那一组的，
+    // 拿它探等于永远探到 true —— 于是没有写权限时也会把按钮摆出来，全部 404。
+    await api(u("api/config"));
   } catch (err) {
     return false;
   }
   canWrite = true;
   $("run-form").hidden = false;
-  $("config").hidden = false;
+  $("chat-form").hidden = false;
+  for (const name of ["setup", "config"]) {
+    const tab = document.querySelector(`.tab[data-pane="${name}"]`);
+    if (tab) tab.hidden = false;
+  }
   $("footer").textContent =
-    "写权限已开（仅本机）—— 危险操作的确认仍然只在 CLI。改别台机器的配置需要那台开了 remote_admin。";
+    "写权限已开 —— 危险操作的确认仍然只在 CLI。改别台机器的配置需要那台开了 remote_admin。";
+  refreshSetup();
   return true;
 }
 
@@ -823,7 +972,7 @@ async function loadConfig() {
   const node = $("config-node").value || state.node;
   say("config-hint", node === state.node ? "" : `正在看 ${node} 的配置`);
   try {
-    const { text } = await api(`panel/api/config?node=${encodeURIComponent(node)}`);
+    const { text } = await api(u(`api/config?node=${encodeURIComponent(node)}`));
     $("config-text").value = text;
   } catch (err) {
     $("config-text").value = "";
@@ -832,97 +981,6 @@ async function loadConfig() {
 }
 
 $("config-node").addEventListener("change", loadConfig);
-
-// ---- 配对：见过但还不能通信的节点，在这里换密钥 ----
-async function startPairing(target) {
-  const pin = window.prompt(
-    `和 ${target} 配对。\n\n` +
-    "· 对方屏幕上有 PIN 的话，填在这里；\n" +
-    "· 想让对方来连你，直接留空确定，本机会生成一个 PIN。",
-    "",
-  );
-  if (pin === null) return;
-  try {
-    if (pin.trim()) {
-      const done = await api("panel/api/pair/join", {
-        method: "POST",
-        body: JSON.stringify({ target, pin: pin.trim() }),
-      });
-      window.alert(`已和 ${done.node} 配对\n指纹 ${done.fingerprint}\n和对方屏幕上的核对一致`);
-    } else {
-      const open = await api(scoped("panel/api/pair/open"), { method: "POST" });
-      window.alert(
-        `本机 PIN：${open.pin}\n\n${open.seconds} 秒内有效，只能用一次。\n` +
-        "让对方在他的面板上点「配对」并输入这串数字。",
-      );
-    }
-    poll();
-  } catch (err) {
-    window.alert(String(err.message || err));
-  }
-}
-
-document.addEventListener("click", (event) => {
-  const pair = event.target.closest?.("[data-pair]");
-  if (pair) { startPairing(pair.dataset.pair); return; }
-  const op = event.target.closest?.("[data-agent]");
-  if (op) runAgentOp(op.dataset.agent, op.dataset.op, op.dataset.node, op);
-});
-
-// 拓扑是每次轮询重画的，表单不能在渲染时挂监听（会重复挂），改成事件委托
-document.addEventListener("submit", async (event) => {
-  if (event.target.id !== "add-agent") return;
-  event.preventDefault();
-  const name = $("agent-name").value.trim();
-  const brain = $("agent-brain").value;
-  const extra = $("agent-extra").value.trim();
-  if (!name) return;
-  const body = { name, brain };
-  if (brain === "command") body.command = extra;
-  if (brain === "provider") body.provider = extra;
-  try {
-    await api(scoped("panel/api/agents"), { method: "POST", body: JSON.stringify(body) });
-    poll();
-  } catch (err) {
-    window.alert(String(err.message || err));
-  }
-});
-
-async function runAgentOp(name, op, node, button) {
-  if (op === "remove" && !window.confirm(`把 ${name} 从 node.toml 里删掉？`)) return;
-  button.disabled = true;
-  const at = node && node !== state.node ? `?node=${encodeURIComponent(node)}` : "";
-  try {
-    if (op === "remove") await api(`panel/api/agents/${encodeURIComponent(name)}`, { method: "DELETE" });
-    else await api(`panel/api/agents/${encodeURIComponent(name)}/${op}${at}`, { method: "POST" });
-    // 启停要几百毫秒才在 runtime.json 上体现出来，等一拍再刷
-    setTimeout(poll, 700);
-  } catch (err) {
-    window.alert(String(err.message || err));
-  } finally {
-    button.disabled = false;
-  }
-}
-
-$("run-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const input = $("run-input");
-  const task = input.value.trim();
-  if (!task) return;
-  say("run-hint", "发起中…");
-  try {
-    const body = await api("panel/api/run", {
-      method: "POST",
-      body: JSON.stringify({ task }),
-    });
-    input.value = "";
-    say("run-hint", `已交给 ${body.to} · thread ${body.thread.slice(-6)}`, "ok");
-    poll();
-  } catch (err) {
-    say("run-hint", String(err.message || err), "bad");
-  }
-});
-
 $("config-reload").addEventListener("click", loadConfig);
 
 $("config-save").addEventListener("click", async () => {
@@ -931,7 +989,7 @@ $("config-save").addEventListener("click", async () => {
   say("config-hint", "校验并保存中…");
   try {
     const node = $("config-node").value || state.node;
-    await api("panel/api/config", {
+    await api(u("api/config"), {
       method: "PUT",
       body: JSON.stringify({ text: $("config-text").value, node }),
     });
@@ -944,11 +1002,92 @@ $("config-save").addEventListener("click", async () => {
   }
 });
 
+// ---- 配对：见过但还不能通信的节点，在这里换密钥 ----
+async function startPairing(target) {
+  const pin = window.prompt(
+    `和 ${target} 配对。\n\n` +
+    "· 对方屏幕上有 PIN 的话，填在这里；\n" +
+    "· 想让对方来连你，直接留空确定，本机会生成一个 PIN。",
+    "",
+  );
+  if (pin === null) return;
+  try {
+    if (pin.trim()) {
+      const done = await api(u(scoped("api/pair/join")), {
+        method: "POST",
+        body: JSON.stringify({ target, pin: pin.trim() }),
+      });
+      window.alert(`已和 ${done.node} 配对\n指纹 ${done.fingerprint}\n和对方屏幕上的核对一致`);
+    } else {
+      const open = await api(u(scoped("api/pair/open")), { method: "POST" });
+      window.alert(
+        `本机 PIN：${open.pin}\n\n${open.seconds} 秒内有效，只能用一次。\n` +
+        "让对方在他的面板上点「配对」并输入这串数字。",
+      );
+    }
+    poll();
+  } catch (err) {
+    window.alert(String(err.message || err));
+  }
+}
+
+async function runAgentOp(name, op, node, button) {
+  if (op === "remove" && !window.confirm(`把 ${name} 从 node.toml 里删掉？`)) return;
+  button.disabled = true;
+  const at = node && node !== state.node ? `?node=${encodeURIComponent(node)}` : "";
+  try {
+    if (op === "remove") await api(u(`api/agents/${encodeURIComponent(name)}`), { method: "DELETE" });
+    else await api(u(`api/agents/${encodeURIComponent(name)}/${op}${at}`), { method: "POST" });
+    // 启停要几百毫秒才在 runtime.json 上体现出来，等一拍再刷
+    setTimeout(poll, 700);
+  } catch (err) {
+    window.alert(String(err.message || err));
+  } finally {
+    button.disabled = false;
+  }
+}
+
+document.addEventListener("submit", async (event) => {
+  if (event.target.id !== "add-agent") return;
+  event.preventDefault();
+  const name = $("agent-name").value.trim();
+  const brain = $("agent-brain").value;
+  const extra = $("agent-extra").value.trim();
+  if (!name) return;
+  const body = { name, brain };
+  if (brain === "command") body.command = extra;
+  if (brain === "provider") body.provider = extra;
+  try {
+    await api(u(scoped("api/agents")), { method: "POST", body: JSON.stringify(body) });
+    poll();
+  } catch (err) {
+    window.alert(String(err.message || err));
+  }
+});
+
+$("run-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = $("run-input");
+  const task = input.value.trim();
+  if (!task) return;
+  say("run-hint", "发起中…");
+  try {
+    const body = await api(u(scoped("api/run")), {
+      method: "POST",
+      body: JSON.stringify({ task }),
+    });
+    input.value = "";
+    say("run-hint", `已交给 ${body.to} · thread ${body.thread.slice(-6)}`, "ok");
+    poll();
+  } catch (err) {
+    say("run-hint", String(err.message || err), "bad");
+  }
+});
+
 pickUpToken();
-refreshSetup();
 poll();
 setInterval(poll, CLUSTER_REFRESH);
-setInterval(() => { if (!$("chat-body").hidden) loadChat(); }, 2000);
+setInterval(() => { if (!$("pane-chat").hidden) loadChat(); }, 2000);
 connect();
 enableActions();
 </script>

@@ -36,6 +36,7 @@ const document = {
   getElementById: $,
   title: "",
   querySelectorAll: () => [],
+  querySelector: () => null,
   addEventListener() {},
 };
 const window = { prompt: () => null, alert() {}, confirm: () => false };
