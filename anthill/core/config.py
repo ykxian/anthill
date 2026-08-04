@@ -128,12 +128,27 @@ class AgentSection(_Section):
     prompt_via: Literal["arg", "stdin"] = "arg"
     """prompt 怎么交给它：作为最后一个参数，还是从标准输入喂。"""
 
+    bridge: bool = False
+    """文件夹桥接：让一个**常驻的交互式会话**（Claude Code、Cursor，或就是你本人）
+    以这个 Agent 的身份参与协作。收到的消息写成 `bridge/inbox/*.md`，
+    你把回复写进 `bridge/outbox/`。见 adapters/bridge.py。
+    """
+
     @model_validator(mode="after")
     def _check_brain(self) -> Self:
-        if self.command and self.provider:
+        brains = [
+            name
+            for name, on in (
+                ("command", bool(self.command)),
+                ("provider", bool(self.provider)),
+                ("bridge", self.bridge),
+            )
+            if on
+        ]
+        if len(brains) > 1:
             raise ValueError(
-                f"Agent {self.name or '?'} 同时配了 command 与 provider；"
-                "一个 Agent 只能有一个大脑，去掉其中一个"
+                f"Agent {self.name or '?'} 同时配了 {' 与 '.join(brains)}；"
+                "一个 Agent 只能有一个大脑，去掉多余的"
             )
         return self
 
@@ -348,6 +363,13 @@ role = "worker"
 # command = ["claude", "-p"]
 # command_timeout = 900.0
 # chat_turns = 6         # 同一话题最多接几轮，防止两个 Agent 聊不完
+#
+# ---- 让一个常驻的交互式会话参与（你一直开着的 Claude Code，或就是你本人）----
+# 收到的消息写成 .anthill/agents/<name>/bridge/inbox/*.md，回复写进 ../outbox/。
+# 收消息不阻塞，人可以慢慢想；outbox 里放带 `to:` 的文件就是主动发起一条消息。
+# [agents.cc]
+# role = "worker"
+# bridge = true
 
 # 给上面的 coordinator 配一个 provider，它就会拆解任务、按依赖派活、汇总结果：
 #   anthill run "给 utils/date.py 补单测，并让 reviewer 过一遍"

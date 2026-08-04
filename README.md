@@ -128,6 +128,9 @@ flowchart LR
 
 - ✅ **把 Claude Code 这类终端接进来**：配一行 `command = ["claude", "-p"]` 就行。
   对 runtime 只是又一个 handler —— 接一个新终端不用改 agentd 一行代码
+- ✅ **常驻的交互式会话也能参与**（`bridge = true`）：收到的消息写成 `.md`，
+  你或你一直开着的 Claude Code 写回复；**收消息不阻塞**（可以想十分钟），
+  而且**人能随时主动插话**。这就是本项目起点那个土办法的正式版本
 - ✅ **Agent 之间真的能对话**：带 @ 的对话回信发给被 @ 的那个人（而不是发回给发起人），
   球在两人之间来回；终止靠按 thread 计的轮次预算，**确定性**，不靠模型自觉、
   也不拿 hops 熔断当刹车
@@ -360,6 +363,40 @@ uv run anthill send cc "看看 utils/date.py 有没有边界问题"
 （外来 CLI 每次都是新进程，自己不记事）、超时杀整个进程组。
 **但工具与策略引擎管不到它** —— Claude Code 有自己的权限体系，
 AntHill 不代管：你给它什么权限，它就有什么权限。
+
+### 让一个常驻的交互式会话参与协作（M7）
+
+上面那个适配器是**每条消息起一个新进程**（`claude -p` 无头模式）。
+如果你想要的是「我的 Claude Code 会话一直开着，顺便当个 Agent，我随时能插话」——
+那是文件夹桥接，也就是这个项目起点那个土办法的正式版本：
+
+```toml
+[agents.cc]
+role = "worker"
+bridge = true
+```
+
+```text
+.anthill/agents/cc/bridge/
+├── inbox/<信封id>.md    ← AntHill 写：收到的消息
+├── outbox/<信封id>.md   ← 你写：回复
+└── done/                已处理归档
+```
+
+跟你的 Claude Code 会话说一句就行：
+
+> 盯着 `.anthill/agents/cc/bridge/inbox/`，出现新 `.md` 就读，
+> 把回复写进 `../outbox/` 下同名的 `.md` 文件。
+
+它和其他适配器的**根本区别是不阻塞**：收到消息只是写个文件就返回，
+你可以想十分钟，期间照常收新消息（几条一起躺在 inbox 里等你）。
+由此白捡一个能力 —— **在 outbox 里放一个带 `to:` 的文件就是你主动发起的一条消息**，
+不必是对谁的回复，所以你能随时插进正在进行的协作里说一句：
+
+```bash
+uv run anthill bridge cc                              # 看看有什么在等我
+uv run anthill bridge cc --to coder --text "这块我来改，你别动"   # 主动插一句
+```
 
 ### 让 Agent 之间对话（M7）
 

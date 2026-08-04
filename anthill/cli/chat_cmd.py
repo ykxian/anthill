@@ -17,7 +17,9 @@ from pathlib import Path
 
 import typer
 from rich.prompt import Prompt
+from rich.table import Table
 
+from anthill.adapters.bridge import BridgeHandler, parse_note
 from anthill.agent.sender import Sender
 from anthill.cli.common import console, fail, load
 from anthill.core.config import Config
@@ -218,3 +220,76 @@ def _scan(layout: NodeLayout, config: Config, *, thread: str, seen: set[str]) ->
             seen.add(env.id)
             out.append(env)
     return sorted(out, key=lambda e: e.id)
+
+
+# ---------- bridge：看看有什么在等我 ----------
+
+
+def bridge_command(
+    agent: str = typer.Argument(..., help="桥接 Agent 的名字（node.toml 里 bridge = true 的那个）"),
+    reply: str = typer.Option("", "--reply", help="回复哪一条（信封 id，可只给后 6 位）"),
+    text: str = typer.Option("", "--text", help="回复正文；留空则只列出待办"),
+    to: str = typer.Option("", "--to", help="主动发一条：收件人"),
+    kind: str = typer.Option("chat", "--kind", help="主动发一条时：chat 或 task"),
+    workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
+) -> None:
+    """看看有什么消息在等你，或者直接写一条回复／主动发一条。
+
+    桥接的常规用法是**直接编辑文件**（你的 Claude Code 会话就盯着那个目录）；
+    这个命令只是懒得开编辑器时的捷径。
+    """
+    layout, config = load(workspace)
+    if not config.agent(agent).bridge:
+        fail(f"Agent {agent!r} 不是桥接 Agent；node.toml 里给它加 bridge = true")
+    handler = BridgeHandler(root=layout.agent_dir(agent), agent_name=agent)
+
+    if to:
+        _draft(
+            handler,
+            f"cli-{new_thread_id()[-8:]}.md",
+            f"---\nto: {to}\ntype: {kind}\n---\n\n{text}\n",
+        )
+        console.print(f"[bold green]✓[/bold green] 已写好草稿，发给 {to}（下一轮 tick 发出）")
+        return
+    if reply:
+        pending = _pending(handler)
+        match = [p for p in pending if p.stem.endswith(reply) or p.stem == reply]
+        if len(match) != 1:
+            fail(f"{reply!r} 匹配到 {len(match)} 条待回复；用 `anthill bridge {agent}` 看看列表")
+        _draft(handler, match[0].name, text or "")
+        console.print(f"[bold green]✓[/bold green] 已写好回复 {match[0].stem[-6:]}")
+        return
+
+    _list_pending(handler, agent)
+
+
+def _pending(handler: BridgeHandler) -> list[Path]:
+    return sorted(handler.dir("inbox").glob("*.md"))
+
+
+def _draft(handler: BridgeHandler, name: str, text: str) -> None:
+    if not text.strip():
+        fail("正文不能为空；用 --text 写点什么")
+    (handler.dir("outbox") / name).write_text(text, encoding="utf-8")
+
+
+def _list_pending(handler: BridgeHandler, agent: str) -> None:
+    pending = _pending(handler)
+    if not pending:
+        console.print(f"[dim]{agent} 这边没有在等你的消息[/dim]")
+        console.print(f"[dim]目录：{handler.dir('inbox')}[/dim]")
+        return
+
+    table = Table(title=f"{agent} 在等你回复", header_style="bold yellow")
+    for column in ("id", "来自", "类型", "内容"):
+        table.add_column(column)
+    for path in pending:
+        headers, body = parse_note(path.read_text(encoding="utf-8"))
+        table.add_row(
+            path.stem[-6:],
+            headers.get("from", "-"),
+            headers.get("type", "-"),
+            " ".join(body.split())[:56],
+        )
+    console.print(table)
+    console.print(f"[dim]直接编辑 {handler.dir('outbox')} 下的同名文件即可回复[/dim]")

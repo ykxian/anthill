@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from anthill.adapters.bridge import BridgeHandler
 from anthill.adapters.cli_agent import CliAgentHandler, CliSpec
 from anthill.agent.context import ContextBuilder
 from anthill.agent.handlers import EchoHandler, MessageHandler
@@ -35,6 +36,14 @@ def build_handler(
     confirm: Confirmer | None = None,
 ) -> MessageHandler:
     agent = config.agent(agent_name)
+    if agent.bridge:
+        # 人（或常驻的交互式会话）在回路里：收到的消息写成文件，回复从 outbox 捡
+        return BridgeHandler(
+            root=layout.agent_dir(agent_name),
+            agent_name=agent_name,
+            chat_turns=agent.chat_turns,
+        )
+
     if agent.command:
         # 外来终端 Agent（Claude Code / Codex / aider…）：对 runtime 只是又一个 handler
         return CliAgentHandler(
