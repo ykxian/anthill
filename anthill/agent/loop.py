@@ -92,11 +92,15 @@ class AgentLoop:
             )
 
             if not turn.tool_calls:
+                # 纯文本收尾也要落进历史：否则下一轮里 Agent 记得别人说过什么，
+                # 却不记得自己说过什么 —— 多轮对话会变成单方面的复读
+                answer = turn.to_msg()
+                _emit(sink, answer)
                 return LoopOutcome(
                     summary=turn.text.strip() or "（模型没有产出内容）",
                     steps=step,
                     usage=usage,
-                    transcript=tuple(transcript),
+                    transcript=(*transcript, answer),
                 )
 
             assistant_msg = turn.to_msg()

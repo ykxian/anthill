@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 from anthill.agent.context import ContextBuilder
+from anthill.agent.conversation import chat_payload, plan_reply
 from anthill.agent.handlers import HandlerContext
 from anthill.agent.loop import AgentLoop, LoopOutcome
 from anthill.agent.memory import ThreadMemory
 from anthill.agent.tools.base import Confirmer, Tool, ToolContext
-from anthill.core.envelope import Envelope
+from anthill.core.envelope import Address, Envelope
 from anthill.core.errors import BudgetExceeded, HopLimitExceeded, ProviderError
 from anthill.core.payloads import (
     ChatPayload,
@@ -21,7 +22,7 @@ from anthill.core.payloads import (
     TaskResultPayload,
 )
 from anthill.core.router import parse_address
-from anthill.providers.base import ChatProvider
+from anthill.providers.base import ChatProvider, Msg
 from anthill.security.policy import PolicyEngine, TrustLevel, trust_of
 
 MAX_SUMMARY_CHARS = 32_000
@@ -78,6 +79,7 @@ class LlmHandler:
         token_budget: int,
         trusted_peers: frozenset[str] = frozenset(),
         confirm: Confirmer | None = None,
+        chat_turns: int = 0,
     ) -> None:
         self._provider = provider
         self._tools = tools
@@ -87,6 +89,7 @@ class LlmHandler:
         self._token_budget = token_budget
         self._trusted_peers = trusted_peers
         self._confirm = confirm
+        self._chat_turns = chat_turns
 
     async def aclose(self) -> None:
         """agentd 退出时释放上游连接。不关的话 httpx 客户端会留下未关闭的 socket。"""
@@ -115,7 +118,8 @@ class LlmHandler:
             ThreadMemory.path_for(ctx.layout.agent_dir(ctx.identity.agent), env.thread)
         )
         # 先按「旧历史」组上下文，再把来件落盘 —— 顺序反了会让来件在上下文里出现两次
-        messages = self._builder.build(env, history=memory.load())
+        history = memory.load()
+        messages = self._builder.build(env, history=history)
         memory.append(self._builder.incoming(env))
         loop = AgentLoop(
             provider=self._provider,
@@ -158,14 +162,31 @@ class LlmHandler:
             finished=outcome.finished,
             artifacts=len(outcome.artifacts),
         )
-        await self._reply_result(env, ctx, outcome)
+        await self._reply_result(env, ctx, outcome, history)
 
     # ---------- 回信 ----------
 
-    async def _reply_result(self, env: Envelope, ctx: HandlerContext, outcome: LoopOutcome) -> None:
+    async def _reply_result(
+        self,
+        env: Envelope,
+        ctx: HandlerContext,
+        outcome: LoopOutcome,
+        history: list[Msg] | None = None,
+    ) -> None:
         summary = outcome.summary[:MAX_SUMMARY_CHARS] or "（无输出）"
         if env.type is MessageType.CHAT:
-            await self._send(env, ctx, MessageType.CHAT, ChatPayload(body=summary))
+            plan = plan_reply(
+                env,
+                identity=ctx.identity,
+                history=history or [],
+                budget=self._chat_turns,
+            )
+            if not plan.should_reply:
+                ctx.log.info("chat.ended", msg=env.id, thread=env.thread, reason=plan.reason)
+                return
+            await self._send(
+                env, ctx, MessageType.CHAT, chat_payload(summary, plan), plan.recipient
+            )
             return
         status = "ok" if outcome.status == "ok" and outcome.finished else "partial"
         await self._send(
@@ -198,10 +219,14 @@ class LlmHandler:
         ctx: HandlerContext,
         msg_type: MessageType,
         payload: TaskResultPayload | TaskErrorPayload | ChatPayload,
+        recipient: Address | None = None,
     ) -> None:
         try:
             reply = env.reply(
-                type=msg_type, payload=payload, sender=ctx.identity, recipient=env.from_
+                type=msg_type,
+                payload=payload,
+                sender=ctx.identity,
+                recipient=recipient or env.from_,
             )
         except HopLimitExceeded as exc:
             ctx.log.warn("hop.limit", msg=env.id, thread=env.thread, error=str(exc))

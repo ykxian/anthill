@@ -29,6 +29,8 @@ DEFAULT_CONTEXT_WINDOW = 128_000
 DEFAULT_MAX_STEPS = 20
 DEFAULT_TOKEN_BUDGET = 200_000
 DEFAULT_SHELL_TIMEOUT = 120.0
+DEFAULT_CLI_TIMEOUT = 900.0
+DEFAULT_CHAT_TURNS = 6
 
 
 class _Section(BaseModel):
@@ -94,7 +96,12 @@ class ProviderSection(_Section):
 
 
 class AgentSection(_Section):
-    """`provider` 留空表示 echo agent（M1 用：只回显，不调 LLM）。"""
+    """一个 Agent 的大脑由哪来，看两个字段：
+
+    - `command` 非空 → **外来终端 Agent**（Claude Code / Codex / aider…），见 adapters/cli_agent.py
+    - 否则 `provider` 非空 → 本项目自研的 ReAct 循环
+    - 两个都没有 → echo agent（只回显，不调模型，用来跑通链路）
+    """
 
     name: str = ""
     role: str = "worker"
@@ -103,6 +110,32 @@ class AgentSection(_Section):
     tools: tuple[str, ...] = ()
     max_steps: int = Field(default=DEFAULT_MAX_STEPS, gt=0)
     token_budget: int = Field(default=DEFAULT_TOKEN_BUDGET, gt=0)
+    chat_turns: int = Field(default=DEFAULT_CHAT_TURNS, ge=0)
+    """同一话题里最多接几轮对话。
+
+    两个 Agent 互相回信如果没有别的刹车，只能等 hops 熔断 —— 那是协议层的兜底，
+    不该拿来当对话的正常终止方式。这个预算按 thread 计，是**确定性**的：
+    不依赖模型自觉说「我说完了」。0 表示不限（仍受 hops 约束）。
+    """
+
+    command: tuple[str, ...] = ()
+    """外来终端 Agent 的启动命令，如 ["claude", "-p"]。"""
+
+    command_cwd: str = ""
+    """命令的工作目录，默认 workspace。"""
+
+    command_timeout: float = Field(default=DEFAULT_CLI_TIMEOUT, gt=0)
+    prompt_via: Literal["arg", "stdin"] = "arg"
+    """prompt 怎么交给它：作为最后一个参数，还是从标准输入喂。"""
+
+    @model_validator(mode="after")
+    def _check_brain(self) -> Self:
+        if self.command and self.provider:
+            raise ValueError(
+                f"Agent {self.name or '?'} 同时配了 command 与 provider；"
+                "一个 Agent 只能有一个大脑，去掉其中一个"
+            )
+        return self
 
 
 DEFAULT_SHELL_ALLOWLIST = (

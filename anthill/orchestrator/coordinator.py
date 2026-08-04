@@ -238,13 +238,14 @@ class CoordinatorHandler:
     ) -> RunState:
         if state.failed_ids or state.skipped_ids:
             failed = ", ".join(sorted(state.failed_ids | state.skipped_ids))
+            done = self._settle(state, f"步骤 {failed} 失败")
             await self._send_final(
-                state,
+                done,
                 ctx,
                 MessageType.TASK_ERROR,
                 TaskErrorPayload(error=f"步骤 {failed} 未完成：{_first_error(state)}"),
             )
-            return state.finish(summary=f"步骤 {failed} 失败")
+            return done
 
         verdict = await self._judge(state, ctx)
         if not verdict.satisfied and state.round < self._settings.max_rework_rounds:
@@ -257,8 +258,9 @@ class CoordinatorHandler:
             return reworked
 
         summary = _aggregate(state, verdict)
+        done = self._settle(state, summary)
         await self._send_final(
-            state,
+            done,
             ctx,
             MessageType.TASK_RESULT,
             TaskResultPayload(
@@ -270,7 +272,18 @@ class CoordinatorHandler:
         ctx.log.info(
             "run.finished", task=state.task_id, satisfied=verdict.satisfied, rounds=state.round
         )
-        return state.finish(summary=summary)
+        return done
+
+    def _settle(self, state: RunState, summary: str) -> RunState:
+        """**先落盘再发送** —— 和 Sender 同一条原则。
+
+        反过来的话，进程正好在「结果已发出、状态还没存」之间被 Ctrl-C，
+        重启后这次运行看起来仍未收尾，于是**再给用户发一遍最终结果**。
+        这个窗口只有几毫秒，但它是真实存在的：一个偶发失败的测试就是这么冒出来的。
+        """
+        done = state.finish(summary=summary)
+        self._store.save(done)
+        return done
 
     async def _judge(self, state: RunState, ctx: HandlerContext) -> Verdict:
         """用 done_when 对照各步交付。没写 done_when 就默认达成，不为难模型。"""

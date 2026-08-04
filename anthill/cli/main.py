@@ -4,6 +4,8 @@ anthill init            初始化工作区
 anthill agent start/list 守护进程
 anthill run             把任务交给 coordinator，多 Agent 协同完成
 anthill send            投递消息
+anthill chat            跟一个 Agent 多轮对话
+anthill talk            让两个 Agent 就一件事聊下去
 anthill serve           节点接收端：LAN 投递端点 + 可选组播信标
 anthill peers           对端节点与信任关系
 anthill approve         批准远端 agentd 停下来等确认的危险操作
@@ -19,6 +21,7 @@ import typer
 
 from anthill import __version__
 from anthill.cli.agent_cmd import agent_app
+from anthill.cli.chat_cmd import chat_command, talk_command
 from anthill.cli.common import console
 from anthill.cli.init_cmd import init_command
 from anthill.cli.log_cmd import log_command
@@ -39,6 +42,8 @@ app = typer.Typer(
 app.command("init")(init_command)
 app.command("run")(run_command)
 app.command("send")(send_command)
+app.command("chat")(chat_command)
+app.command("talk")(talk_command)
 app.command("serve")(serve_command)
 app.command("approve")(approve_command)
 app.command("fetch")(fetch_command)

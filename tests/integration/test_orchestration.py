@@ -597,3 +597,115 @@ async def test_mention_loop_is_broken_by_the_hop_limit(layout: NodeLayout, node:
     assert chats
     assert max(env.hops for env in chats) <= 4
     assert len(chats) <= 6
+
+
+# ---------- 两个 Agent 真的对话（M7）----------
+
+
+async def test_two_agents_actually_converse_and_stop_on_their_own(
+    layout: NodeLayout, node: Config
+) -> None:
+    """人起个头并 @ 上第二个人，球就在两个 Agent 之间来回，到轮次上限自己停。
+
+    终止靠的是每个 Agent 的 chat_turns 预算（确定性），
+    不是 hops 熔断 —— 那是协议层的兜底，一响就说明出事了。
+    """
+    # Arrange：两边都只会「接着聊」，不会主动收口
+    coder = FakeProvider([Turn(text="我觉得先加日志")])
+    reviewer = FakeProvider([Turn(text="同意，再补个测试")])
+    seed = Envelope.new(
+        sender=Address(node="testnode", agent="cli"),
+        recipient=Address(node="testnode", agent="coder"),
+        type=MessageType.CHAT,
+        payload=ChatPayload(body="这个 bug 怎么修？", mentions=("reviewer",)),
+        ttl_hops=64,  # 故意放开 hops，证明停下来的不是它
+    )
+
+    def talker(name: str, provider: FakeProvider) -> object:
+        handler = worker_handler(layout, node, name, provider)
+        handler._chat_turns = 3  # type: ignore[attr-defined]
+        return handler
+
+    # Act
+    async with AsyncExitStack() as stack:
+        for name, provider in (("coder", coder), ("reviewer", reviewer)):
+            await stack.enter_async_context(running(layout, node, name, talker(name, provider)))
+        Mailbox(layout.mailbox_dir("coder")).deposit(seed)
+        await asyncio.sleep(2.5)
+
+    # Assert：确实来回了好几轮，且两边都停在自己的预算上
+    chats = [
+        env
+        for name in ("coder", "reviewer")
+        for path in Mailbox(layout.mailbox_dir(name)).done.rglob("*.json")
+        if (env := Mailbox.read_envelope(path)).type is MessageType.CHAT
+    ]
+    assert len(chats) >= 3, "应该真的聊起来了"
+    assert max(e.hops for e in chats) < 64, "停下来的不该是 hops"
+    # 每人最多开口 chat_turns 次，加上最初那一句
+    assert len(chats) <= 3 * 2 + 1
+
+
+async def test_a_conversation_reply_goes_to_the_mentioned_partner(
+    layout: NodeLayout, node: Config
+) -> None:
+    # Arrange
+    coder = FakeProvider([Turn(text="我的看法是……")])
+    seed = Envelope.new(
+        sender=Address(node="testnode", agent="cli"),
+        recipient=Address(node="testnode", agent="coder"),
+        type=MessageType.CHAT,
+        payload=ChatPayload(body="讨论一下", mentions=("reviewer",)),
+    )
+    reviewer_box = Mailbox(layout.mailbox_dir("reviewer"))
+
+    # Act
+    async with running(layout, node, "coder", worker_handler(layout, node, "coder", coder)):
+        Mailbox(layout.mailbox_dir("coder")).deposit(seed)
+        await wait_until(lambda: bool(reviewer_box.list_new()))
+
+    # Assert：回信落在 reviewer 那里，而不是回给发起的人
+    got = Mailbox.read_envelope(reviewer_box.list_new()[0])
+    assert got.type is MessageType.CHAT
+    assert got.from_.agent == "coder"
+    assert got.payload.mentions == ("coder",)  # 把球打回去
+    # 发起人只会收到回执，不会收到这句回话 —— 球已经交给 reviewer 了
+    cli_kinds = {
+        Mailbox.read_envelope(p).type for p in Mailbox(layout.mailbox_dir("cli")).list_new()
+    }
+    assert MessageType.CHAT not in cli_kinds
+
+
+async def test_the_run_is_marked_finished_before_the_result_is_sent(
+    layout: NodeLayout, node: Config
+) -> None:
+    """先落盘再发送 —— 和 Sender 同一条原则。
+
+    反过来的话，进程正好在「结果已发出、状态还没存」之间被 Ctrl-C，
+    重启后这次运行看起来仍未收尾，于是再给用户发一遍最终结果。
+    """
+    # Arrange
+    single = {
+        "goal": "一步就完",
+        "steps": [{"id": "s1", "assignee": "coder", "task": "做事", "depends_on": []}],
+        "done_when": "",
+    }
+    boss = FakeProvider([plan_turn(single)])
+    coder = FakeProvider([finish_turn("好了")])
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+    store = RunStore(layout.blackboard)
+
+    # Act
+    async with AsyncExitStack() as stack:
+        await stack.enter_async_context(
+            running(layout, node, "coder", worker_handler(layout, node, "coder", coder))
+        )
+        await stack.enter_async_context(
+            running(layout, node, "boss", coordinator_handler(layout, boss))
+        )
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        # 结果一到手就立刻看状态：那一刻磁盘上必须已经是 finished
+        await wait_until(lambda: bool(finals_in(cli_box)))
+        finished_at_delivery = store.all()[0].finished
+
+    assert finished_at_delivery

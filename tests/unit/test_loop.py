@@ -294,3 +294,18 @@ async def test_sink_failure_does_not_fail_the_task(tool_ctx: ToolContext) -> Non
     )
 
     assert outcome.finished
+
+
+async def test_a_plain_text_answer_also_lands_in_the_transcript(tool_ctx: ToolContext) -> None:
+    """纯文本收尾也要落进历史。
+
+    否则下一轮里 Agent 记得别人说过什么，却不记得自己说过什么 ——
+    多轮对话会变成单方面的复读，对话轮次也永远数不上去。
+    """
+    seen: list[Msg] = []
+    provider = FakeProvider([Turn(text="我觉得先加日志")])
+
+    outcome = await make_loop(provider, tool_ctx).run([Msg.user("你怎么看")], sink=seen.append)
+
+    assert [m.role for m in outcome.transcript] == [Role.ASSISTANT]
+    assert [m.content for m in seen] == ["我觉得先加日志"]

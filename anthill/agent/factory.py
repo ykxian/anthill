@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from anthill.adapters.cli_agent import CliAgentHandler, CliSpec
 from anthill.agent.context import ContextBuilder
 from anthill.agent.handlers import EchoHandler, MessageHandler
 from anthill.agent.llm_handler import LlmHandler
@@ -34,6 +35,21 @@ def build_handler(
     confirm: Confirmer | None = None,
 ) -> MessageHandler:
     agent = config.agent(agent_name)
+    if agent.command:
+        # 外来终端 Agent（Claude Code / Codex / aider…）：对 runtime 只是又一个 handler
+        return CliAgentHandler(
+            spec=CliSpec(
+                command=agent.command,
+                cwd=Path(agent.command_cwd) if agent.command_cwd else layout.workspace,
+                timeout=agent.command_timeout,
+                prompt_via=agent.prompt_via,
+            ),
+            agent_name=agent_name,
+            role=agent.role,
+            persona=agent.persona,
+            chat_turns=agent.chat_turns,
+        )
+
     provider = provider_for_agent(config, agent_name, mode=mode, tape=tape)
     if provider is None:
         return EchoHandler()
@@ -64,4 +80,5 @@ def build_handler(
         token_budget=agent.token_budget,
         trusted_peers=frozenset(config.peers),
         confirm=confirm,
+        chat_turns=agent.chat_turns,
     )
