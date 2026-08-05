@@ -87,7 +87,7 @@ def _endpoint_cell(peer: PeerRecord) -> str:
 
 @peers_app.command("invite")
 def invite(
-    node: str = typer.Argument(..., help="对方的节点名（他们 node.toml 里的 [node] name）"),
+    node: str = typer.Argument(..., help="对方的节点名（他们 node.toml 里的 \[node] name）"),
     endpoint: str = typer.Option("", "--endpoint", help="本机对外地址，默认 http://<本机IP>:45778"),
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
 ) -> None:

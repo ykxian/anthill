@@ -13,7 +13,7 @@ from pathlib import Path
 import typer
 
 from anthill.agent.sender import Sender
-from anthill.cli.common import console, fail, load
+from anthill.cli.common import console, fail, load, read_body
 from anthill.core.config import Config
 from anthill.core.envelope import Address, Envelope
 from anthill.core.errors import AntHillError
@@ -33,7 +33,7 @@ TERMINAL_TYPES = frozenset({MessageType.TASK_RESULT, MessageType.TASK_ERROR})
 
 def send_command(
     to: str = typer.Argument(..., help="收件人：agent / role:xxx / node:agent"),
-    text: str = typer.Argument(..., help="消息正文"),
+    text: str = typer.Argument(..., help="消息正文；`-` 读 stdin，`@文件` 读文件"),
     title: str = typer.Option("", "--title", "-t", help="任务标题，默认取正文前 60 字"),
     msg_type: str = typer.Option("task.request", "--type", help="task.request | chat"),
     sender_name: str = typer.Option(DEFAULT_CLI_AGENT, "--from", "-f", help="以哪个 Agent 身份发"),
@@ -43,6 +43,7 @@ def send_command(
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
 ) -> None:
     """投递一条消息。"""
+    text = read_body(text)
     layout, config = load(workspace)
     try:
         kind = MessageType(msg_type)

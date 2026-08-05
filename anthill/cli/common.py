@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import NoReturn
 
@@ -48,3 +49,27 @@ def is_running(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+STDIN_MARKER = "-"
+FILE_PREFIX = "@"
+
+
+def read_body(value: str) -> str:
+    """任务正文/消息正文：支持 `-`（读 stdin）与 `@路径`（读文件）。
+
+    正文以前只能当位置参数传，于是一段稍长的 prompt 要么被 shell 的引号规则
+    折磨，要么根本没法带换行。`-` 和 `@file` 是 curl/kubectl 那一套约定，
+    不用学。真正以 `-`/`@` 开头的正文：`@` 打两个（`@@`），或者走 stdin。
+    """
+    if value == STDIN_MARKER:
+        return sys.stdin.read().strip()
+    if value.startswith(FILE_PREFIX * 2):
+        return value[1:]  # 转义：`@@x` 就是字面量 `@x`
+    if value.startswith(FILE_PREFIX):
+        path = Path(value[1:]).expanduser()
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            fail(f"读不了 {path}：{exc}")
+    return value

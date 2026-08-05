@@ -83,6 +83,22 @@ app.command("cost")(cost_command)
 app.command("runs")(runs_command)
 
 
+def _version(show: bool) -> None:
+    """`--version` 是所有人的肌肉记忆 —— 只有 `anthill version` 子命令不够。"""
+    if show:
+        console.print(f"anthill {__version__}")
+        raise typer.Exit
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False, "--version", "-V", callback=_version, is_eager=True, help="打印版本号后退出"
+    ),
+) -> None:
+    pass
+
+
 @app.command("guide")
 def guide() -> None:
     """按场景分组的命令地图 —— 第一次用先看这个。"""

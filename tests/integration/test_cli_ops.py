@@ -7,12 +7,14 @@
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
+from anthill.cli.common import read_body
 from anthill.cli.main import app
 from anthill.core.config import Config
 from anthill.core.paths import NodeLayout
@@ -225,3 +227,66 @@ def test_help_points_at_the_map() -> None:
     result = runner.invoke(app, ["--help"])
 
     assert "anthill guide" in result.output
+
+
+# ---------- 长正文不必塞进命令行 ----------
+
+
+def test_a_task_can_come_from_a_file(workspace: Path, tmp_path: Path) -> None:
+    """正文以前只能当位置参数传 —— 稍长一点的 prompt 要么被 shell 的引号规则折磨，
+    要么根本没法带换行。"""
+    brief = tmp_path / "brief.md"
+    brief.write_text("第一行\n第二行：给 date.py 补单测", encoding="utf-8")
+
+    assert read_body(f"@{brief}") == "第一行\n第二行：给 date.py 补单测"
+
+
+def test_a_task_can_come_from_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO("从管道来的任务\n"))
+
+    assert read_body("-") == "从管道来的任务"
+
+
+def test_a_literal_at_sign_is_escapable() -> None:
+    """真正以 @ 开头的正文别被当成文件名。"""
+    assert read_body("@@coder 看一下") == "@coder 看一下"
+
+
+def test_a_missing_file_is_an_actionable_error(tmp_path: Path) -> None:
+    import typer
+
+    with pytest.raises(typer.Exit):
+        read_body(f"@{tmp_path / '不存在.md'}")
+
+
+def test_ordinary_text_is_untouched() -> None:
+    assert read_body("就是一句话") == "就是一句话"
+
+
+# ---------- --version ----------
+
+
+def test_the_long_version_flag_works() -> None:
+    """`--version` 是所有人的肌肉记忆，只有 `anthill version` 子命令不够。"""
+    for flag in ("--version", "-V"):
+        result = runner.invoke(app, [flag])
+        assert result.exit_code == 0, flag
+        assert "anthill" in result.output
+
+
+# ---------- help 别被 rich 吃掉 ----------
+
+
+def test_the_unattended_flag_explains_that_it_is_not_approve_all() -> None:
+    """这是个安全开关 —— 中文没有空格，rich 断不了行就直接截断成「…」，
+    那句最关键的语义澄清在终端里无论如何都读不到。"""
+    result = runner.invoke(app, ["agent", "start", "--help"])
+
+    assert "全部同意" in result.output
+
+
+def test_square_brackets_survive_in_help() -> None:
+    """rich 把中括号当样式标记吃掉，`[node] name` 显示成「里的  name」。"""
+    result = runner.invoke(app, ["peers", "invite", "--help"])
+
+    assert "[node]" in result.output

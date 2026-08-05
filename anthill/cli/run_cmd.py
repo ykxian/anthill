@@ -19,7 +19,7 @@ from rich.table import Table
 from rich.text import Text
 
 from anthill.agent.sender import Sender
-from anthill.cli.common import console, fail, load
+from anthill.cli.common import console, fail, load, read_body
 from anthill.core.config import Config, brain_of
 from anthill.core.envelope import Address, Envelope
 from anthill.core.errors import AntHillError, ConfigError
@@ -54,13 +54,14 @@ STATE_STYLE = {
 
 
 def run_command(
-    task: str = typer.Argument(..., help="要完成的任务，用自然语言描述"),
+    task: str = typer.Argument(..., help="要完成的任务；`-` 读 stdin，`@文件` 读文件"),
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
     to: str = typer.Option("", "--to", help="指定 coordinator，默认自动找 role=coordinator 的"),
     timeout: float = typer.Option(DEFAULT_TIMEOUT, "--timeout", help="最长等待秒数"),
     plain: bool = typer.Option(False, "--plain", help="不用实时画面，只按行打印（便于重定向）"),
 ) -> None:
     """把任务交给 coordinator，实时看它拆解、派活、汇总。"""
+    task = read_body(task)
     layout, config = load(workspace)
     try:
         coordinator = to or _find_coordinator(config)

@@ -43,7 +43,7 @@ def start(
         False,
         "--unattended",
         "-u",
-        help="无人值守：不弹确认，需要确认的高风险操作一律拒绝（不是「全部同意」）",
+        help="无人值守：不弹确认。需要确认的高风险操作一律 拒绝 —— 不是「全部同意」",
     ),
     approvals: bool = typer.Option(
         False,
