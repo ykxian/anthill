@@ -196,3 +196,48 @@ def test_memory_path_is_derived_from_thread_id(tmp_path: Path) -> None:
 def test_memory_path_rejects_thread_ids_that_are_not_ulids(tmp_path: Path, thread: str) -> None:
     with pytest.raises(ValueError, match="thread"):
         ThreadMemory.path_for(tmp_path, thread)
+
+
+# ---------- 预算裁剪不能产出畸形请求体 ----------
+
+
+def tool_history() -> list[Msg]:
+    """一段真实形状的历史：调工具 → 拿结果 → 再说话。"""
+    call = ToolCall(id="call_1", name="read_file", arguments='{"path":"a.py"}')
+    return [
+        Msg.system("你是 coder"),
+        Msg.user("看看 a.py"),
+        Msg(role=Role.ASSISTANT, content="", tool_calls=(call,)),
+        Msg.tool_result("call_1", "文件内容很长很长很长很长很长很长"),
+        Msg.user("那改一下"),
+    ]
+
+
+@pytest.mark.parametrize("budget", range(10, 200))
+def test_no_budget_ever_leaves_a_tool_result_without_its_call(budget: int) -> None:
+    """切口恰好落在 assistant(tool_calls) 与它的结果之间时，留下的那条 role=tool
+    在 OpenAI 侧是「前面没有 tool_calls 的 tool 消息」，在 Anthropic 侧是
+    「首条 user 里挂着不存在的 tool_use_id」—— 两家都直接 400。
+
+    逐个扫过预算取值 —— 稀疏采样会漏：真正切在中间的那条缝可能只有一两个取值宽。
+    """
+    kept = fit_to_budget(tool_history(), budget=budget)
+
+    known = {c.id for m in kept for c in m.tool_calls}
+    orphans = [m.tool_call_id for m in kept if m.role is Role.TOOL and m.tool_call_id not in known]
+    assert orphans == [], f"budget={budget} 留下了孤儿 {orphans}"
+
+
+def test_trimming_still_keeps_the_newest_message() -> None:
+    """清理孤儿不能顺手把最新那条来件也清掉。"""
+    kept = fit_to_budget(tool_history(), budget=30)
+
+    assert kept[0].role is Role.SYSTEM
+    assert kept[-1].content == "那改一下"
+
+
+def test_a_matched_pair_survives_together() -> None:
+    """预算够时，调用和结果得成对留下 —— 别为了保险把有用的也删了。"""
+    kept = fit_to_budget(tool_history(), budget=100_000)
+
+    assert len(kept) == 5

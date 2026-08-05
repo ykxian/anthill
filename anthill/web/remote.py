@@ -89,10 +89,13 @@ def _check(node: str, response: httpx.Response, ok: tuple[int, ...] = (200,)) ->
         return
     if response.status_code == 404:
         raise AntHillError(
-            f"{node} 没有开放远端管理。让那台机器在 node.toml 里写\n"
-            "  [security]\n  remote_admin = true\n"
-            "或者用 anthill serve --remote-admin 启动。\n"
-            "想清楚再开：能改 node.toml ≈ 能在那台机器上执行命令。"
+            f"{node} 上没有这条路径。**别急着去开远端管理** —— 404 有好几种可能：\n"
+            f"  · 那台机器上没有名为 {node} 的节点（名字打错了？）\n"
+            "  · 两边版本不一致，那个端点还不存在\n"
+            "  · 它确实没开远端管理（关着时端点就是不存在，不回 403 —— "
+            "刻意不给人留一个可以试探的门把手）\n"
+            "先确认前两条。真要开第三条，那台机器上写 [security] remote_admin = true，"
+            "并且想清楚：能改 node.toml ≈ 能在那台机器上执行命令。"
         )
     if response.status_code == 403:
         raise AntHillError(f"{node} 不信任本节点 —— 先配对（anthill peers pair）")

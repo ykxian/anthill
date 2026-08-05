@@ -15,7 +15,12 @@ from pathlib import Path
 from anthill.core.atomic import atomic_write
 from anthill.core.errors import ProviderError
 from anthill.core.ids import is_valid_id
-from anthill.providers.base import ChatProvider, Msg, Role, estimate_tokens
+from anthill.providers.base import (
+    ChatProvider,
+    Msg,
+    drop_orphan_tool_results,
+    estimate_tokens,
+)
 
 THREADS_DIR = "threads"
 DEFAULT_COMPACT_THRESHOLD = 24_000
@@ -103,7 +108,7 @@ class ThreadMemory:
         if not summary:
             return False
 
-        self._rewrite([Msg.system(f"{SUMMARY_PREFIX}{summary}"), *_drop_orphan_tool_results(tail)])
+        self._rewrite([Msg.system(f"{SUMMARY_PREFIX}{summary}"), *drop_orphan_tool_results(tail)])
         return True
 
     def _rewrite(self, messages: list[Msg]) -> None:
@@ -117,19 +122,6 @@ class ThreadMemory:
 
 def _render(messages: list[Msg]) -> str:
     return "\n".join(f"[{m.role}] {m.content}" for m in messages if m.content)
-
-
-def _drop_orphan_tool_results(messages: list[Msg]) -> list[Msg]:
-    """截断可能把 tool 结果与它的 assistant 调用拆散，留着会让模型报错。"""
-    known: set[str] = set()
-    out: list[Msg] = []
-    for msg in messages:
-        if msg.role is Role.ASSISTANT:
-            known.update(c.id for c in msg.tool_calls)
-        if msg.role is Role.TOOL and msg.tool_call_id not in known:
-            continue
-        out.append(msg)
-    return out
 
 
 def estimate_history_tokens(messages: list[Msg]) -> int:

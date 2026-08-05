@@ -18,7 +18,7 @@ from anthill.agent.tools.base import Tool
 from anthill.core.config import AgentSection
 from anthill.core.envelope import Envelope
 from anthill.core.payloads import MessageType
-from anthill.providers.base import Msg
+from anthill.providers.base import Msg, drop_orphan_tool_results
 
 UNTRUSTED_START = "<<<ANTHILL_UNTRUSTED_MESSAGE>>>"
 UNTRUSTED_END = "<<<END_ANTHILL_UNTRUSTED_MESSAGE>>>"
@@ -54,7 +54,12 @@ def untrusted_wrap(content: str, *, source: str) -> str:
 
 
 def fit_to_budget(messages: list[Msg], *, budget: int) -> list[Msg]:
-    """从最老的历史开始丢，直到估算 token 落进预算。首条与末条永远保留。"""
+    """从最老的历史开始丢，直到估算 token 落进预算。首条与末条永远保留。
+
+    丢完必须清一遍孤儿 tool 结果：切口正好落在 assistant(tool_calls) 与它的结果之间时，
+    留下的那条 `role=tool` 会让两家 API 都直接 400 —— 见 `drop_orphan_tool_results`。
+    只删不增，所以清理之后仍在预算内。
+    """
     if len(messages) <= 2:
         return list(messages)
     head, tail = messages[0], messages[-1]
@@ -62,7 +67,8 @@ def fit_to_budget(messages: list[Msg], *, budget: int) -> list[Msg]:
     fixed = head.approx_tokens + tail.approx_tokens
     while middle and fixed + sum(m.approx_tokens for m in middle) > budget:
         middle = middle[1:]
-    return [head, *middle, tail]
+    # 首条是 system，不可能是孤儿；从它之后开始清
+    return [head, *drop_orphan_tool_results([*middle, tail])]
 
 
 @dataclass(frozen=True, slots=True)

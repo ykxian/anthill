@@ -25,7 +25,15 @@ STATE_MARK = {
     StepState.RUNNING: "▶",
     StepState.DONE: "✓",
     StepState.FAILED: "✗",
+    StepState.SKIPPED: "⊘",
 }
+"""**每个 StepState 都得在这儿有一格。**（有一条测试逐个枚举，加了新状态忘填会红。）
+
+漏掉 SKIPPED 曾让并行 DAG 一失败就崩：一支失败、另一支还在跑的那一刻，
+`_render_run` 下标取值直接 KeyError —— BOARD.md 从此停止更新、tick.failed 刷屏。
+以前没被测出来，是因为用例里 skipped 和收尾发生在同一次调度，落盘时 run 已经结束，
+而 BOARD 只对**未完成**的 run 展开步骤明细。只要 DAG 真有并行分支就必然撞上。
+"""
 
 
 class Blackboard:

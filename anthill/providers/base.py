@@ -109,6 +109,29 @@ class Msg:
         )
 
 
+def drop_orphan_tool_results(messages: list[Msg]) -> list[Msg]:
+    """丢掉找不到对应 assistant 调用的 tool 结果。
+
+    **任何裁剪历史的地方都必须过这一道。** 一条 `role=tool` 单独留下来时：
+    OpenAI 侧是一条前面没有 tool_calls 的 tool 消息，Anthropic 侧是首条 user 里
+    挂着一个不存在的 `tool_use_id` —— 两家都直接 400。
+
+    这类缺陷有个讨厌的性质：**历史越长越容易踩**。短会话永远遇不到，
+    跑长任务时预算恰好切在 assistant(tool_calls) 和它的结果之间就炸 ——
+    也就是任务越接近成功越容易炸。压缩那条路（agent/memory.py）一直做了这件事，
+    预算裁剪那条路（agent/context.py）曾经没做，两条路都通向同一个请求体。
+    """
+    known: set[str] = set()
+    out: list[Msg] = []
+    for msg in messages:
+        if msg.role is Role.ASSISTANT:
+            known.update(c.id for c in msg.tool_calls)
+        if msg.role is Role.TOOL and msg.tool_call_id not in known:
+            continue
+        out.append(msg)
+    return out
+
+
 @dataclass(frozen=True, slots=True)
 class ToolSpec:
     """给模型看的工具描述。`parameters` 是标准 JSON Schema。"""

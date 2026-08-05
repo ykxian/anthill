@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import httpx
@@ -180,3 +181,86 @@ async def test_the_setup_screen_is_reachable_on_a_brand_new_headless_box(
     assert setup.json()["ready"] is False
     assert browse.status_code == 200
     assert adopt.status_code == 201, adopt.text
+
+
+# ---------- WebSocket 也是一个口子 ----------
+
+
+def connect(app: object, *, host: str, query: str = "", origin: str = "") -> tuple[bool, int]:
+    """返回（有没有被接受, 关闭码）。用 ASGI 协议直接对话，不经过任何客户端库。"""
+    import anyio
+
+    messages: list[dict[str, object]] = []
+    scope = {
+        "type": "websocket",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "scheme": "ws",
+        "path": "/panel/ws",
+        "raw_path": b"/panel/ws",
+        "query_string": query.encode(),
+        "root_path": "",
+        "headers": [(b"host", b"box.test")] + ([(b"origin", origin.encode())] if origin else []),
+        "client": (host, 1),
+        "server": ("box.test", 80),
+        "subprotocols": [],
+        "state": {},
+    }
+
+    async def receive() -> dict[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: dict[str, object]) -> None:
+        messages.append(message)
+        if message["type"] == "websocket.accept":
+            raise _StopPush  # 接了就够了，别真的推起来
+
+    async def run() -> None:
+        with contextlib.suppress(_StopPush):
+            await app(scope, receive, send)  # type: ignore[operator]
+
+    with anyio.from_thread.start_blocking_portal() as portal:
+        portal.call(run)
+    accepted = any(m["type"] == "websocket.accept" for m in messages)
+    closed = next((int(m.get("code", 0)) for m in messages if m["type"] == "websocket.close"), 0)
+    return accepted, closed
+
+
+class _StopPush(Exception):
+    pass
+
+
+def test_the_websocket_is_not_an_unauthenticated_back_door(tmp_path: Path) -> None:
+    """真出过的洞：REST 那边堵上了，WS 这边 `accept()` 之前一行检查都没有。
+
+    推的是同一个 `build_snapshot()` —— 编排任务的正文、最近的日志、对端清单。
+    于是 `--host 0.0.0.0` 下「写操作只对本机开放」的承诺，在读方向被整个绕过。
+    """
+    accepted, code = connect(node_app(tmp_path), host=LAN)
+
+    assert not accepted, "网段上的任何人都能连上实时快照"
+    assert code == 1008
+
+
+def test_a_valid_token_still_gets_the_live_feed(tmp_path: Path) -> None:
+    """堵洞不能把无头机器一起堵死 —— 令牌那条路必须还通。"""
+    accepted, _ = connect(node_app(tmp_path), host=LAN, query=f"token={TOKEN}")
+
+    assert accepted
+
+
+def test_a_random_web_page_cannot_open_the_local_websocket(tmp_path: Path) -> None:
+    """**WebSocket 不受同源策略约束**，所以默认的回环配置也中招：
+    你在浏览器里随便打开一个网页，那页面 `new WebSocket("ws://127.0.0.1:45778/panel/ws")`
+    就能一直读走整个节点状态。浏览器握手时仍会带 Origin，这就是挡住它的那道。
+    """
+    accepted, code = connect(node_app(tmp_path), host="127.0.0.1", origin="http://evil.example")
+
+    assert not accepted
+    assert code == 1008
+
+
+def test_loopback_without_a_token_keeps_working(tmp_path: Path) -> None:
+    accepted, _ = connect(node_app(tmp_path), host="127.0.0.1")
+
+    assert accepted

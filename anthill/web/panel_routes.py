@@ -18,6 +18,7 @@ from typing import Any
 from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.requests import HTTPConnection
 
 from anthill.core.config import Config
 from anthill.core.errors import AntHillError, PeerError
@@ -63,28 +64,33 @@ from anthill.web.workspaces import listing as list_workspaces
 
 PANEL_HTML = Path(__file__).parent / "static" / "panel.html"
 PANEL_REFRESH = 2.0
+WS_POLICY_VIOLATION = 1008
+"""RFC 6455 的「策略违规」—— 关 WebSocket 时用它，别用普通关闭码糊弄过去。"""
 
 
-def authorize(request: Request, token: str, *, what: str = "这个接口") -> None:
-    """两条路任选其一：**连接来自本机**，或者**带着有效的面板令牌**。
+def denial(conn: HTTPConnection, token: str, *, what: str = "这个接口") -> HTTPException | None:
+    """两条路任选其一：**连接来自本机**，或者**带着有效的面板令牌**。都不成立就返回该报的错。
 
     只认回环的话，一台没有显示器的机器就永远操作不了 —— 你没法在它上面开浏览器。
     令牌是那台机器自己生成的（`--panel-token`），分量等同于「能在它上面执行命令」。
 
     跨站检查一直都在：即使请求确实来自本机，发起它的如果是别的站点也不放行。
+
+    收 `HTTPConnection` 而不是 `Request`，是因为 **WebSocket 也得走这一套**。
+    以前它收 `Request`，于是 WS 那条路根本没法复用，就这么一直敞着 —— 见 `panel_ws`。
     """
-    if not is_same_origin(request.headers.get("origin"), request.headers.get("host")):
-        raise HTTPException(status_code=403, detail=f"拒绝跨站访问{what}")
-    if is_local_client(request.client.host if request.client else None):
-        return
+    if not is_same_origin(conn.headers.get("origin"), conn.headers.get("host")):
+        return HTTPException(status_code=403, detail=f"拒绝跨站访问{what}")
+    if is_local_client(conn.client.host if conn.client else None):
+        return None
     given = presented(
-        {k.lower(): v for k, v in request.headers.items()},
-        dict(request.cookies),
-        request.query_params.get("token", ""),
+        {k.lower(): v for k, v in conn.headers.items()},
+        dict(conn.cookies),
+        conn.query_params.get("token", ""),
     )
     if token and matches(given, token):
-        return
-    raise HTTPException(
+        return None
+    return HTTPException(
         status_code=401 if token else 403,
         detail=(
             f"{what}需要面板令牌 —— 那台机器上用 `anthill serve --panel-token` 起，"
@@ -93,6 +99,12 @@ def authorize(request: Request, token: str, *, what: str = "这个接口") -> No
             else f"{what}只允许本机访问；没有显示器的机器请用 --panel-token 起"
         ),
     )
+
+
+def authorize(conn: HTTPConnection, token: str, *, what: str = "这个接口") -> None:
+    refusal = denial(conn, token, what=what)
+    if refusal is not None:
+        raise refusal
 
 
 def _pick(nodes: NodeRegistry, name: str) -> Any:
@@ -206,7 +218,21 @@ def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog, token: str 
 
     @app.websocket(f"{PANEL_PATH}/ws")
     async def panel_ws(websocket: WebSocket) -> None:
-        """定时推快照。做成推送而不是让页面轮询，是为了 kill -9 之后状态能立刻变灰。"""
+        """定时推快照。做成推送而不是让页面轮询，是为了 kill -9 之后状态能立刻变灰。
+
+        **这里也要认证。** 推的是 `build_snapshot()` —— 和 `/api/state` 一模一样的东西：
+        编排任务的正文、最近的日志、对端清单。REST 那边把口子堵上了，这边曾经是敞着的：
+        `accept()` 之前一行检查都没有，令牌配了也白配。
+
+        两个后果都真实存在：`--host 0.0.0.0` 时「写操作只对本机开放」的承诺在读方向被绕过；
+        而且 **WebSocket 不受同源策略约束**，你浏览器里随便打开一个网页，那个页面
+        `new WebSocket("ws://127.0.0.1:45778/panel/ws")` 就能一直读走整个节点状态 ——
+        默认的回环配置一样中招。同源检查（浏览器仍会带 Origin）正是挡住后者的那道。
+        """
+        refusal = denial(websocket, token, what="实时快照")
+        if refusal is not None:
+            await websocket.close(code=WS_POLICY_VIOLATION, reason=str(refusal.detail)[:120])
+            return
         await websocket.accept()
         try:
             while True:

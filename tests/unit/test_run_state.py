@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from anthill.core.ids import new_id, new_thread_id
-from anthill.orchestrator.board import BOARD_FILE, MAX_BOARD_LINES, Blackboard
+from anthill.orchestrator.board import (
+    BOARD_FILE,
+    MAX_BOARD_LINES,
+    STATE_MARK,
+    Blackboard,
+)
 from anthill.orchestrator.plan import Plan
 from anthill.orchestrator.state import RunState, RunStore, StepState
 
@@ -193,3 +198,29 @@ def test_task_dir_is_created_under_tasks(tmp_path: Path) -> None:
 def test_task_dir_rejects_ids_that_are_not_ulids(tmp_path: Path, bad: str) -> None:
     with pytest.raises(ValueError, match="task"):
         Blackboard(tmp_path).task_dir(bad)
+
+
+def test_every_step_state_has_a_mark(tmp_path: Path) -> None:
+    """渲染是下标取值 —— 少一格就是 KeyError。加了新状态忘填，这里先红。"""
+    assert set(STATE_MARK) == set(StepState)
+
+
+def test_the_board_survives_one_branch_failing_while_another_still_runs(tmp_path: Path) -> None:
+    """真出过的崩：并行 DAG 一支失败、另一支还在跑的那一刻，STATE_MARK 里没有
+    SKIPPED，`render_board` 直接 KeyError —— BOARD.md 从此停更、tick.failed 刷屏。
+
+    以前测不出来，是因为用例里 skipped 和收尾发生在同一次调度，落盘时 run 已经结束，
+    而 BOARD 只对**未完成**的 run 展开步骤明细。所以这里手工摆出那个中间态。
+    """
+    board = Blackboard(tmp_path)
+    state = make_state()
+    steps = [
+        state.steps[0].model_copy(update={"state": StepState.FAILED, "error": "炸了"}),
+        state.steps[1].model_copy(update={"state": StepState.SKIPPED}),
+    ]
+    mid_flight = state.model_copy(update={"steps": steps})
+
+    board.write([mid_flight])  # 不能抛
+
+    text = (tmp_path / BOARD_FILE).read_text(encoding="utf-8")
+    assert "skipped" in text and "failed" in text

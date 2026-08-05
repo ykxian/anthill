@@ -295,7 +295,9 @@ def create_app(
             request, "", agent, action, (x_anthill_node, x_anthill_ts, x_anthill_sig)
         )
 
-    @app.post("/node/{name}/agents/{{agent}}/{{action}}", status_code=202)
+    # 少一个 f 前缀就注册成字面量 `{{agent}}` 了 —— 这条路由从来没匹配上过任何请求，
+    # 而 404 又被翻译成「对端没开远端管理」，反过来诱导人去打开 remote_admin。
+    @app.post("/node/{name}/agents/{agent}/{action}", status_code=202)
     async def node_agent_control_named(
         request: Request,
         name: str,
