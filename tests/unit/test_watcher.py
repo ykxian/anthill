@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from anthill.agent.watcher import MailboxWatcher, WatchMode, filesystem_type, is_network_filesystem
+from anthill.agent.watcher import (
+    MailboxWatcher,
+    WatchMode,
+    filesystem_type,
+    is_network_filesystem,
+)
+from anthill.core.ids import new_id
 
 
 async def collect(watcher: MailboxWatcher, count: int, timeout: float = 3.0) -> list[Path]:
@@ -81,6 +87,11 @@ async def test_inotify_mode_receives_events(tmp_path: Path):
     await task
 
     assert len(found) == 1
+    if watcher.mode is WatchMode.POLL:
+        # 这台机器上 inotify 用不了（多半是别的进程把 max_user_watches 用光了）。
+        # 消息**照样收到了**（上面那条断言），这正是降级该有的样子 ——
+        # 但「inotify 真的能用」这件事在这个环境里没法验证，所以跳过而不是判失败。
+        pytest.skip(f"环境不支持 inotify：{watcher.reason}")
     assert watcher.mode is WatchMode.INOTIFY
 
 
@@ -118,3 +129,39 @@ async def test_network_filesystem_forces_poll(tmp_path: Path, monkeypatch):
 
     assert await watcher.detect_mode() is WatchMode.POLL
     assert "nfs" in watcher.reason
+
+
+async def test_forced_inotify_degrades_instead_of_crashing(tmp_path: Path, monkeypatch) -> None:
+    """内核说不行的时候要降级，不是崩掉。
+
+    最常见的是 `[Errno 28] inotify watch limit reached` —— 机器上别的进程把
+    `fs.inotify.max_user_watches` 用光了，和这个工作区毫无关系。
+    `watch_mode = "inotify"` 的意思是「优先用它」，不该是「用不了就别活了」：
+    轮询慢一点，但节点还在收消息；崩掉就是彻底掉线。
+    """
+
+    class Exhausted:
+        def schedule(self, *args: object, **kwargs: object) -> None:
+            raise OSError(28, "inotify watch limit reached")
+
+        def start(self) -> None:  # pragma: no cover - schedule 先抛
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def join(self, timeout: float = 0) -> None:
+            pass
+
+    monkeypatch.setattr("anthill.agent.watcher.Observer", Exhausted)
+    watcher = MailboxWatcher(tmp_path, mode="inotify", poll_interval=0.05)
+
+    stream = watcher.stream()
+    envelope = tmp_path / f"{new_id()}.json"
+    envelope.write_text("{}", encoding="utf-8")
+    found = await asyncio.wait_for(anext(stream), timeout=3)
+    await stream.aclose()
+
+    assert found == envelope, "降级之后照样得收得到消息"
+    assert watcher.mode is WatchMode.POLL
+    assert "降级轮询" in watcher.reason

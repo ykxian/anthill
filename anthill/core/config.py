@@ -108,6 +108,14 @@ class ProviderSection(_Section):
     context_window: int = Field(default=DEFAULT_CONTEXT_WINDOW, gt=0)
     """模型上下文窗口，context.py 按它的 70% 做预算（03-tech-design §4）。"""
 
+    price_in: float = Field(default=0.0, ge=0)
+    price_out: float = Field(default=0.0, ge=0)
+    """每百万 token 的价格（输入 / 输出），用于 `anthill cost` 折算。
+
+    默认 0 = 不知道价格，那时只报 token 数，**不瞎猜钱**。
+    单价写死在代码里迟早会过期，而一个过期的价格比没有价格更糟。
+    """
+
 
 class AgentSection(_Section):
     """一个 Agent 的大脑由哪来，看两个字段：
@@ -405,6 +413,10 @@ shell_timeout = 120.0
 [agents.cli]
 role = "user"              # `anthill send` 的收件箱：回执与 result 会回到这里
 
+# 拆解任务、派活、汇总的那个。**它现在还没有大脑** ——
+# 没配 provider 就只是个复读机，`anthill run` 会直接拦下来告诉你。
+# 想跑多 Agent 编排：把下面 [providers.*] 那段注释打开，然后给它加一行
+#   provider = "deepseek"
 [agents.coordinator]
 role = "coordinator"
 

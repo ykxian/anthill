@@ -54,8 +54,11 @@ def list_peers(
         return
 
     table = Table(title="对端节点", header_style="bold cyan")
+    # 指纹存在的唯一目的就是和对方逐字符核对，被窄终端截成「f1:c2:…」就废了。
+    # 项目在 peers invite 的令牌上专门加过 soft_wrap 并写了理由，同样的道理适用于这里。
     for column in ("节点", "状态", "端点", "Agent", "指纹", "最近可见"):
-        table.add_column(column)
+        # overflow="fold" 换行而不是截断 —— 指纹少一段就没法核对
+        table.add_column(column, overflow="fold")
     for peer in records:
         style = "green" if peer.trusted else "yellow"
         table.add_row(

@@ -29,7 +29,9 @@ def load(workspace: Path | None = None) -> tuple[NodeLayout, Config]:
 
 def fail(message: str, code: int = 1) -> NoReturn:
     """打印错误并退出。标成 NoReturn，调用点后面的代码就不会被当成「可能执行到」。"""
-    err_console.print(f"[bold red]✗[/bold red] {message}")
+    # soft_wrap：错误里常常带路径和命令，被从中间折断就复制不了。
+    # 项目在 peers invite 的令牌上已经这么做过，同样的道理这里一直没做。
+    err_console.print(f"[bold red]✗[/bold red] {message}", soft_wrap=True)
     raise typer.Exit(code)
 
 

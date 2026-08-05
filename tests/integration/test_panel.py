@@ -165,7 +165,11 @@ async def test_panel_page_is_served(node: tuple[NodeLayout, Config, PeerRegistry
 
     assert response.status_code == 200
     assert "AntHill" in response.text
-    assert "http" not in response.text.split("<script>")[0].replace("http-equiv", "")
+    # 判据是「有没有真的去外网取东西」，不是「文本里出现过 http」——
+    # 占位符里写一句 https://api.deepseek.com 不构成外部依赖
+    head = response.text.split("<script>")[0]
+    for loader in ('src="http', "src='http", 'href="http', "href='http", "url(http"):
+        assert loader not in head, loader
 
 
 async def test_panel_page_has_no_external_assets(

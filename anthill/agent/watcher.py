@@ -182,11 +182,23 @@ class MailboxWatcher:
         queue: asyncio.Queue[str] = asyncio.Queue()
         if self._mode is WatchMode.INOTIFY:
             loop = asyncio.get_running_loop()
-            self._observer = Observer()
-            self._observer.schedule(
-                _QueueHandler(loop, queue), str(self.directory), recursive=False
-            )
-            self._observer.start()
+            try:
+                self._observer = Observer()
+                self._observer.schedule(
+                    _QueueHandler(loop, queue), str(self.directory), recursive=False
+                )
+                self._observer.start()
+            except (OSError, RuntimeError) as exc:
+                # **内核说不行的时候要降级，不是崩掉。** 最常见的是
+                # `[Errno 28] inotify watch limit reached` —— 机器上别的进程
+                # 把 fs.inotify.max_user_watches 用光了，和这个工作区没关系。
+                # `watch_mode = "inotify"` 是「优先用它」，不该是「用不了就别活了」：
+                # 轮询慢一点，但节点还在收消息，而崩掉就是彻底掉线。
+                # （auto 那条路本来就会降级，只有显式配 inotify 的会走到这儿。）
+                self._observer = None
+                self._mode = WatchMode.POLL
+                self._reason = f"inotify 起不来（{exc}），降级轮询"
+                # scan_interval 在下面按 self._mode 算，这里改完模式就够了
 
         # 去重键是 (文件名, inode)：同一个 ULID 被重复投递时是新文件（新 inode），
         # 必须重新产出交给幂等层判定，不能被 watcher 悄悄吞掉。

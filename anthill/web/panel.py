@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from anthill.core.config import Config, brain_of
@@ -119,12 +120,29 @@ def _runs(layout: NodeLayout) -> list[dict[str, Any]]:
                     "assignee": step.assignee,
                     "state": str(step.state),
                     "detail": step.summary or step.error or step.task,
+                    # 这几样一直算好了却没发出去，于是任务卡片只答得了「到哪一步」，
+                    # 答不了「这一步产出了什么、为什么失败、跑了多久」
+                    "artifacts": list(step.artifacts),
+                    "attempts": step.attempts,
+                    "elapsed": _elapsed(step.dispatched_at, step.finished_at),
+                    "error": step.error,
                 }
                 for step in run.steps
             ],
         }
         for run in runs
     ]
+
+
+def _elapsed(start: str, end: str) -> str:
+    """这一步跑了多久。两个时间戳都记着，以前一处没显示过。"""
+    if not start or not end:
+        return ""
+    try:
+        seconds = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds()
+    except ValueError:
+        return ""
+    return f"{seconds:.0f}s" if seconds < 60 else f"{seconds / 60:.1f}m"
 
 
 def _events(layout: NodeLayout, config: Config, limit: int) -> list[dict[str, Any]]:
@@ -139,7 +157,22 @@ def _events(layout: NodeLayout, config: Config, limit: int) -> list[dict[str, An
     return [_slim(record) for record in merged[-limit:]]
 
 
-INTERESTING = ("msg", "to", "frm", "thread", "step", "task", "error", "tool", "node", "type")
+INTERESTING = (
+    "msg",
+    "to",
+    "frm",
+    "thread",
+    "step",
+    "task",
+    "error",
+    "tool",
+    "node",
+    "type",
+    # tokens 以前不在这里 —— 数据一路算好、写进日志，却在最后一米被过滤掉，
+    # 于是「这次跑了多少钱」在面板上完全看不到
+    "tokens",
+    "model",
+)
 
 
 def _slim(record: dict[str, Any]) -> dict[str, Any]:

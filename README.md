@@ -170,8 +170,8 @@ flowchart LR
 
 **面板即控制面（M10）**
 
-- ✅ **装好就能用**：`anthill serve` 找不到工作区会自己建一个，
-  不必先在终端跑 `anthill init`
+- ✅ **装好就能用**：`anthill serve -w .` 会就地建一个工作区，
+  不必先在终端跑 `anthill init`（不给 `-w` 则让你在页面上挑目录，M11 起）
 - ✅ **在面板上加 / 删 Agent**：选个大脑类型就行，改的是 node.toml，
   走同一套校验与备份
 - ✅ **在面板上启 / 停 agentd**：单机场景下最后一处非用终端不可的事没有了
@@ -211,6 +211,22 @@ flowchart LR
   `read_file` 分页；编排层真的读 `retryable` 了（一次网络抖动不再毁掉整次协作）；
   死信有了 `anthill dead list/retry/drop`；所有单调增长的目录装上刹车
 
+**最后一米（M16）**
+
+- ✅ **面板上真能建出一个能干活的 coordinator**：加 Agent 的表单补上了角色，
+  并且多了一页「模型」—— 配 provider、存密钥都在页面上。
+  在此之前 M10 那句「单机不必开终端」在第一步就破功：表单没有 role
+  （建不出 coordinator），选 provider 大脑又要求 `[providers.*]` 已存在，
+  而面板没有任何地方能配它
+- ✅ **`anthill run` 不再假装成功**：默认模板里的 coordinator 没有 provider，
+  按项目自己的规则那就是个复读机 —— 以前 run 把任务派给它、拿回一句复读、
+  然后打印「完成（ok）」、退出码 0。**这比卡住 600 秒糟糕得多**
+- ✅ **能接进脚本**：`--json` 输出 + 有意义的退出码（超时不再是 0）；
+  `--plain` 真的边跑边打（以前是跑完一次性吐，把这个 flag 唯一的用途全破坏了）
+- ✅ **CLI 补回面板已有的能力**：`agent stop`、`agent ps`（**全机器**在跑的 agentd）、
+  `runs`（历史任务与每步产物/耗时/重试）、`cost`（token 与花费）、
+  `doctor`（一次查完配置/密钥/邮箱/进程）、`guide`（按场景分组的命令地图）
+
 ## 快速开始
 
 一条命令，剩下的都在面板上做：
@@ -219,10 +235,14 @@ flowchart LR
 uv sync --all-groups --extra llm         # --extra llm 装 anthropic / openai SDK
 
 mkdir demo && cd demo
-uv run anthill serve --panel-write       # 没有工作区？它自己建。然后开 127.0.0.1:45778/panel
+uv run anthill serve -w . --panel-write   # `-w .` = 用这个目录，没有就建
 ```
 
-面板上就能加 Agent、把它启动起来、给它派活、跟它对话。
+然后打开 <http://127.0.0.1:45778/panel>。面板上就能配模型、加 Agent、
+把它启动起来、给它派活、跟它对话 —— **包括建一个能干活的 coordinator**。
+
+> 不给 `-w` 的话它不会擅自建，而是让你在页面上挑一个目录 ——
+> 免得 `.anthill` 落在你没想要的地方。
 
 想用命令行也一样：
 

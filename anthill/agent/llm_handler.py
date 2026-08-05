@@ -159,6 +159,11 @@ class LlmHandler:
             thread=env.thread,
             steps=outcome.steps,
             tokens=outcome.usage.total,
+            # 分开记：两家的输入/输出单价差好几倍，只有总数折算不出钱
+            in_tokens=outcome.usage.input_tokens,
+            out_tokens=outcome.usage.output_tokens,
+            provider=self._provider.name,
+            model=self._provider.model,
             finished=outcome.finished,
             artifacts=len(outcome.artifacts),
         )

@@ -1,4 +1,4 @@
-"""`anthill agent start / list`。"""
+"""`anthill agent start / stop / list / ps`。"""
 
 from __future__ import annotations
 
@@ -14,13 +14,16 @@ from rich.table import Table
 from anthill.agent.runtime import AgentRuntime
 from anthill.agent.tools.base import Confirmer
 from anthill.cli.common import console, fail, is_running, load
-from anthill.core.config import AgentSection, brain_of
+from anthill.core.config import AgentSection, Config, brain_of
 from anthill.core.errors import AntHillError
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
 from anthill.providers.registry import TapeMode
+from anthill.security import secrets
 from anthill.security.approvals import ApprovalStore, approval_confirmer
 from anthill.security.confirm import terminal_confirmer
+from anthill.web.agents import running_pid, stop_agent
+from anthill.web.workspaces import listing as known_workspaces
 
 agent_app = typer.Typer(no_args_is_help=True, help="Agent 守护进程")
 
@@ -49,6 +52,9 @@ def start(
     ),
 ) -> None:
     """启动一个 agentd：监控自己的邮箱，处理消息，写回执。Ctrl-C 优雅退出。"""
+    # 面板上设的密钥在这儿进环境。直接开 agentd（不经 serve）的人也得能用上，
+    # 否则「在面板上配好」和「在终端里起」两条路会得出不同的结论。
+    secrets.load_into_env()
     layout, config = load(workspace)
     if record and replay:
         fail("--record 与 --replay 不能同时使用")
@@ -138,3 +144,81 @@ def _runtime_state(status_file: Path) -> tuple[bool, str]:
     except (OSError, json.JSONDecodeError):
         return False, "-"
     return is_running(int(data.get("pid", -1))), str(data.get("watch_mode", "-"))
+
+
+@agent_app.command("stop")
+def stop(
+    name: str = typer.Argument(..., help="要停的 Agent 名"),
+    workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
+) -> None:
+    """停掉一个 agentd（SIGTERM，它会把手上那条消息处理完再退）。
+
+    这条命令以前只有面板上有。后果不是理论上的：`start` 是脱离终端独活的
+    （`start_new_session=True`），所以不给 `stop` 就意味着**只能 kill**，
+    而 `anthill status` 只看当前工作区 —— 别的工作区里遗留的 agentd
+    在任何界面里都是不可见的。真跑起来是会攒的。
+    """
+    layout, config = load(workspace)
+    if name not in config.agents:
+        fail(f"本节点没有 Agent {name!r}；有的是：{', '.join(sorted(config.agents))}")
+    try:
+        result = stop_agent(layout, name)
+    except AntHillError as exc:
+        fail(str(exc))
+    if result.get("already"):
+        console.print(f"[dim]{name} 本来就没在跑。[/dim]")
+    else:
+        console.print(f"[green]已停止[/green] {name}（pid {result['pid']}）")
+
+
+@agent_app.command("ps")
+def ps(
+    everywhere: bool = typer.Option(
+        True, "--all/--here", help="看这台机器上全部工作区，还是只看当前这个"
+    ),
+    workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
+) -> None:
+    """**这台机器上到底跑着哪些 agentd。**
+
+    `anthill status` 只看当前工作区，于是别的工作区里遗留的进程在任何界面里
+    都看不见 —— 实测过一次：五个上几次会话遗留的 agentd 跑了近两小时，
+    分散在几个工作区里，没有任何地方能发现它们。
+    """
+    rows: list[tuple[str, str, str, str]] = []
+    for path in _workspaces_to_scan(workspace, everywhere):
+        layout = NodeLayout(path)
+        try:
+            config = Config.load_from(layout)
+        except AntHillError:
+            continue  # 目录还在、配置坏了或没了：跳过，不是这条命令该管的
+        for agent in sorted(config.agents):
+            pid = running_pid(layout, agent)
+            if pid is not None:
+                rows.append((config.node.name, agent, str(pid), str(path)))
+
+    if not rows:
+        console.print("[dim]这台机器上没有在跑的 agentd。[/dim]")
+        return
+    table = Table(title="在跑的 agentd", header_style="bold cyan")
+    for column in ("节点", "Agent", "pid", "工作区"):
+        table.add_column(column, overflow="fold")
+    for row in rows:
+        table.add_row(*row)
+    console.print(table)
+    console.print("[dim]停一个：anthill agent stop <名字> -w <工作区>[/dim]")
+
+
+def _workspaces_to_scan(workspace: Path | None, everywhere: bool) -> list[Path]:
+    """当前这个 + 机器级清单里记着的那些。清单在 `~/.anthill/workspaces.json`。"""
+    seen: list[Path] = []
+    # 当前目录没有工作区也不该让这条命令报错 —— 它问的是「这台机器上」。
+    # 所以这里不走 load()（那条路找不到就 fail），自己安静地找一次。
+    with suppress(AntHillError):
+        layout = NodeLayout(workspace.resolve()) if workspace else NodeLayout.discover()
+        seen.append(layout.workspace)
+    if everywhere:
+        for entry in known_workspaces():
+            candidate = Path(entry["path"])
+            if candidate not in seen:
+                seen.append(candidate)
+    return seen

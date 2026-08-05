@@ -112,8 +112,8 @@ async def _send(
         else:
             console.print(f"[bold red]✗[/bold red] {result.destination}：{result.detail}")
 
-    if wait > 0:
-        await _wait_for_replies(mailbox, thread=thread, timeout=wait)
+    if wait > 0 and not await _wait_for_replies(mailbox, thread=thread, timeout=wait):
+        raise typer.Exit(code=2)  # 超时 / 对方报错：退出码要能和成功区分开
 
 
 def _parse_address(raw: str, local_node: str) -> Address:
@@ -129,8 +129,12 @@ def _build_payload(kind: MessageType, title: str, text: str) -> Payload:
     return TaskRequestPayload(title=title or text[:60], body=text)
 
 
-async def _wait_for_replies(mailbox: Mailbox, *, thread: str, timeout: float) -> None:
-    """在自己的 inbox 上等回执/结果。收到 result 或 error 即结束。"""
+async def _wait_for_replies(mailbox: Mailbox, *, thread: str, timeout: float) -> bool:
+    """在自己的 inbox 上等回执/结果。收到 result 或 error 即结束。
+
+    返回「等到了没有」—— 调用方据此决定退出码。超时和成功都返回 0 的话，
+    脚本没有任何办法区分这两件事（发给不存在的 Agent 倒是能返回 1）。
+    """
     deadline = now() + timedelta(seconds=timeout)
     console.print(f"[dim]等待回执与结果（≤{timeout:g}s）…[/dim]")
 
@@ -145,10 +149,11 @@ async def _wait_for_replies(mailbox: Mailbox, *, thread: str, timeout: float) ->
             mailbox.archive(mailbox.claim(path))
             console.print(_render(env))
             if env.type in TERMINAL_TYPES:
-                return
+                return env.type is not MessageType.TASK_ERROR
         await asyncio.sleep(WAIT_POLL_INTERVAL)
 
     console.print("[yellow]![/yellow] 等待超时；消息可能仍在处理，用 `anthill log --follow` 继续看")
+    return False
 
 
 TYPE_LABEL = {

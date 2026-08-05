@@ -73,10 +73,37 @@ def reply(thread: str, kind: MessageType, payload: object) -> Envelope:
 # ---------- 找 coordinator ----------
 
 
-def test_coordinator_is_found_by_role(workspace: Path) -> None:
-    config = Config.load_from(NodeLayout(workspace))
+def test_coordinator_is_found_by_role() -> None:
+    config = Config.model_validate(
+        {
+            "node": {"name": "n"},
+            "agents": {
+                "cli": {"role": "user"},
+                "boss": {"role": "coordinator", "command": ["claude", "-p"]},
+            },
+        }
+    )
 
-    assert _find_coordinator(config) == "coordinator"
+    assert _find_coordinator(config) == "boss"
+
+
+def test_a_brainless_coordinator_is_refused_instead_of_pretending_to_succeed() -> None:
+    """本项目最恶劣的一次首跑体验。
+
+    `init` 生成的默认模板里 `[agents.coordinator]` 只写了 role，没有 provider ——
+    按项目自己的规则，没有 provider 就是 echo agent。而 `_find_coordinator`
+    以前只按 role 找名字，不看它有没有大脑。于是 `anthill run` 把任务派给一个
+    只会回显的 Agent，拿回一句复读，然后打印「完成（ok）」、**退出码 0**。
+
+    这比卡住 600 秒糟糕得多：卡住至少能让人意识到不对劲，
+    而新用户看到的是一次「成功」的运行 —— 拆解、派活、汇总一样没发生。
+    """
+    config = Config.model_validate(
+        {"node": {"name": "n"}, "agents": {"coordinator": {"role": "coordinator"}}}
+    )
+
+    with pytest.raises(ConfigError, match="没有大脑"):
+        _find_coordinator(config)
 
 
 def test_missing_coordinator_gives_an_actionable_error() -> None:

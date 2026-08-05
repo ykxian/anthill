@@ -26,6 +26,7 @@ from anthill.core.ids import is_valid_id
 from anthill.core.logging import EventLog
 from anthill.core.paths import NodeLayout
 from anthill.core.workspace import ensure_mailboxes
+from anthill.security import secrets
 from anthill.security.pair_client import join as pair_join
 from anthill.security.pair_client import resolve as pair_resolve
 from anthill.security.pairing import WINDOW_SECONDS, PairingStore, new_pin
@@ -52,6 +53,8 @@ from anthill.web.cluster import build_cluster
 from anthill.web.context import NodeRegistry
 from anthill.web.endpoints import PANEL_PATH
 from anthill.web.panel import build_snapshot
+from anthill.web.providers import PRESETS, ProviderSpec, SecretSpec, add_provider, remove_provider
+from anthill.web.providers import listing as provider_listing
 from anthill.web.remote import control_agent as remote_control_agent
 from anthill.web.remote import read_config as remote_read_config
 from anthill.web.remote import write_config as remote_write_config
@@ -379,6 +382,58 @@ def mount_panel_actions(
             return bridge_speak(ctx.layout, ctx.config, agent, body)
         except AntHillError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(f"{PANEL_PATH}/api/providers")
+    async def panel_providers(request: Request, node: str = "") -> dict[str, Any]:
+        """有哪些 provider，以及它们的 key 到底设没设。
+
+        「设没设」是这一页最要紧的一格 —— 配好了 provider 却没设 key 的话，
+        agentd 一启动就 fail fast，而人在面板上完全看不出为什么。
+        """
+        authorize(request, token, what="模型配置")
+        return {
+            "providers": provider_listing(_pick(nodes, node).config),
+            "presets": PRESETS,
+        }
+
+    @app.post(f"{PANEL_PATH}/api/providers", status_code=201)
+    async def panel_provider_add(
+        request: Request, body: ProviderSpec = Body(...), node: str = ""
+    ) -> dict[str, Any]:
+        """加一个 provider。**这是「面板上建不出能干活的 Agent」那堵墙的另一半**：
+        选 provider 大脑要求 [providers.*] 已存在，而以前面板没有任何地方能配它。"""
+        _guard(request)
+        ctx = _pick(nodes, node)
+        return _agent_edit(ctx.layout, log, lambda fresh: add_provider(ctx.layout, fresh, body))
+
+    @app.delete(f"{PANEL_PATH}/api/providers/{{name}}")
+    async def panel_provider_remove(request: Request, name: str, node: str = "") -> dict[str, Any]:
+        _guard(request)
+        ctx = _pick(nodes, node)
+        return _agent_edit(ctx.layout, log, lambda fresh: remove_provider(ctx.layout, fresh, name))
+
+    @app.post(f"{PANEL_PATH}/api/secrets", status_code=201)
+    async def panel_secret_set(request: Request, body: SecretSpec = Body(...)) -> dict[str, Any]:
+        """存一个密钥到 `~/.anthill/secrets.env`（0600）。
+
+        **值只进不出** —— 没有任何读接口会回传它。node.toml 里仍然只有变量名，
+        那条规矩没动；密钥和 peers.json 同一个待遇：家目录、0600、不进工作区。
+        """
+        _guard(request)
+        try:
+            secrets.set_secret(body.name, body.value)
+        except AntHillError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        log.warn("panel.secret_set", name=body.name)  # 记名字，不记值
+        return {"ok": True, "name": body.name}
+
+    @app.delete(f"{PANEL_PATH}/api/secrets/{{name}}")
+    async def panel_secret_unset(request: Request, name: str) -> dict[str, Any]:
+        _guard(request)
+        removed = secrets.unset_secret(name)
+        if removed:
+            log.warn("panel.secret_unset", name=name)
+        return {"ok": True, "removed": removed}
 
     @app.post(f"{PANEL_PATH}/api/agents", status_code=201)
     async def panel_agent_add(

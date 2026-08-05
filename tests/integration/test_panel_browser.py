@@ -330,3 +330,46 @@ def test_a_node_without_a_bridge_agent_hides_the_tab(browser: object, panel: str
     assert page.is_hidden('.tab[data-pane="bridge"]')
     assert errors == []
     page.close()
+
+
+def test_a_working_coordinator_can_be_built_without_touching_a_terminal(
+    browser: object, panel: str, tmp_path: Path
+) -> None:
+    """M10 那句「装好就能用，单机不必开终端」的真验收。
+
+    以前这条路在浏览器里是断的：「加一个 Agent」表单没有 role（建不出 coordinator），
+    而选 provider 大脑又要求 [providers.*] 已配好，面板却没有任何地方能配它。
+    """
+    page, errors = open_panel(browser, panel)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+
+    # 1) 配一个 provider（选预设，省得手填 base_url）
+    page.click('.tab[data-pane="models"]')
+    page.wait_for_selector("#provider-form", timeout=15000)
+    page.select_option("#provider-preset", "deepseek")
+    page.click('#provider-form button[type="submit"]')
+    page.wait_for_selector("#models-body .waiting", timeout=15000)
+    assert "缺密钥" in page.text_content("#models-body")
+
+    # 2) 存密钥
+    page.fill("#secret-name", "DEEPSEEK_API_KEY")
+    page.fill("#secret-value", "sk-from-the-browser")
+    page.click('#secret-form button[type="submit"]')
+    page.wait_for_function(
+        "() => document.getElementById('models-body').textContent.includes('密钥已就绪')",
+        timeout=15000,
+    )
+
+    # 3) 建一个真正的 coordinator
+    page.fill("#agent-name", "boss")
+    page.select_option("#agent-role", "coordinator")
+    page.select_option("#agent-brain", "provider")
+    page.fill("#agent-extra", "deepseek")
+    page.click('#add-agent button[type="submit"]')
+    page.wait_for_selector('#topo-body .card:has-text("boss")', timeout=15000)
+
+    text = (tmp_path / "ws" / ".anthill" / "node.toml").read_text(encoding="utf-8")
+    assert 'role = "coordinator"' in text
+    assert "sk-from-the-browser" not in text, "密钥绝不能写进 node.toml"
+    assert errors == []
+    page.close()

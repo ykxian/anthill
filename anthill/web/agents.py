@@ -79,7 +79,7 @@ def remove_agent(layout: NodeLayout, config: Config, name: str) -> dict[str, Any
         raise AntHillError(f"{name} 还在跑，先停掉再删")
 
     text = layout.node_toml.read_text(encoding="utf-8")
-    return {"ok": True, "name": name, "text": _drop_section(text, f"agents.{name}")}
+    return {"ok": True, "name": name, "text": drop_section(text, f"agents.{name}")}
 
 
 def _section(spec: AgentSpec) -> str:
@@ -101,7 +101,7 @@ def _esc(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
 
 
-def _drop_section(text: str, header: str) -> str:
+def drop_section(text: str, header: str) -> str:
     """删掉 `[header]` 那一节，直到下一个节标题为止。
 
     按行处理是为了**保住周围的注释** —— 那些注释是这个模板最有用的部分。

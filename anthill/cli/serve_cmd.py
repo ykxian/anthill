@@ -28,6 +28,7 @@ from anthill.core.paths import NodeLayout
 from anthill.core.workspace import load_or_create as load_workspace
 from anthill.core.workspace import local_ip
 from anthill.discovery.beacon import Announcement, Beacon
+from anthill.security import secrets
 from anthill.security.panel_token import load_or_create, token_path
 from anthill.transport.pull import pull_once, ssh_peers
 from anthill.web.app import create_app
@@ -100,9 +101,14 @@ def serve_command(
 ) -> None:
     """启动本节点的接收端。Ctrl-C 优雅退出。
 
-    **找不到工作区不会报错**：它会在当前目录（或 `-w` 指的目录）建一个然后继续 ——
-    新机器上装好就能直接开面板，不必先在终端跑一次 `anthill init`。
-    建在哪、叫什么名字都会打印出来。
+    **找不到工作区也不会报错**，但也不会擅自建：
+
+    - 给了 `-w`，就是「用这个目录，没有就建」；
+    - 没给 `-w`，它只在当前目录往上找。找不到就进「未配置」状态照常起面板，
+      让你在页面上挑一个目录 —— 免得 `.anthill` 落在你没想要的地方（M11 改的）。
+
+    这段话以前写的是「找不到就在当前目录建一个」，和同一个文件里
+    `_load_or_setup` 的实现正好相反 —— 而这句才是用户在 `--help` 里看到的那句。
     """
     layout, config, created = _load_or_setup(workspace)
     nodes = _registry(layout, config, quiet=quiet)
@@ -301,6 +307,11 @@ async def _serve(
         with suppress(NotImplementedError, RuntimeError):
             loop.add_signal_handler(sig, stop.set)
 
+    # 面板上设的密钥在这儿进环境 —— 之后它 spawn 的 agentd 会继承，
+    # 于是「在面板上配好一个能干活的 Agent」不再需要先去终端 export
+    injected = secrets.load_into_env()
+    if injected:
+        log.info("secrets.loaded", count=injected)
     log.info(
         "serve.start",
         node=nodes.primary_name,

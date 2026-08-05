@@ -372,6 +372,7 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
       <button class="tab" type="button" data-pane="events">消息流</button>
       <button class="tab" type="button" data-pane="bridge" hidden>桥接</button>
       <button class="tab" type="button" data-pane="setup" hidden>工作区</button>
+      <button class="tab" type="button" data-pane="models" hidden>模型</button>
       <button class="tab" type="button" data-pane="config" hidden>配置</button>
     </nav>
 
@@ -445,6 +446,59 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
           </form>
         </div>
         <div class="hint" id="setup-hint" hidden></div>
+      </div>
+    </section>
+
+    <section class="pane hold" id="pane-models" hidden>
+      <div class="card-block">
+        <h3>模型（provider）</h3>
+        <p class="why">
+          没有这一页的话，面板上建不出一个能干活的 Agent：选 <code>provider</code> 大脑
+          要求 <code>[providers.*]</code> 已经配好，而以前只能去配置页手写 TOML。
+        </p>
+        <div id="models-body"></div>
+      </div>
+
+      <div class="card-block" style="margin-top:18px">
+        <h3>加一个 provider</h3>
+        <form id="provider-form">
+          <div class="line">
+            <select id="provider-preset" aria-label="厂商预设"><option value="">自己填</option></select>
+            <input id="provider-name" placeholder="名字，如 deepseek" autocomplete="off" />
+          </div>
+          <div class="line">
+            <select id="provider-kind" aria-label="接口协议">
+              <option value="openai_compat">openai_compat</option>
+              <option value="anthropic">anthropic</option>
+            </select>
+            <input id="provider-model" placeholder="模型名，如 deepseek-chat" autocomplete="off" />
+          </div>
+          <div class="line">
+            <input id="provider-base" placeholder="base_url，如 https://api.deepseek.com" autocomplete="off" />
+            <input id="provider-env" placeholder="密钥的环境变量名，如 DEEPSEEK_API_KEY" autocomplete="off" />
+          </div>
+          <div class="actions" style="margin-top:8px"><button type="submit">加上</button></div>
+        </form>
+        <div class="hint" id="provider-hint"></div>
+      </div>
+
+      <div class="card-block" style="margin-top:18px">
+        <h3>存一个密钥</h3>
+        <p class="why">
+          <code>node.toml</code> 里**永远只有变量名**，这条规矩没动 —— 它会进 git、会被
+          <code>fetch</code> 拉走、会显示在配置页上。密钥单独存
+          <code>~/.anthill/secrets.env</code>（权限 0600，和 peers.json 同一个待遇），
+          <b>只进不出</b>：没有任何接口会把它读回来。
+          不想落盘就照旧在终端 <code>export</code>，上面会显示「来自环境变量」。
+        </p>
+        <form id="secret-form">
+          <div class="line">
+            <input id="secret-name" placeholder="变量名，如 DEEPSEEK_API_KEY" autocomplete="off" />
+            <input id="secret-value" type="password" placeholder="密钥" autocomplete="off" />
+            <button type="submit">存下</button>
+          </div>
+        </form>
+        <div class="hint" id="secret-hint"></div>
       </div>
     </section>
 
@@ -545,6 +599,14 @@ function addAgentForm() {
       <div class="cap">加一个 Agent</div>
       <div class="line">
         <input id="agent-name" placeholder="新 Agent 的名字" autocomplete="off" />
+        <select id="agent-role" aria-label="角色">
+          <option value="worker">worker（干活的）</option>
+          <option value="coordinator">coordinator（拆解派活）</option>
+          <option value="reviewer">reviewer（审查）</option>
+          <option value="user">user（人）</option>
+        </select>
+      </div>
+      <div class="line">
         <select id="agent-brain">
           <option value="echo">echo（只回显）</option>
           <option value="bridge">bridge（你的会话）</option>
@@ -582,6 +644,10 @@ function renderTopo(nodes) {
     </div>`).join("") || `<div class="empty">还没有配置 Agent</div>`);
 }
 
+// 已完成任务留几条。以前是 3 —— 第 4 条起在界面上永久消失，
+// 而 CLI 侧连列出历史任务的命令都没有（现在有 `anthill runs`）。
+const DONE_RUNS_SHOWN = 20;
+
 function renderRuns(nodes) {
   const runs = nodes.flatMap(n => (n.runs || []).map(r => ({ ...r, where: n.node })));
   const live = runs.filter(r => !r.finished);
@@ -590,7 +656,7 @@ function renderRuns(nodes) {
     paint($("runs-body"), `<div class="empty">还没有编排任务 —— 上面发起一件，或者 <code>anthill run "…"</code></div>`);
     return;
   }
-  paint($("runs-body"), [...live, ...runs.filter(r => r.finished).slice(-3)].map(r => `
+  paint($("runs-body"), [...live, ...runs.filter(r => r.finished).slice(-DONE_RUNS_SHOWN)].map(r => `
     <div class="run">
       <div class="row">
         <span class="where">${esc(r.where)}</span>
@@ -604,10 +670,22 @@ function renderRuns(nodes) {
             <span class="sid">${esc(s.id)}</span>
             <span class="who truncate">${esc(s.assignee)}</span>
             <span class="what grow truncate">${esc(s.detail)}</span>
-          </div>`).join("")}
+            ${s.attempts > 1 ? `<span class="pill warn">试了 ${esc(s.attempts)} 次</span>` : ""}
+            ${s.elapsed ? `<span class="meta">${esc(s.elapsed)}</span>` : ""}
+          </div>
+          ${(s.artifacts || []).length
+            ? `<div class="step-artifacts">产物：${(s.artifacts || []).map(a => `<code>${esc(a)}</code>`).join(" ")}</div>`
+            : ""}`).join("")}
       </div>
+      ${r.finished && r.result ? `<div class="run-result">${esc(r.result)}</div>` : ""}
     </div>`).join(""));
 }
+
+// CLI 显示 `#2BKPZ5 thread=W7BT1K`，面板却显示完整 ULID —— 一行的大半被
+// 无意义的字符占满，右侧真正的错误信息反而被截掉。ULID 前 20 位是时间戳+随机量，
+// 人只用得上末尾那几位（够区分，且和 CLI 对得上）。
+const ULID_IN_TEXT = /\b[0-7][0-9A-HJKMNP-TV-Z]{25}\b/g;
+const shortIds = (text) => String(text || "").replace(ULID_IN_TEXT, (m) => m.slice(-6));
 
 function renderEvents(nodes) {
   const events = nodes
@@ -625,7 +703,7 @@ function renderEvents(nodes) {
         <span class="where truncate">${esc(e.where)}</span>
         <span class="who truncate">${esc(e.agent)}</span>
         <span class="what">${esc(e.event)}</span>
-        <span class="detail truncate">${esc(e.detail)}</span>
+        <span class="detail truncate">${esc(shortIds(e.detail))}</span>
       </div>`).join("")
     : `<div class="empty">还没有事件</div>`);
   if (changed && pinned) body.scrollTop = body.scrollHeight;  // 贴底时才跟随，别打断正在往回翻的人
@@ -907,7 +985,110 @@ $("bridge-say").addEventListener("submit", async (event) => {
 });
 
 // ---- 标签页 ----
-const PANES = ["runs", "chat", "events", "bridge", "setup", "config"];
+
+// ---- 模型：面板上配 provider 与密钥 ----
+// 这一页补的是「面板建不出一个能干活的 Agent」那堵墙的另一半 ——
+// 选 provider 大脑要求 [providers.*] 已存在，而以前面板没有任何地方能配它。
+
+async function loadModels() {
+  try {
+    const data = await api(u(scoped("api/providers")));
+    renderModels(data.providers || []);
+    fillPresets(data.presets || {});
+    say("provider-hint", "");
+  } catch (err) {
+    say("provider-hint", String(err.message || err), "bad");
+  }
+}
+
+function renderModels(list) {
+  paint($("models-body"), list.length
+    ? list.map((p) => `
+      <div class="waiting">
+        <div class="row">
+          <b>${esc(p.name)}</b>
+          <span class="pill">${esc(p.kind)}</span>
+          <span class="meta">${esc(p.model)}</span>
+          <span class="grow"></span>
+          <span class="pill ${p.key_set ? "ok" : "bad"}">${p.key_set ? `密钥已就绪（${esc(p.key_from)}）` : "缺密钥"}</span>
+          <button class="ghost" data-drop-provider="${esc(p.name)}" type="button">删掉</button>
+        </div>
+        <div class="meta">密钥读自环境变量 <code>${esc(p.api_key_env)}</code>${
+          p.key_set ? "" : " —— 在下面存一个，或者在终端 export"
+        }</div>
+      </div>`).join("")
+    : `<div class="empty">还没有 provider —— 下面加一个，Agent 才能真的动起来</div>`);
+}
+
+function fillPresets(presets) {
+  const picker = $("provider-preset");
+  if (picker.dataset.filled) return;
+  picker.dataset.filled = "1";
+  picker.innerHTML = `<option value="">自己填</option>` +
+    Object.keys(presets).map((k) => `<option value="${esc(k)}">${esc(k)}</option>`).join("");
+  picker.addEventListener("change", () => {
+    const preset = presets[picker.value];
+    if (!preset) return;
+    // 省得人去翻各家文档找 base_url
+    $("provider-name").value = picker.value;
+    $("provider-kind").value = preset.kind;
+    $("provider-base").value = preset.base_url || "";
+    $("provider-env").value = preset.api_key_env;
+    $("provider-model").value = preset.model;
+  });
+}
+
+$("provider-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const body = {
+    name: $("provider-name").value.trim(),
+    kind: $("provider-kind").value,
+    model: $("provider-model").value.trim(),
+    api_key_env: $("provider-env").value.trim(),
+    base_url: $("provider-base").value.trim(),
+  };
+  if (!body.name || !body.model || !body.api_key_env) {
+    say("provider-hint", "名字、模型、环境变量名都得填", "bad");
+    return;
+  }
+  try {
+    await api(u(scoped("api/providers")), { method: "POST", body: JSON.stringify(body) });
+    $("provider-form").reset();
+    say("provider-hint", `已加上 ${body.name}`, "ok");
+    loadModels();
+  } catch (err) {
+    say("provider-hint", String(err.message || err), "bad");
+  }
+});
+
+$("models-body").addEventListener("click", async (event) => {
+  const name = event.target.dataset?.dropProvider;
+  if (!name) return;
+  if (!window.confirm(`删掉 provider ${name}？`)) return;
+  try {
+    await api(u(scoped(`api/providers/${encodeURIComponent(name)}`)), { method: "DELETE" });
+    loadModels();
+  } catch (err) {
+    say("provider-hint", String(err.message || err), "bad");
+  }
+});
+
+$("secret-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = $("secret-name").value.trim();
+  const value = $("secret-value").value;
+  if (!name || !value) { say("secret-hint", "变量名和密钥都要填", "bad"); return; }
+  try {
+    await api(u("api/secrets"), { method: "POST", body: JSON.stringify({ name, value }) });
+    $("secret-value").value = "";
+    say("secret-hint", `${name} 已存进 ~/.anthill/secrets.env（0600）`, "ok");
+    loadModels();
+  } catch (err) {
+    say("secret-hint", String(err.message || err), "bad");
+  }
+});
+
+const PANES = ["runs", "chat", "events", "bridge", "models", "setup", "config"];
 
 function showPane(name) {
   for (const pane of PANES) {
@@ -919,6 +1100,7 @@ function showPane(name) {
   }
   if (name === "chat") { syncAgentPicker(); loadChat(); }
   if (name === "bridge") loadBridge();
+  if (name === "models") loadModels();
   if (name === "setup") refreshSetup();
   if (name === "config") loadConfig();
 }
@@ -1097,7 +1279,7 @@ async function enableActions() {
   canWrite = true;
   $("run-form").hidden = false;
   $("chat-form").hidden = false;
-  for (const name of ["setup", "config"]) {
+  for (const name of ["models", "setup", "config"]) {
     const tab = document.querySelector(`.tab[data-pane="${name}"]`);
     if (tab) tab.hidden = false;
   }
@@ -1207,7 +1389,9 @@ document.addEventListener("submit", async (event) => {
   const brain = $("agent-brain").value;
   const extra = $("agent-extra").value.trim();
   if (!name) return;
-  const body = { name, brain };
+  // role 以前根本没在表单里 —— 后端默认 worker，于是面板永远建不出 coordinator，
+  // 而发起编排任务恰恰要求有一个 role="coordinator" 的 Agent。
+  const body = { name, brain, role: $("agent-role").value };
   if (brain === "command") body.command = extra;
   if (brain === "provider") body.provider = extra;
   try {
