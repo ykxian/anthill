@@ -29,7 +29,7 @@ from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
 from anthill.core.payloads import MessageType, TaskErrorPayload
 from anthill.core.router import Router
-from anthill.core.seen import SeenStore
+from anthill.core.seen import Claim, SeenStore
 from anthill.core.spool import Spool
 from anthill.core.states import DeliveryTracker
 from anthill.discovery.registry import PeerRegistry
@@ -265,6 +265,9 @@ class AgentRuntime:
             await self._report_failure(env, exc)
         finally:
             self.mailbox.archive(claimed)
+            # **归档之后**才落 completed。反过来会开一扇窗：落了 completed 却还没归档时
+            # 崩溃，recover_stale 把信退回 new/，而 seen.db 说「干完了」—— 这条就丢了处理。
+            self._seen.complete(env.id)
 
     def _check_signature(self, env: Envelope) -> None:
         """跨节点来件必须验签 —— 只要我们持有对方的密钥。
@@ -297,11 +300,16 @@ class AgentRuntime:
             self.log.warn("msg.expired", msg=env.id, expires_at=str(env.expires_at))
             return
 
-        if not self._seen.mark(env.id, env.expires_at):
+        claim = self._seen.claim(env.id, env.expires_at)
+        if claim is Claim.DUPLICATE:
             # 重复消息：业务不再处理，但仍补发回执，让发送方状态机收敛
             self.log.info("msg.duplicate", msg=env.id, thread=env.thread)
             await self.sender.send_receipt(env, MessageType.RECEIPT_ACCEPTED, reason="重复消息")
             return
+        if claim is Claim.RETRY:
+            # 上一个进程实例领了没干完（多半 kill -9）。recover_stale 把信退回了 new/，
+            # 这里必须真的重跑 —— 「至少一次」就落在这一行上。
+            self.log.warn("msg.retry_after_crash", msg=env.id, thread=env.thread)
 
         record = self._tracker.on_incoming(env)
         if record is not None:

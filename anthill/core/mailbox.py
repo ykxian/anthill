@@ -114,7 +114,12 @@ class Mailbox:
     def recover_stale(self) -> list[Path]:
         """启动时把上次崩溃遗留在 cur 里的消息退回 new 重新处理。
 
-        代价是可能重复处理一次，而 seen.db 幂等正好兜住 —— 这就是「至少一次 + 幂等」。
+        代价是可能重复处理一次 —— 这正是想要的：**「至少一次」就靠这一步**。
+
+        （这里曾经写着「seen.db 幂等正好兜住」，而那时的 seen.db 是一进 `_dispatch`
+        就 `mark()`，于是重放回来的消息一律被判成重复、handler 永远不会重跑 ——
+        退信这一步成了安慰剂，真实语义是「最多一次」。现在 seen.db 分
+        claimed/completed 两阶段，只有真正处理完的才会挡住重放。见 core/seen.py。）
         """
         if not self.cur.is_dir():
             return []

@@ -56,11 +56,13 @@ def test_observing_again_refreshes_last_seen_without_losing_trust(tmp_path: Path
     # Act
     registry.observe(node="lab", endpoint="http://10.0.8.21:9999", agents=("runner",))
 
-    # Assert：广播能更新端点，但不能把一个已信任的对端悄悄降级
+    # Assert：广播能刷新「见过」和 Agent 清单，但**不能改投递地址**，也不能降级信任。
+    # 这里以前断言的是 endpoint 被改成广播里那个 —— 那正是被劫持的样子。
     peer = registry.get("lab")
     assert peer is not None and before is not None
     assert peer.trusted
-    assert peer.endpoint == "http://10.0.8.21:9999"
+    assert peer.endpoint == ENDPOINT
+    assert peer.agents == ("runner",)
     assert peer.last_seen >= before.last_seen
 
 
@@ -175,13 +177,14 @@ def test_changes_made_by_another_process_are_picked_up(tmp_path: Path) -> None:
     serve_view = PeerRegistry(tmp_path)
     assert agentd_view.get("lab") is None
 
-    # Act：serve 那个进程学到了地址
-    serve_view.trust(token())
+    # Act：serve 那个进程完成了配对（配对是认证过的，地址以它为准）
+    serve_view.trust(PairingToken(node="lab", endpoint="http://learned:45778", key=KEY))
     serve_view.observe(node="lab", endpoint="http://learned:45778", agents=("runner",))
 
     # Assert：agentd 那个进程立刻能用上
     peer, key = agentd_view.require_trusted("lab")
     assert peer.endpoint == "http://learned:45778"
+    assert peer.agents == ("runner",)
     assert key == KEY
 
 
@@ -191,3 +194,65 @@ def test_a_registry_does_not_reload_after_its_own_writes(tmp_path: Path) -> None
 
     assert registry.get("lab") is not None
     assert registry.key_for("lab") == KEY
+
+
+# ---------- 广播不能改路由 ----------
+
+
+def test_a_forged_beacon_cannot_move_a_trusted_peer(tmp_path: Path):
+    """伪造一个 UDP 包就能劫持已信任节点的全部出站消息 —— 真出过的洞。
+
+    `observe()` 以前是 `endpoint or existing.endpoint`：来包带地址就无条件覆盖，
+    不看对方是不是已信任。而 beacon 收包**没有任何认证**（就是个组播 UDP 包），
+    这个 endpoint 又正是投递用的 URL。局域网是明文 HTTP，
+    后果是任务内容直接泄露 + 静默 DoS。discovery 现在还是默认开着的。
+    """
+    registry = PeerRegistry(tmp_path)
+    registry.trust(PairingToken(node="lab", key=b"k" * 32, endpoint="http://10.0.0.5:45778"))
+
+    registry.observe(node="lab", endpoint="http://192.168.9.9:45778", agents=("coder",))
+
+    peer, _ = registry.require_trusted("lab")
+    assert peer.endpoint == "http://10.0.0.5:45778", "投递地址被一个没认证的广播包改掉了"
+
+
+def test_the_conflicting_address_is_recorded_so_a_human_can_see_it(tmp_path: Path):
+    """不能只是默默忽略 —— 对方可能真换了 IP，那个判断得由人来做。"""
+    registry = PeerRegistry(tmp_path)
+    registry.trust(PairingToken(node="lab", key=b"k" * 32, endpoint="http://10.0.0.5:45778"))
+
+    registry.observe(node="lab", endpoint="http://192.168.9.9:45778", agents=())
+
+    peer = registry.get("lab")
+    assert peer is not None
+    assert peer.seen_endpoint == "http://192.168.9.9:45778"
+    assert peer.endpoint_conflict is True
+
+
+def test_discovery_still_fills_in_the_address_before_pairing(tmp_path: Path):
+    """还没信任的对端，广播是唯一的信息来源 —— 这条路不能一起堵死，
+    否则配对前根本不知道该往哪儿连。（反正没信任就投不出去，见 require_trusted。）"""
+    registry = PeerRegistry(tmp_path)
+
+    registry.observe(node="newbie", endpoint="http://10.0.0.9:45778", agents=())
+
+    peer = registry.get("newbie")
+    assert peer is not None
+    assert peer.endpoint == "http://10.0.0.9:45778"
+    assert peer.endpoint_conflict is False  # 没信任就谈不上冲突
+
+
+def test_pairing_again_clears_the_warning(tmp_path: Path):
+    """对方真换了 IP 时的正路：重新配对（认证过的），告警随之消失。"""
+    registry = PeerRegistry(tmp_path)
+    registry.trust(PairingToken(node="lab", key=b"k" * 32, endpoint="http://10.0.0.5:45778"))
+    registry.observe(node="lab", endpoint="http://10.0.0.7:45778", agents=())
+
+    registry.trust(
+        PairingToken(node="lab", key=b"k" * 32, endpoint="http://10.0.0.7:45778"), replace=True
+    )
+
+    peer = registry.get("lab")
+    assert peer is not None
+    assert peer.endpoint == "http://10.0.0.7:45778"
+    assert peer.endpoint_conflict is False

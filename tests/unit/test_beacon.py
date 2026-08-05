@@ -99,21 +99,30 @@ def test_incompatible_protocol_version_is_ignored(tmp_path: Path) -> None:
     assert peers.get("lab") is None
 
 
-def test_a_trusted_peer_is_not_downgraded_by_an_announcement(tmp_path: Path) -> None:
+def test_a_trusted_peer_is_not_downgraded_or_moved_by_an_announcement(tmp_path: Path) -> None:
+    """收包这条路**没有任何认证** —— 谁都能往组播地址上丢一个包。
+
+    所以它既不能改信任状态，也不能改投递地址。以前只挡住了前者：
+    `trusted` 字段确实保住了，可 endpoint 被无条件覆盖，而那正是投递用的 URL ——
+    伪造一个包就能把一个已信任节点的全部出站消息引到自己这儿。
+    局域网是明文 HTTP，等于任务内容直接泄露 + 静默 DoS。
+    """
     # Arrange
     from anthill.security.keys import PairingToken, new_key
 
     beacon, peers = make_beacon(tmp_path)
     peers.trust(PairingToken(node="lab", endpoint="http://old", key=new_key()))
 
-    # Act
+    # Act：伪造一条 announce，自称 lab 在别的地址上
     beacon.on_datagram(PEER.to_bytes(), ("10.0.8.21", 45999))
 
-    # Assert：广播可以更新端点，但不能改变信任状态
+    # Assert
     peer = peers.get("lab")
     assert peer is not None
     assert peer.trusted
-    assert peer.endpoint == PEER.endpoint
+    assert peer.endpoint == "http://old", "一个没认证的广播包改掉了投递地址"
+    assert peer.seen_endpoint == PEER.endpoint  # 但要记下来，摆给人看
+    assert peer.endpoint_conflict is True
 
 
 # ---------- 默认静默（核心需求）----------

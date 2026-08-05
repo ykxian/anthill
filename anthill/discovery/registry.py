@@ -33,15 +33,28 @@ class PeerRecord(BaseModel):
 
     node: str
     endpoint: str = ""
+    """**投递真正用的地址。** 只能由配对（认证过）写入 —— 广播改不了它，见 `observe`。"""
+
     agents: tuple[str, ...] = ()
     trusted: bool = False
     fingerprint: str = ""
     first_seen: str = Field(default="")
     last_seen: str = Field(default="")
 
+    seen_endpoint: str = ""
+    """最近一次广播里自称的地址。**只用来显示**，从不用于投递。
+
+    和 `endpoint` 不一致时说明「有人在广播里自称是这个节点，但地址对不上」——
+    可能对方真换了 IP（那就重新配对），也可能有人在冒充。这个判断得由人来做。
+    """
+
     @property
     def status(self) -> str:
         return "trusted" if self.trusted else "discovered"
+
+    @property
+    def endpoint_conflict(self) -> bool:
+        return bool(self.trusted and self.seen_endpoint and self.seen_endpoint != self.endpoint)
 
 
 class PeerRegistry:
@@ -92,17 +105,33 @@ class PeerRegistry:
     # ---------- 变更 ----------
 
     def observe(self, *, node: str, endpoint: str, agents: tuple[str, ...]) -> PeerRecord:
-        """收到一条 announce。只更新「见过」的事实，**绝不影响信任状态**。"""
+        """收到一条 announce。只更新「见过」的事实，**绝不影响信任状态，也绝不改路由**。
+
+        以前这里是 `endpoint or existing.endpoint` —— 来包里只要带地址就无条件覆盖，
+        不看对方是不是已信任。而 beacon 收包**没有任何认证**（就是个 UDP 组播包），
+        这个 endpoint 又正是投递时用的 URL：伪造一个包，就能把一个已信任节点的
+        全部出站消息引到自己这儿。局域网是明文 HTTP，任务内容直接泄露 + 静默 DoS。
+
+        「绝不影响信任状态」当时技术上没说错（`trusted` 字段确实保留了），
+        但路由被换掉了，实际后果一样。所以：**已信任的对端，广播只能更新
+        「什么时候见过」和「自称的地址」，投递地址原样不动。** 不一致就摆到
+        `anthill status` 上让人看见（`endpoint_conflict`），由人决定要不要重新配对。
+        """
         stamp = now().isoformat()
         existing = self._peers.get(node)
+        locked = bool(existing and existing.trusted)
         record = PeerRecord(
             node=node,
-            endpoint=endpoint or (existing.endpoint if existing else ""),
+            # 已信任 = 地址只认配对时那份；还没信任 = 广播是唯一的信息来源，可以更新
+            endpoint=(existing.endpoint if locked and existing else "")
+            or endpoint
+            or (existing.endpoint if existing else ""),
             agents=agents or (existing.agents if existing else ()),
             trusted=existing.trusted if existing else False,
             fingerprint=existing.fingerprint if existing else "",
             first_seen=existing.first_seen if existing else stamp,
             last_seen=stamp,
+            seen_endpoint=endpoint,
         )
         self._peers = {**self._peers, node: record}
         self._save()
@@ -129,6 +158,8 @@ class PeerRegistry:
             fingerprint=print_,
             first_seen=existing.first_seen if existing else stamp,
             last_seen=stamp,
+            # 配对是认证过的，以它为准；顺手把「广播里自称的地址」对齐，清掉旧告警
+            seen_endpoint="",
         )
         self._peers = {**self._peers, token.node: record}
         self._keys = {**self._keys, token.node: token.key}

@@ -11,6 +11,7 @@ import shutil
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -25,6 +26,7 @@ from anthill.core.mailbox import Mailbox
 from anthill.core.outbox import Outbox
 from anthill.core.paths import NodeLayout
 from anthill.core.payloads import ChatPayload, MessageType, TaskRequestPayload
+from anthill.core.seen import Claim
 from anthill.core.states import DeliveryState
 
 TIMEOUT = 5.0
@@ -284,3 +286,60 @@ async def test_unroutable_reply_is_spooled_when_the_node_enables_it(layout, conf
     assert [p.name for p in spool.pending("laptop")] == [f"{env.id}.json"]
     assert Outbox(Mailbox(layout.mailbox_dir("alpha"))).dead_letters() == []  # 不是死信
     assert spool.take("laptop", f"{env.id}.json").id == env.id  # 信封原样保留
+
+
+async def test_a_message_interrupted_by_a_crash_really_gets_processed_again(
+    layout, config, make_task
+):
+    """「至少一次」的端到端验收 —— 这是文件邮箱最核心的那个卖点。
+
+    以前这条链是断的：`recover_stale()` 把信从 cur/ 退回 new/ 了，可 seen.db
+    一进 `_dispatch` 就 `mark()`，重放回来一律判成重复、只补一条回执就 return，
+    **handler 永远不会重跑**。退信那一步是安慰剂，真实语义是「最多一次」。
+
+    这里造的就是那个现场：信卡在 cur/、seen.db 里已登记但没完成，然后重启。
+    """
+    beta_box = Mailbox(layout.mailbox_dir("beta")).ensure()
+    env = make_task(sender="cli", recipient="beta")
+
+    # kill -9 的现场：信被领走（在 cur/），登记过，但 handler 没跑完
+    beta_box.deposit(env)
+    claimed = beta_box.claim(beta_box.list_new()[0])
+    with patch("anthill.core.seen.RUNTIME_TOKEN", "crashed:aaa"), beta_box.open_seen() as dying:
+        assert dying.claim(env.id) is Claim.FIRST
+    assert claimed.parent == beta_box.cur
+
+    handled: list[str] = []
+
+    class Recording(EchoHandler):
+        async def handle(self, incoming: Envelope, ctx: HandlerContext) -> None:
+            handled.append(incoming.id)
+            await super().handle(incoming, ctx)
+
+    async with running(layout, config, "beta", handler=Recording()):
+        await wait_until(lambda: handled == [env.id])
+
+    assert handled == [env.id], "崩溃中断的消息没有重跑 —— 那是「最多一次」"
+
+
+async def test_a_finished_message_is_not_redone_after_a_restart(layout, config, make_task):
+    """另一面：真干完了的，重启后不该再做一遍。"""
+    beta_box = Mailbox(layout.mailbox_dir("beta")).ensure()
+    env = make_task(sender="cli", recipient="beta")
+    handled: list[str] = []
+
+    class Recording(EchoHandler):
+        async def handle(self, incoming: Envelope, ctx: HandlerContext) -> None:
+            handled.append(incoming.id)
+            await super().handle(incoming, ctx)
+
+    async with running(layout, config, "beta", handler=Recording()):
+        beta_box.deposit(env)
+        await wait_until(lambda: handled == [env.id])
+
+    # 重启（同一个工作区，新的 runtime），再投一次同样的信封
+    async with running(layout, config, "beta", handler=Recording()):
+        beta_box.deposit(env)
+        await asyncio.sleep(0.4)
+
+    assert handled == [env.id], "已经处理完的消息被重放处理了第二遍"

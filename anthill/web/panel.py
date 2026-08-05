@@ -95,6 +95,8 @@ def _peers(peers: PeerRegistry) -> list[dict[str, Any]]:
             "agents": list(peer.agents),
             "fingerprint": peer.fingerprint,
             "last_seen": peer.last_seen,
+            # 广播自称的地址和配对时那个对不上 —— 摊出来让人判断，绝不自动改路由
+            "seen_endpoint": peer.seen_endpoint if peer.endpoint_conflict else "",
         }
         for peer in peers.all()
     ]

@@ -22,7 +22,7 @@ from anthill.cli.common import console, fail, load
 from anthill.cli.pair_cmd import pair_command
 from anthill.core.errors import AntHillError
 from anthill.core.workspace import local_ip
-from anthill.discovery.registry import PeerRegistry
+from anthill.discovery.registry import PeerRecord, PeerRegistry
 from anthill.security.keys import PairingToken, new_key
 
 peers_app = typer.Typer(no_args_is_help=True, help="对端节点与信任关系")
@@ -61,12 +61,25 @@ def list_peers(
         table.add_row(
             peer.node,
             f"[{style}]{peer.status}[/{style}]",
-            peer.endpoint or "-",
+            _endpoint_cell(peer),
             ", ".join(peer.agents) or "-",
             peer.fingerprint or "-",
             peer.last_seen[11:19] if peer.last_seen else "-",
         )
     console.print(table)
+    if any(peer.endpoint_conflict for peer in records):
+        console.print(
+            "[yellow]有对端在广播里自称的地址和配对时那个对不上。[/yellow]\n"
+            "投递仍然只走配对时那个地址（广播没有认证，不能让它改路由）。\n"
+            "如果对方确实换了 IP，重新配对一次；否则就是有人在冒充。"
+        )
+
+
+def _endpoint_cell(peer: PeerRecord) -> str:
+    """已信任的对端地址被广播「顶」过时，两个都显示 —— 这事得让人看见。"""
+    if not peer.endpoint_conflict:
+        return peer.endpoint or "-"
+    return f"{peer.endpoint}\n[yellow]广播自称 {peer.seen_endpoint}[/yellow]"
 
 
 @peers_app.command("invite")
