@@ -6,12 +6,16 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from anthill.agent.context import ContextBuilder
 from anthill.agent.conversation import chat_payload, plan_reply
 from anthill.agent.handlers import HandlerContext
 from anthill.agent.loop import AgentLoop, LoopOutcome
 from anthill.agent.memory import ThreadMemory
 from anthill.agent.tools.base import Confirmer, Tool, ToolContext
+from anthill.agent.tools.mcp_client import McpToolset
+from anthill.core.config import McpSection
 from anthill.core.envelope import Address, Envelope
 from anthill.core.errors import BudgetExceeded, HopLimitExceeded, ProviderError
 from anthill.core.payloads import (
@@ -80,6 +84,7 @@ class LlmHandler:
         trusted_peers: frozenset[str] = frozenset(),
         confirm: Confirmer | None = None,
         chat_turns: int = 0,
+        mcp_servers: dict[str, McpSection] | None = None,
     ) -> None:
         self._provider = provider
         self._tools = tools
@@ -90,9 +95,35 @@ class LlmHandler:
         self._trusted_peers = trusted_peers
         self._confirm = confirm
         self._chat_turns = chat_turns
+        self._mcp_servers = mcp_servers or {}
+        self._mcp: McpToolset | None = None
+
+    async def setup(self, ctx: HandlerContext) -> None:
+        """连外部 MCP server，把它们的工具挂进来。
+
+        为什么在这儿而不是 factory 里：连接是异步的，而 handler 是在 agentd 的
+        `__init__`（同步）里造出来的。runtime 起循环之前会调这个钩子。
+
+        **连不上不算致命** —— `McpToolset.connect` 自己吞掉异常并记日志，
+        一个外部依赖挂了不该让整个 agentd 起不来。
+        """
+        if not self._mcp_servers:
+            return
+        self._mcp = McpToolset(log=ctx.log)
+        await self._mcp.__aenter__()
+        for name, section in sorted(self._mcp_servers.items()):
+            await self._mcp.connect(name, section)
+        if not self._mcp.tools:
+            return
+        self._tools = [*self._tools, *self._mcp.tools]
+        # 工具清单会进 system prompt，得让模型知道多了这些
+        self._builder = replace(self._builder, tools=self._tools)
 
     async def aclose(self) -> None:
         """agentd 退出时释放上游连接。不关的话 httpx 客户端会留下未关闭的 socket。"""
+        if self._mcp is not None:
+            await self._mcp.__aexit__(None, None, None)
+            self._mcp = None
         await self._provider.aclose()
 
     async def handle(self, env: Envelope, ctx: HandlerContext) -> None:

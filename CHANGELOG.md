@@ -3,6 +3,76 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 版本号对应 [docs/04-roadmap.md](./docs/04-roadmap.md) 里的里程碑。
 
+## [0.20.0] · 两个 MCP 方向、hook、以及待审批终于看得见
+
+排的四件事全做了。顺序有意义：**先做便宜的那个，再决定贵的值不值**。
+
+### 1. `bridge --json` + hook（去掉人肉转述的其实是这个）
+
+桥接的集成一直是被动的：面板给你一句提示词，你粘给会话，让它「盯着目录」。
+会话不会被通知。
+
+`anthill bridge <名字> --json` 加上一个 UserPromptSubmit hook
+（`examples/claude-code-hook/`），一个文件就把「人肉转述」去掉了。
+
+**这一条值得单独说清楚**：MCP 工具也是拉取式的，模型自己决定什么时候调 ——
+装了 MCP server 之后 Claude Code 依然不会主动知道有消息在等它。
+真正解决「被动」的是 hook，不是协议。两者互补，不是替代。
+
+### 2. 面板上能看见待审批
+
+`anthill approve` 一直没有面板对应物，连「有一条在等你批」这个信号都没有。
+把安全边界画在「不能在面板上批」是对的，画在「看不见」就是缺陷 ——
+agentd 停在那儿等，用户在任何界面里都不知道系统在等他。
+
+任务看板顶上现在会显示待审批（**只读**，确认仍然只在 CLI）。
+只看本机：别台机器的要走 `anthill approve --peer`，而且那些 prompt 里是命令原文，
+没必要为了显示把它加进对外快照。
+
+### 3. AntHill 作为 MCP client —— 给自己的 Agent 装外部工具
+
+评审点了两条：工具集偏薄、`TOOL_FACTORIES` 是硬编码字典（加工具得改源码）。
+自己造一套插件发现机制，是重新发明一个**已经有事实标准**的东西。
+
+```toml
+[mcp.files]
+command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/srv/data"]
+risk = "medium"          # 默认 high
+
+[agents.coder]
+mcp = ["files"]          # 只给它声明过的那几台，不默认全给
+```
+
+三条安全约定：外部工具**默认 high 风险**（策略引擎照常管，无人值守时拒绝，
+要用就显式降级、由人做判断）；名字加前缀（`files__read_file`，不撞名、
+日志里一眼看出出了本进程）；**连不上只记日志，不让 agentd 起不来**。
+
+连接是异步的而 handler 在同步的 `__init__` 里造，所以挂载放在 runtime 起循环前的
+`setup()` 钩子里 —— 和 `tick` 一样用鸭子类型。
+
+### 4. AntHill 作为 MCP server —— Claude Code 原生调它
+
+`anthill mcp serve cc` 之后，会话有了 `anthill_inbox` / `anthill_reply` /
+`anthill_send` / `anthill_runs` / `anthill_status`。走 stdio、由客户端拉起，
+不开端口不加鉴权面 —— 能起这个进程的人本来就有这台机器的账号，
+和 `anthill bridge` 同一个权限模型。
+
+**只暴露桥接与只读查询**。改配置、启停 agentd、审批不从这条路出去 ——
+那些的分量是「能在这台机器上执行命令」。
+只有桥接 Agent 能被代表：别的 Agent 有自己的大脑，不该由这个会话代答。
+
+### 真连一次才发现的事
+
+MCP client 第一版用假对象测是绿的。真起一个外部 server 连上去，才发现
+入参 schema 的字段名在 mcp 2.0 改了（`inputSchema` → `input_schema`），
+`FastMCP` 也改叫 `MCPServer`。两个名字现在都认，测试也换成真起一个进程连 ——
+**这类改名只有真跑才会现形**，和 M14 那次「面板在浏览器里根本没跑通过」同一个教训。
+
+### 顺带
+
+`anthill mcp tools` 列出外部 server 与谁在用；`mcp` 是可选 extra
+（`uv sync --extra mcp`），不装不影响其余功能。
+
 ## [0.19.0] · 最后一米：面板上真能建出一个能干活的 coordinator
 
 第二轮外部评审。核心判断是对的：底层能力（消息、传输、编排、面板）已经相当完整，

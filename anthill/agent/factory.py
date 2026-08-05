@@ -73,6 +73,10 @@ def build_handler(
 
     section = config.provider_for(agent_name)
     tools = build_toolset(agent.tools)
+    # 只给它声明过的那几台 —— 不默认全给，最小权限比省事重要。
+    # 「声明了不存在的 server」在 Config 校验时就拦掉了（那是配置有效性问题，
+    # 放这儿会漏掉不走这条分支的 Agent，比如 command 适配器）。
+    servers = {name: config.mcp[name] for name in agent.mcp}
     builder = ContextBuilder(
         agent=agent,
         node=config.node.name,
@@ -90,4 +94,5 @@ def build_handler(
         trusted_peers=frozenset(config.peers),
         confirm=confirm,
         chat_turns=agent.chat_turns,
+        mcp_servers=servers,
     )

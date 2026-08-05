@@ -24,6 +24,7 @@ from anthill.core.outbox import Outbox
 from anthill.core.paths import NodeLayout
 from anthill.discovery.registry import PeerRegistry
 from anthill.orchestrator.state import RunStore
+from anthill.security.approvals import ApprovalStore
 
 DEFAULT_EVENT_LIMIT = 80
 PER_AGENT_EVENTS = 40
@@ -48,6 +49,7 @@ def build_snapshot(
         "node": config.node.name,
         "agents": _agents(layout, config),
         "runs": _runs(layout),
+        "approvals": _approvals(layout),
         "events": _events(layout, config, event_limit),
     }
     if include_peers:
@@ -143,6 +145,29 @@ def _elapsed(start: str, end: str) -> str:
     except ValueError:
         return ""
     return f"{seconds:.0f}s" if seconds < 60 else f"{seconds / 60:.1f}m"
+
+
+def _approvals(layout: NodeLayout) -> list[dict[str, Any]]:
+    """有什么危险操作正停在那里等人点头。
+
+    **只读，永远只读。** 「不能在面板上批」是有意的边界（确认必须在 CLI，
+    见 05-security），但把边界画在「看不见」就是缺陷 ——
+    agentd 停在那儿等，而用户在任何界面里都不知道系统在等他。
+    """
+    try:
+        pending = ApprovalStore(layout.root).pending()
+    except OSError:  # pragma: no cover - 目录读不了不该拖垮整个快照
+        return []
+    return [
+        {
+            "id": request.id,
+            "short": request.id[-6:],
+            "agent": request.agent,
+            "prompt": request.prompt[:400],
+            "created_at": request.created_at,
+        }
+        for request in pending
+    ]
 
 
 def _events(layout: NodeLayout, config: Config, limit: int) -> list[dict[str, Any]]:

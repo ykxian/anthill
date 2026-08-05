@@ -13,6 +13,7 @@ from anthill.cli.dead_cmd import dead_app
 from anthill.cli.doctor_cmd import doctor_command
 from anthill.cli.init_cmd import init_command
 from anthill.cli.log_cmd import log_command
+from anthill.cli.mcp_cmd import mcp_app
 from anthill.cli.msg_cmd import send_command
 from anthill.cli.peers_cmd import peers_app
 from anthill.cli.remote_cmd import approve_command, fetch_command, pull_command
@@ -108,6 +109,7 @@ def guide() -> None:
 app.command("log")(log_command)
 app.add_typer(agent_app, name="agent")
 app.add_typer(dead_app, name="dead")
+app.add_typer(mcp_app, name="mcp")
 app.add_typer(peers_app, name="peers")
 
 

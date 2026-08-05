@@ -1,6 +1,6 @@
 [project]
 name = "anthill"
-version = "0.19.0"
+version = "0.20.0"
 description = "AntHill — 基于文件邮箱的分布式多 Agent 协同框架"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,6 +26,11 @@ anthill = "anthill.cli.main:app"
 llm = [
     "anthropic>=0.34",
     "openai>=1.40",
+]
+mcp = [
+    # 两个方向都用它：给 Agent 装外部工具（client），以及把 AntHill 暴露给
+    # Claude Code 这类客户端（server）。可选 —— 不装也不影响其余功能。
+    "mcp>=1.2",
 ]
 
 [dependency-groups]
@@ -73,7 +78,7 @@ warn_unused_ignores = false
 disallow_untyped_decorators = false
 
 [[tool.mypy.overrides]]
-module = ["watchdog.*", "spake2.*"]
+module = ["watchdog.*", "spake2.*", "mcp.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]

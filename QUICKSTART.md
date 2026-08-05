@@ -80,6 +80,54 @@ uv run anthill serve -w . --host 0.0.0.0 --panel-write --panel-token
 两条路写的是同一批文件（`bridge/inbox/` 收，`bridge/outbox/` 回），
 所以会话在盯着的同时，你照样可以在网页上先替它回一句。
 
+## 6. 和 Claude Code 打通（MCP）
+
+两个方向，解决的是不同问题，别搞混。
+
+### 让 Claude Code 调 AntHill
+
+```bash
+uv sync --extra mcp
+```
+
+在 Claude Code 的 MCP 配置里加：
+
+```jsonc
+{"mcpServers": {"anthill": {
+  "command": "anthill",
+  "args": ["mcp", "serve", "cc", "-w", "/path/to/workspace"]
+}}}
+```
+
+`cc` 是你那个桥接 Agent 的名字 —— **这个会话代表它**。之后会话就有了
+`anthill_inbox` / `anthill_reply` / `anthill_send` / `anthill_runs` / `anthill_status`，
+不用再理解目录结构，也不用你转述。
+
+> **MCP 不解决「被动」。** 工具也是拉取式的，模型自己决定什么时候调。
+> 真正让会话主动查收的是 hook —— 见 [examples/claude-code-hook/](./examples/claude-code-hook/)。
+> 那条路一个文件就够，不用等 MCP；两者互补。
+>
+> 这个 server 只暴露桥接与只读查询。改配置、启停 agentd、审批**不从这条路出去** ——
+> 那些的分量是「能在这台机器上执行命令」。
+
+### 让 AntHill 的 Agent 用外部工具
+
+```toml
+[mcp.files]
+command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/srv/data"]
+risk = "medium"          # 默认 high
+
+[agents.coder]
+provider = "deepseek"
+mcp = ["files"]          # 只给它声明过的那几台
+```
+
+`anthill mcp tools` 看有哪些、谁在用。
+
+> 风险默认 **high**：外部工具能干什么我们不知道，策略引擎照常管着它
+> （无人值守时 high 直接拒绝）。要用就显式降级，**由你来做这个判断**。
+> 连不上的 server 只记一条日志，不会让 agentd 起不来。
+
 ## 卡住了先跑这个
 
 ```bash

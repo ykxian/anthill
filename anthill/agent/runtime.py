@@ -138,6 +138,11 @@ class AgentRuntime:
     async def run(self, stop: asyncio.Event | None = None) -> None:
         stop = stop or asyncio.Event()
         self._startup_recovery()
+        # handler 是在同步的 __init__ 里造的，异步的准备工作（连外部 MCP server）
+        # 只能放在这儿。和 `tick` 一样用鸭子类型，免得所有 handler 都得实现一个空方法。
+        setup = getattr(self.handler, "setup", None)
+        if setup is not None:
+            await setup(self._ctx)
         await self._watcher.prepare()
         self._write_status()
         self.log.info(

@@ -377,6 +377,7 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
     </nav>
 
     <section class="pane hold" id="pane-runs">
+      <div id="approvals" hidden></div>
       <div class="eyebrow">编排任务 <span class="count" id="runs-count"></span></div>
       <form class="actions" id="run-form" hidden style="margin-bottom:14px">
         <input id="run-input" placeholder="交给 coordinator 一件事，回车发起…" autocomplete="off" />
@@ -648,6 +649,36 @@ function renderTopo(nodes) {
 // 而 CLI 侧连列出历史任务的命令都没有（现在有 `anthill runs`）。
 const DONE_RUNS_SHOWN = 20;
 
+// 有危险操作停在那里等人点头时，**至少要让人看见**。
+// 「不能在面板上批」是有意的边界（确认必须在 CLI），但把边界画在「看不见」就是缺陷：
+// agentd 停着等，而用户在任何界面里都不知道系统在等他。
+function renderApprovals(nodes) {
+  // 只看本机 —— 别台机器的待审批要走 `anthill approve --peer`，
+  // 而且那些 prompt 里是命令原文，没必要为了显示把它加进对外快照
+  const here = nodes.find((n) => n.local);
+  const pending = here?.approvals || [];
+  const box = $("approvals");
+  box.hidden = pending.length === 0;
+  if (!pending.length) return;
+  paint(box, `
+    <div class="waiting" style="border-color:var(--warn)">
+      <div class="row">
+        <b>${pending.length} 个危险操作正在等你点头</b>
+        <span class="grow"></span>
+        <span class="meta">在这台机器的终端里批：<code>anthill approve</code></span>
+      </div>
+      ${pending.map((a) => `
+        <div class="step">
+          <span class="sid">${esc(a.short)}</span>
+          <span class="who truncate">${esc(a.agent)}</span>
+          <span class="what grow truncate">${esc(a.prompt)}</span>
+        </div>`).join("")}
+      <div class="meta" style="margin-top:6px">
+        确认只在 CLI —— 面板能被打开的场合比终端多，这道边界是有意的。
+      </div>
+    </div>`);
+}
+
 function renderRuns(nodes) {
   const runs = nodes.flatMap(n => (n.runs || []).map(r => ({ ...r, where: n.node })));
   const live = runs.filter(r => !r.finished);
@@ -747,6 +778,7 @@ function draw() {
   $("node").textContent = state.node || "?";
   document.title = `AntHill · ${state.node || ""}`;
   renderTopo(state.nodes);
+  renderApprovals(state.nodes);
   renderRuns(state.nodes);
   renderEvents(state.nodes);
   if (canWrite) { syncConfigNodes(); syncAgentPicker(); syncBridgePicker(); }

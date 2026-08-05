@@ -130,6 +130,12 @@ class AgentSection(_Section):
     provider: str | None = None
     persona: str = ""
     tools: tuple[str, ...] = ()
+    mcp: tuple[str, ...] = ()
+    """这个 Agent 能用哪几台外部 MCP server 的工具（名字对应 `[mcp.<名字>]`）。
+
+    留空 = 不接外部工具。**不默认全给** —— 最小权限比省事重要。
+    """
+
     max_steps: int = Field(default=DEFAULT_MAX_STEPS, gt=0)
     token_budget: int = Field(default=DEFAULT_TOKEN_BUDGET, gt=0)
     chat_turns: int = Field(default=DEFAULT_CHAT_TURNS, ge=0)
@@ -214,6 +220,19 @@ class SecuritySection(_Section):
     """
 
 
+class McpSection(_Section):
+    """一台外部 MCP server。只支持 stdio 启动方式。
+
+    风险默认 **high**：外部工具能干什么我们不知道，策略引擎照常管着它
+    （无人值守时 high 直接拒绝）。要用就显式降级，**由人做这个判断**。
+    """
+
+    command: list[str] = Field(min_length=1)
+    env: dict[str, str] = Field(default_factory=dict)
+    risk: Literal["low", "medium", "high"] = "high"
+    timeout: float = Field(default=20.0, gt=0)
+
+
 class RuntimeSection(_Section):
     poll_interval: float = Field(default=DEFAULT_POLL_INTERVAL, gt=0)
     task_timeout: float = Field(default=DEFAULT_TASK_TIMEOUT, gt=0)
@@ -257,6 +276,7 @@ class Config(_Section):
     runtime: RuntimeSection = RuntimeSection()
     security: SecuritySection = SecuritySection()
     peers: dict[str, PeerSection] = Field(default_factory=dict)
+    mcp: dict[str, McpSection] = Field(default_factory=dict)
     providers: dict[str, ProviderSection] = Field(default_factory=dict)
     agents: dict[str, AgentSection] = Field(default_factory=dict)
     source: Path | None = None
@@ -285,6 +305,12 @@ class Config(_Section):
                 known = ", ".join(sorted(self.providers)) or "（未配置任何 provider）"
                 raise ValueError(
                     f"Agent {name} 引用了不存在的 provider {agent.provider!r}；已有：{known}"
+                )
+            unknown = [s for s in agent.mcp if s not in self.mcp]
+            if unknown:
+                known = ", ".join(sorted(self.mcp)) or "（未配置任何 MCP server）"
+                raise ValueError(
+                    f"Agent {name} 引用了不存在的 MCP server {', '.join(unknown)}；已有：{known}"
                 )
         return self
 

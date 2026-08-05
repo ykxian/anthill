@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.prompt import Prompt
@@ -231,6 +232,7 @@ def bridge_command(
     text: str = typer.Option("", "--text", help="回复正文；留空则只列出待办"),
     to: str = typer.Option("", "--to", help="主动发一条：收件人"),
     kind: str = typer.Option("chat", "--kind", help="主动发一条时：chat 或 task"),
+    as_json: bool = typer.Option(False, "--json", help="输出 JSON，给 hook / 脚本用"),
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
 ) -> None:
     """看看有什么消息在等你，或者直接写一条回复／主动发一条。
@@ -260,11 +262,48 @@ def bridge_command(
         console.print(f"[bold green]✓[/bold green] 已写好回复 {match[0].stem[-6:]}")
         return
 
+    if as_json:
+        console.print_json(data=_pending_json(handler, agent))
+        return
     _list_pending(handler, agent)
 
 
 def _pending(handler: BridgeHandler) -> list[Path]:
     return sorted(handler.dir("inbox").glob("*.md"))
+
+
+def _pending_json(handler: BridgeHandler, agent: str) -> dict[str, Any]:
+    """给 hook 用的形状。
+
+    **这是「让常驻会话自动收发」最便宜的那条路**：一个每轮开始时跑
+    `anthill bridge <名字> --json` 的 hook，就能把「人肉转述」这一步去掉 ——
+    不需要等 MCP。MCP 让这次调用更规整（有 schema、不只限 Claude Code），
+    但**真正解决「被动」的是 hook**，不是协议。
+    """
+    waiting = []
+    for path in _pending(handler):
+        headers, body = parse_note(path.read_text(encoding="utf-8"))
+        waiting.append(
+            {
+                "id": path.stem,
+                "short": path.stem[-6:],
+                "from": headers.get("from", ""),
+                "type": headers.get("type", "chat"),
+                "thread": headers.get("thread", ""),
+                "body": body.strip(),
+            }
+        )
+    return {
+        "agent": agent,
+        "count": len(waiting),
+        "waiting": waiting,
+        "inbox": str(handler.dir("inbox")),
+        "outbox": str(handler.dir("outbox")),
+        "reply_hint": (
+            f"回复：anthill bridge {agent} --reply <id> --text '…'，"
+            f"或直接在 {handler.dir('outbox')} 下写同名 .md"
+        ),
+    }
 
 
 def _draft(handler: BridgeHandler, name: str, text: str) -> None:

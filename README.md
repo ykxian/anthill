@@ -227,6 +227,22 @@ flowchart LR
   `runs`（历史任务与每步产物/耗时/重试）、`cost`（token 与花费）、
   `doctor`（一次查完配置/密钥/邮箱/进程）、`guide`（按场景分组的命令地图）
 
+**和 Claude Code 打通（M17）**
+
+- ✅ **AntHill 作为 MCP server**：`anthill mcp serve cc` 之后，Claude Code 原生有
+  `anthill_inbox` / `anthill_reply` / `anthill_send` / `anthill_runs`，
+  不用理解目录结构，也不用人转述。只暴露桥接与只读查询 ——
+  改配置、启停、审批不从这条路出去
+- ✅ **AntHill 作为 MCP client**：`[mcp.<名字>]` 声明外部 server，
+  Agent 用 `mcp = ["files"]` 挑自己能用哪几台。这一步同时解决了
+  「工具集偏薄」和「工具系统不可扩展」—— 自己造插件发现，
+  是重新发明一个已经有事实标准的东西。外部工具默认 high 风险，策略引擎照常管
+- ✅ **hook 才是去掉人肉转述的那一步**（`examples/claude-code-hook/`）：
+  MCP 工具也是拉取式的，模型自己决定什么时候调。`anthill bridge --json` + 一个
+  UserPromptSubmit hook，一个文件就够，不用等 MCP
+- ✅ **面板上能看见待审批**：确认仍然只在 CLI（那道边界是有意的），
+  但把边界画在「看不见」就是缺陷 —— agentd 停着等，用户却不知道系统在等他
+
 ## 快速开始
 
 一条命令，剩下的都在面板上做：

@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "command": "anthill bridge cc --json -w /path/to/your/workspace",
+        "description": "每轮开始前看看 AntHill 那边有没有消息在等这个会话"
+      }
+    ]
+  }
+}
