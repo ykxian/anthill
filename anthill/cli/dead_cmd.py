@@ -36,10 +36,27 @@ def _outbox(workspace: Path | None, agent: str) -> tuple[Outbox, NodeLayout]:
 def list_dead(
     agent: str = typer.Argument("cli", help="看哪个 Agent 的发件箱"),
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
+    as_json: bool = typer.Option(False, "--json", help="输出 JSON，便于接进脚本"),
 ) -> None:
     """列出死信 —— 发给谁、为什么死的。"""
     outbox, _ = _outbox(workspace, agent)
     letters = outbox.dead_letter_list()
+    if as_json:
+        console.print_json(
+            data={
+                "agent": agent,
+                "dead": [
+                    {
+                        "id": x.msg_id,
+                        "to": x.to,
+                        "attempts": x.attempts,
+                        "reason": x.reason,
+                    }
+                    for x in letters
+                ],
+            }
+        )
+        return
     if not letters:
         console.print(f"[dim]{agent} 没有死信。[/dim]")
         return

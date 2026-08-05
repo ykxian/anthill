@@ -107,9 +107,27 @@ async def _run(runtime: AgentRuntime) -> None:
 @agent_app.command("list")
 def list_agents(
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
+    as_json: bool = typer.Option(False, "--json", help="输出 JSON，便于接进脚本"),
 ) -> None:
     """列出本节点配置的 Agent 及其运行状态、积压条数。"""
     layout, config = load(workspace)
+    if as_json:
+        console.print_json(
+            data={
+                "node": config.node.name,
+                "agents": [
+                    {
+                        "name": name,
+                        "role": agent.role,
+                        "brain": brain_of(agent),
+                        "running": _runtime_state(layout.agent_dir(name) / "runtime.json")[0],
+                        "backlog": len(Mailbox(layout.mailbox_dir(name)).list_new()),
+                    }
+                    for name, agent in sorted(config.agents.items())
+                ],
+            }
+        )
+        return
 
     table = Table(title=f"节点 {config.node.name}", header_style="bold cyan")
     for column in ("Agent", "角色", "大脑", "状态", "待处理", "watcher"):

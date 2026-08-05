@@ -54,15 +54,30 @@ STATE_STYLE = {
 
 
 def run_command(
-    task: str = typer.Argument(..., help="要完成的任务；`-` 读 stdin，`@文件` 读文件"),
+    task: str = typer.Argument("", help="要完成的任务；`-` 读 stdin，`@文件` 读文件"),
+    template: str = typer.Option("", "--template", "-t", help="用一个存好的模板（见 node.toml）"),
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
     to: str = typer.Option("", "--to", help="指定 coordinator，默认自动找 role=coordinator 的"),
     timeout: float = typer.Option(DEFAULT_TIMEOUT, "--timeout", help="最长等待秒数"),
     plain: bool = typer.Option(False, "--plain", help="不用实时画面，只按行打印（便于重定向）"),
 ) -> None:
-    """把任务交给 coordinator，实时看它拆解、派活、汇总。"""
-    task = read_body(task)
+    """把任务交给 coordinator，实时看它拆解、派活、汇总。
+
+    `--template review` 用 node.toml 里存好的一件事；位置参数会替换掉模板里的 `{arg}`。
+    跑得好的一次能存下来复用 —— 不必每次重新用自然语言描述目标。
+    """
     layout, config = load(workspace)
+    if template:
+        preset = config.templates.get(template)
+        if preset is None:
+            known = ", ".join(sorted(config.templates)) or "（还没有模板）"
+            fail(f"没有模板 {template!r}；已有：{known}")
+        task = preset.goal.replace("{arg}", read_body(task) if task else "")
+        to = to or preset.to
+    elif task:
+        task = read_body(task)
+    else:
+        fail("给一件事，或者用 --template <名字>；有哪些模板：anthill run --template ?")
     try:
         coordinator = to or _find_coordinator(config)
         if to:

@@ -48,6 +48,14 @@ class FinishTool(BaseTool):
         if isinstance(raw_artifacts, str):
             raw_artifacts = [raw_artifacts]
         artifacts = tuple(str(a) for a in raw_artifacts if str(a).strip())
+        missing = _missing(artifacts, ctx)
+        if missing:
+            # **产物以前只是一串字符串**，没有任何机制收集或校验 —— 模型报了个
+            # 不存在的路径，派活的人拿到手才发现。在这儿拦下还能让它自己改。
+            return ToolResult.failed(
+                "这些产物路径不存在：" + ", ".join(missing) + "。"
+                "写你真正读写过的相对路径；写公共黑板用 blackboard:// 前缀。"
+            )
 
         status = str(args.get("status") or "ok")
         if status not in VALID_STATUS:
@@ -60,3 +68,21 @@ class FinishTool(BaseTool):
             is_finish=True,
             status=status,
         )
+
+
+def _missing(artifacts: tuple[str, ...], ctx: ToolContext) -> list[str]:
+    """哪些声称的产物在磁盘上其实没有。
+
+    越界的路径也算「没有」—— `ctx.resolve` 会抛，这里不额外报越界：
+    交付路径写错和写越界，对派活的人来说是同一件事（拿不到东西）。
+    """
+    gone = []
+    for raw in artifacts:
+        try:
+            path = ctx.resolve(raw)
+        except ValueError:
+            gone.append(raw)
+            continue
+        if not path.exists():
+            gone.append(raw)
+    return gone

@@ -31,6 +31,7 @@ from anthill.discovery.beacon import Announcement, Beacon
 from anthill.security import secrets
 from anthill.security.panel_token import load_or_create, token_path
 from anthill.transport.pull import pull_once, ssh_peers
+from anthill.web.actions import RunRequest, start_run
 from anthill.web.app import create_app
 from anthill.web.cluster import write_status
 from anthill.web.context import NodeContext, NodeRegistry
@@ -41,6 +42,8 @@ DEFAULT_PORT = 45778
 LOOPBACK = ("127.0.0.1", "localhost", "::1", "")
 WILDCARD_HOSTS = ("0.0.0.0", "::", "*")
 STATUS_INTERVAL = 5.0
+SCHEDULE_TICK = 10.0
+"""定时任务循环多久醒一次。间隔本身由每条 schedule 的 `every` 决定。"""
 IDLE_PULL_INTERVAL = 3600.0
 """所有节点都关了自动拉取时的空转节奏 —— 不退出循环，好让人改了配置之后不用重启。"""
 
@@ -325,6 +328,7 @@ async def _serve(
         *(asyncio.create_task(b.run(stop), name=f"beacon:{i}") for i, b in enumerate(beacons)),
         asyncio.create_task(_status_loop(nodes, log, stop, enabled=summary), name="status"),
         asyncio.create_task(_pull_loop(nodes, log, stop), name="pull"),
+        asyncio.create_task(_schedule_loop(nodes, log, stop), name="schedule"),
         asyncio.create_task(stop.wait(), name="stop"),
     ]
     try:
@@ -436,3 +440,47 @@ def _pull_interval(nodes: NodeRegistry) -> float:
         if ctx.config.runtime.auto_pull_seconds > 0
     ]
     return min(intervals) if intervals else IDLE_PULL_INTERVAL
+
+
+async def _schedule_loop(nodes: NodeRegistry, log: EventLog, stop: asyncio.Event) -> None:
+    """按 `[schedules.*]` 定时把任务交给 coordinator。
+
+    没做 cron 表达式 —— 那是一门要解析、要测、要处理时区与夏令时的小语言，
+    而「每隔多久」覆盖了绝大多数需要，用户写错的余地也小得多。
+
+    **派不出去只记日志。** 定时任务失败不该让 serve 停止收消息 ——
+    和状态循环、拉取循环同一条原则。
+    """
+    last: dict[str, float] = {}
+    while not stop.is_set():
+        moment = asyncio.get_running_loop().time()
+        for ctx in nodes.all():
+            for name, schedule in sorted(ctx.config.schedules.items()):
+                if not schedule.enabled:
+                    continue
+                key = f"{ctx.name}/{name}"
+                if moment - last.get(key, 0.0) < schedule.every:
+                    continue
+                last[key] = moment
+                try:
+                    await _fire(ctx, name, schedule, log)
+                except Exception as exc:
+                    log.warn(
+                        "schedule.failed",
+                        node=ctx.name,
+                        schedule=name,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+        with suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=SCHEDULE_TICK)
+            return
+
+
+async def _fire(ctx: Any, name: str, schedule: Any, log: EventLog) -> None:
+    """把一条定时任务投给 coordinator。走的是和面板「发起任务」同一条路。"""
+    goal = schedule.task
+    if schedule.template:
+        goal = ctx.config.templates[schedule.template].goal.replace("{arg}", "")
+    request = RunRequest(task=goal, to=schedule.to or "")
+    result = await start_run(ctx.layout, ctx.config, request, log)
+    log.info("schedule.fired", node=ctx.name, schedule=name, msg=result.get("id", ""))

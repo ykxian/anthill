@@ -42,10 +42,29 @@ def _registry(workspace: Path | None) -> PeerRegistry:
 @peers_app.command("list")
 def list_peers(
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
+    as_json: bool = typer.Option(False, "--json", help="输出 JSON，便于接进脚本"),
 ) -> None:
     """列出已知节点。`discovered` 表示只是见过，还不能互投消息。"""
     registry = _registry(workspace)
     records = registry.all()
+    if as_json:
+        console.print_json(
+            data={
+                "peers": [
+                    {
+                        "node": p.node,
+                        "status": p.status,
+                        "endpoint": p.endpoint,
+                        "agents": list(p.agents),
+                        "fingerprint": p.fingerprint,
+                        "last_seen": p.last_seen,
+                        "endpoint_conflict": p.endpoint_conflict,
+                    }
+                    for p in records
+                ]
+            }
+        )
+        return
     if not records:
         console.print(
             "[dim]还没有任何对端。开启 discovery 可以被动发现，"
@@ -87,7 +106,7 @@ def _endpoint_cell(peer: PeerRecord) -> str:
 
 @peers_app.command("invite")
 def invite(
-    node: str = typer.Argument(..., help="对方的节点名（他们 node.toml 里的 \[node] name）"),
+    node: str = typer.Argument(..., help=r"对方的节点名（他们 node.toml 里的 \[node] name）"),
     endpoint: str = typer.Option("", "--endpoint", help="本机对外地址，默认 http://<本机IP>:45778"),
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
 ) -> None:

@@ -31,6 +31,7 @@ from anthill.core.payloads import (
 )
 from anthill.core.router import parse_address
 from anthill.orchestrator.board import Blackboard
+from anthill.orchestrator.notify import notify
 from anthill.orchestrator.plan import Plan, PlanStep, RosterEntry, generate_plan
 from anthill.orchestrator.state import RunState, RunStore, StepRecord, StepState
 from anthill.providers.base import ChatProvider, Msg
@@ -334,6 +335,7 @@ class CoordinatorHandler:
                 MessageType.TASK_ERROR,
                 TaskErrorPayload(error=f"步骤 {failed} 未完成：{_first_error(state)}"),
             )
+            await self._notify(done, ctx)
             return done
 
         verdict = await self._judge(state, ctx)
@@ -361,6 +363,7 @@ class CoordinatorHandler:
         ctx.log.info(
             "run.finished", task=state.task_id, satisfied=verdict.satisfied, rounds=state.round
         )
+        await self._notify(done, ctx)
         return done
 
     def _settle(self, state: RunState, summary: str) -> RunState:
@@ -373,6 +376,14 @@ class CoordinatorHandler:
         done = state.finish(summary=summary)
         self._store.save(done)
         return done
+
+    async def _notify(self, state: RunState, ctx: HandlerContext) -> None:
+        """跑完之后告诉一声。**默认全关**，失败只记日志 ——
+        通知发不出去不该让一次已经成功的协作看起来像失败了。"""
+        try:
+            await notify(state, ctx.config.notify, ctx.log)
+        except Exception as exc:  # 通知这条路上什么都可能抛，一律别拖垮收尾
+            ctx.log.warn("notify.crashed", task=state.task_id, error=f"{type(exc).__name__}: {exc}")
 
     async def _judge(self, state: RunState, ctx: HandlerContext) -> Verdict:
         """用 done_when 对照各步交付。没写 done_when 就默认达成，不为难模型。"""

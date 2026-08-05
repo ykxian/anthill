@@ -220,6 +220,45 @@ class SecuritySection(_Section):
     """
 
 
+class TemplateSection(_Section):
+    """一件常做的事，存下来复用。
+
+    「每次都得重新用自然语言描述目标，跑得好的一次没法存下来」—— 存在这儿。
+    `{arg}` 会被 `anthill run --template <名字> <参数>` 的参数替换掉。
+    """
+
+    goal: str = Field(min_length=1, max_length=2_000)
+    describe: str = Field(default="", max_length=200)
+    to: str = Field(default="", max_length=64)
+    """派给哪个 coordinator；留空 = 自动找。"""
+
+
+class NotifySection(_Section):
+    """任务跑完之后告诉谁。
+
+    默认全关 —— 一个会自己往外发 HTTP 的框架，得是用户明确要的。
+    """
+
+    webhook: str = Field(default="", max_length=500)
+    """POST 一个 JSON 过去（任务号、目标、成败、摘要）。留空 = 不发。"""
+
+    on_failure_only: bool = False
+    timeout: float = Field(default=10.0, gt=0)
+
+
+class ScheduleSection(_Section):
+    """定时把一件事交给 coordinator。由 `serve` 驱动。"""
+
+    every: float = Field(gt=0)
+    """间隔秒数。没做 cron 表达式 —— 那是一门要解析要测的小语言，
+    而「每隔多久」覆盖了绝大多数需要，写错的余地也小得多。"""
+
+    task: str = Field(default="", max_length=2_000)
+    template: str = Field(default="", max_length=64)
+    to: str = Field(default="", max_length=64)
+    enabled: bool = True
+
+
 class McpSection(_Section):
     """一台外部 MCP server。只支持 stdio 启动方式。
 
@@ -277,6 +316,9 @@ class Config(_Section):
     security: SecuritySection = SecuritySection()
     peers: dict[str, PeerSection] = Field(default_factory=dict)
     mcp: dict[str, McpSection] = Field(default_factory=dict)
+    templates: dict[str, TemplateSection] = Field(default_factory=dict)
+    schedules: dict[str, ScheduleSection] = Field(default_factory=dict)
+    notify: NotifySection = NotifySection()
     providers: dict[str, ProviderSection] = Field(default_factory=dict)
     agents: dict[str, AgentSection] = Field(default_factory=dict)
     source: Path | None = None
@@ -311,6 +353,14 @@ class Config(_Section):
                 known = ", ".join(sorted(self.mcp)) or "（未配置任何 MCP server）"
                 raise ValueError(
                     f"Agent {name} 引用了不存在的 MCP server {', '.join(unknown)}；已有：{known}"
+                )
+        for name, schedule in self.schedules.items():
+            if not schedule.task and not schedule.template:
+                raise ValueError(f"定时任务 {name} 既没有 task 也没有 template")
+            if schedule.template and schedule.template not in self.templates:
+                known = ", ".join(sorted(self.templates)) or "（没有任何模板）"
+                raise ValueError(
+                    f"定时任务 {name} 引用了不存在的模板 {schedule.template!r}；已有：{known}"
                 )
         return self
 

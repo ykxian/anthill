@@ -166,6 +166,8 @@ async def test_run_shell_runs_inside_workspace(ctx: ToolContext) -> None:
 
 
 async def test_finish_tool_produces_structured_delivery(ctx: ToolContext) -> None:
+    (ctx.workspace / "a.py").write_text("x", encoding="utf-8")
+
     result = await FinishTool().run(
         {"summary": "写完了", "artifacts": ["a.py"], "status": "ok"}, ctx
     )
@@ -173,6 +175,15 @@ async def test_finish_tool_produces_structured_delivery(ctx: ToolContext) -> Non
     assert result.ok
     assert result.is_finish
     assert result.artifacts == ("a.py",)
+
+
+async def test_finish_tool_refuses_artifacts_that_do_not_exist(ctx: ToolContext) -> None:
+    """产物以前只是一串字符串，没有任何机制收集或校验 ——
+    模型报了个不存在的路径，派活的人拿到手才发现。在这儿拦下它还能自己改。"""
+    result = await FinishTool().run({"summary": "写完了", "artifacts": ["根本没写过.py"]}, ctx)
+
+    assert not result.ok
+    assert "不存在" in result.content
 
 
 async def test_finish_tool_rejects_empty_summary(ctx: ToolContext) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.panel import Panel
@@ -19,9 +20,13 @@ from anthill.discovery.registry import PeerRegistry
 
 def status_command(
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
+    as_json: bool = typer.Option(False, "--json", help="输出 JSON，便于接进脚本"),
 ) -> None:
     """节点总览。排查「为什么收不到消息」时先看这里。"""
     layout, config = load(workspace)
+    if as_json:
+        console.print_json(data=_snapshot(layout, config))
+        return
 
     discovery = (
         "[green]enabled（同网段可见；互投消息仍需配对）[/green]"
@@ -58,6 +63,33 @@ def status_command(
             f"[red]{dead}[/red]" if dead else "0",
         )
     console.print(table)
+
+
+def _snapshot(layout: NodeLayout, config: Config) -> dict[str, Any]:
+    """给脚本用的形状。和上面那张表是同一批数字，只是不带颜色。"""
+    agents = []
+    for name in sorted(config.agents):
+        mailbox = Mailbox(layout.mailbox_dir(name))
+        running, mode, _ = _runtime_state(layout.agent_dir(name) / "runtime.json")
+        agents.append(
+            {
+                "name": name,
+                "role": config.agents[name].role,
+                "running": running,
+                "watch_mode": mode,
+                "backlog": len(mailbox.list_new()),
+                "in_flight": _count(mailbox.cur),
+                "pending_out": _count(mailbox.pending, suffix=".json", skip_meta=True),
+                "dead": len(Outbox(mailbox).dead_letters()),
+            }
+        )
+    return {
+        "node": config.node.name,
+        "workspace": str(layout.workspace),
+        "discovery": config.discovery.enabled,
+        "agents": agents,
+        "peers": sorted({*config.peers, *(p.node for p in PeerRegistry(layout.root).all())}),
+    }
 
 
 def _peers(layout: NodeLayout, config: Config) -> str:

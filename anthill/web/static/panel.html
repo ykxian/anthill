@@ -401,6 +401,20 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
 
     <section class="pane" id="pane-events" hidden>
       <div class="eyebrow">消息流 <span class="count" id="events-count"></span></div>
+      <div class="actions" style="margin-bottom:10px">
+        <input id="events-q" placeholder="过滤：打一段文字，或 agent 名、事件名…" autocomplete="off" class="grow" />
+        <select id="events-level" aria-label="级别">
+          <option value="">全部级别</option>
+          <option value="error">只看 error</option>
+          <option value="warn">warn 及以上</option>
+        </select>
+        <select id="events-cap" aria-label="保留条数">
+          <option value="80">80 条</option>
+          <option value="300">300 条</option>
+          <option value="1000">1000 条</option>
+        </select>
+        <button class="ghost" id="events-export" type="button">导出 JSON</button>
+      </div>
       <div id="stream-body"></div>
     </section>
 
@@ -718,13 +732,31 @@ function renderRuns(nodes) {
 const ULID_IN_TEXT = /\b[0-7][0-9A-HJKMNP-TV-Z]{25}\b/g;
 const shortIds = (text) => String(text || "").replace(ULID_IN_TEXT, (m) => m.slice(-6));
 
-function renderEvents(nodes) {
-  const events = nodes
+// 过滤 / 搜索 / 导出 / 条数可调。以前是固定 80 条、无过滤、无搜索、无导出 ——
+// 而这一页恰恰是排查时盯得最久的地方。
+const streamView = { q: "", level: "", cap: 80 };
+const LEVEL_RANK = { debug: 0, info: 1, warn: 2, error: 3 };
+
+function matchesFilter(e) {
+  if (streamView.level && (LEVEL_RANK[e.level] ?? 1) < LEVEL_RANK[streamView.level]) return false;
+  if (!streamView.q) return true;
+  const hay = `${e.where} ${e.agent} ${e.event} ${e.detail}`.toLowerCase();
+  return hay.includes(streamView.q.toLowerCase());
+}
+
+function allEvents(nodes) {
+  return nodes
     .flatMap(n => (n.events || []).map(e => ({ ...e, where: n.node })))
     // 按完整时间戳排，不能按显示用的 HH:MM:SS —— 跨零点会把新事件排到最前面然后截掉
-    .sort((a, b) => (a.sort || a.ts || "").localeCompare(b.sort || b.ts || ""))
-    .slice(-80);
-  $("events-count").textContent = `最近 ${events.length} 条`;
+    .sort((a, b) => (a.sort || a.ts || "").localeCompare(b.sort || b.ts || ""));
+}
+
+function renderEvents(nodes) {
+  const everything = allEvents(nodes);
+  const events = everything.filter(matchesFilter).slice(-streamView.cap);
+  const hidden = everything.length - events.length;
+  $("events-count").textContent =
+    `最近 ${events.length} 条` + (hidden > 0 ? `（还有 ${hidden} 条没显示）` : "");
   const body = $("stream-body");
   const pinned = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
   const changed = paint(body, events.length
@@ -1118,6 +1150,24 @@ $("secret-form").addEventListener("submit", async (event) => {
   } catch (err) {
     say("secret-hint", String(err.message || err), "bad");
   }
+});
+
+
+// 过滤条的三个控件 + 导出。改完立刻重画，不等下一次轮询。
+$("events-q").addEventListener("input", (e) => { streamView.q = e.target.value; renderEvents(state.nodes); });
+$("events-level").addEventListener("change", (e) => { streamView.level = e.target.value; renderEvents(state.nodes); });
+$("events-cap").addEventListener("change", (e) => { streamView.cap = Number(e.target.value) || 80; renderEvents(state.nodes); });
+
+$("events-export").addEventListener("click", () => {
+  // 导出的是**当前过滤之后**看到的那些 —— 导出一份和屏幕上不一样的东西最气人
+  const rows = allEvents(state.nodes).filter(matchesFilter).slice(-streamView.cap);
+  const blob = new Blob([JSON.stringify(rows, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "anthill-events.json";
+  a.click();
+  URL.revokeObjectURL(url);
 });
 
 const PANES = ["runs", "chat", "events", "bridge", "models", "setup", "config"];

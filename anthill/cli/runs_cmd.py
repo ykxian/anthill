@@ -11,10 +11,12 @@ Ctrl-C 时提示的「用 anthill status 查看」还是条死路 —— `status
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import typer
 from rich.table import Table
+from rich.text import Text
 
 from anthill.cli.common import console, fail, load
 from anthill.orchestrator.state import RunState, RunStore, StepState
@@ -26,6 +28,8 @@ MARK = {
     StepState.FAILED: "✗",
     StepState.SKIPPED: "⊘",
 }
+POLL_INTERVAL = 0.5
+
 STYLE = {
     StepState.PENDING: "dim",
     StepState.RUNNING: "yellow",
@@ -39,9 +43,14 @@ def runs_command(
     task_id: str = typer.Argument("", help="只看这一条（可只给末尾几位）；留空则列出全部"),
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
     active: bool = typer.Option(False, "--active", help="只看还没跑完的"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="盯着这条任务，跑完为止"),
     as_json: bool = typer.Option(False, "--json", help="输出 JSON，便于接进脚本"),
 ) -> None:
-    """列出编排任务，或看某一条的每一步。"""
+    """列出编排任务，或看某一条的每一步。
+
+    `--follow` 是 `anthill run` 按 Ctrl-C 之后的回程：协调器在磁盘上一直在跑，
+    这条命令重新盯上去。**它只读黑板，不参与任何编排** —— 关掉它不影响协作。
+    """
     layout, _ = load(workspace)
     store = RunStore(layout.blackboard)
     states = store.active() if active else store.all()
@@ -52,6 +61,9 @@ def runs_command(
             fail(f"没有匹配 {task_id!r} 的任务；先跑 `anthill runs` 看看有哪些")
         if len(matched) > 1:
             fail(f"{task_id!r} 匹配到 {len(matched)} 条，多给几位")
+        if follow:
+            _follow(matched[0].task_id, store)
+            return
         _detail(matched[0], as_json=as_json)
         return
 
@@ -77,6 +89,48 @@ def runs_command(
     console.print("[dim]看某一条：anthill runs <任务号>[/dim]")
 
 
+def _follow(task_id: str, store: RunStore) -> None:
+    """轮询黑板重画，直到这次运行结束。
+
+    和 `anthill run` 的实时画面同一个原理：**只读观察者**。
+    以前 Ctrl-C 之后就没有任何办法再看到进展了 —— 协调器还在跑，你却瞎了。
+    """
+    from rich.live import Live
+
+    with Live(console=console, refresh_per_second=4) as live:
+        while True:
+            state = next((s for s in store.all() if s.task_id == task_id), None)
+            if state is None:
+                live.update(Text(f"任务 {task_id[-6:]} 不见了"))
+                return
+            live.update(_steps_table(state))
+            if state.finished:
+                break
+            time.sleep(POLL_INTERVAL)
+    console.print(f"\n[bold green]已结束[/bold green] {state.result or ''}".rstrip())
+
+
+def _steps_table(state: RunState) -> Table:
+    table = Table(
+        title=f"{_clip(state.plan.goal, 60)}",
+        box=None,
+        header_style="dim",
+        pad_edge=False,
+    )
+    for column in ("", "步骤", "执行者", "用时", "试了", "结果"):
+        table.add_column(column, overflow="fold")
+    for record in state.steps:
+        table.add_row(
+            f"[{STYLE[record.state]}]{MARK[record.state]}[/{STYLE[record.state]}]",
+            record.id,
+            record.assignee,
+            _elapsed(record.dispatched_at, record.finished_at),
+            str(record.attempts) if record.attempts > 1 else "",
+            _clip(record.summary or record.error or record.task, 70),
+        )
+    return table
+
+
 def _detail(state: RunState, *, as_json: bool) -> None:
     """一条任务的全部：每一步的产物、耗时、试了几次 —— 面板上这些数据算好了却没显示。"""
     if as_json:
@@ -89,19 +143,7 @@ def _detail(state: RunState, *, as_json: bool) -> None:
         f"{'已结束' if state.finished else '进行中'}"
         f"{f' · 返工 {state.round} 轮' if state.round else ''}[/dim]\n"
     )
-    table = Table(box=None, header_style="dim", pad_edge=False)
-    for column in ("", "步骤", "执行者", "用时", "试了", "结果"):
-        table.add_column(column, overflow="fold")
-    for record in state.steps:
-        table.add_row(
-            f"[{STYLE[record.state]}]{MARK[record.state]}[/{STYLE[record.state]}]",
-            record.id,
-            record.assignee,
-            _elapsed(record.dispatched_at, record.finished_at),
-            str(record.attempts) if record.attempts > 1 else "",
-            _clip(record.summary or record.error or record.task, 70),
-        )
-    console.print(table)
+    console.print(_steps_table(state))
     artifacts = [a for record in state.steps for a in record.artifacts]
     if artifacts:
         console.print("\n[dim]产物：[/dim]" + ", ".join(artifacts))

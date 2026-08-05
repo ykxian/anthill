@@ -128,6 +128,28 @@ mcp = ["files"]          # 只给它声明过的那几台
 > （无人值守时 high 直接拒绝）。要用就显式降级，**由你来做这个判断**。
 > 连不上的 server 只记一条日志，不会让 agentd 起不来。
 
+## 7. 存一件常做的事 / 定时跑 / 跑完通知
+
+```toml
+[templates.review]
+goal = "审一遍 {arg} 的改动，重点看边界和错误处理"
+
+[schedules.nightly]
+every = 86400          # 秒。没做 cron 表达式 —— 「每隔多久」够用，写错的余地也小
+template = "review"
+
+[notify]
+webhook = "https://example.com/hook"   # 跑完 POST 一个 JSON 过去
+on_failure_only = false
+```
+
+```bash
+uv run anthill run --template review "src/scheduler.py"
+```
+
+> 通知默认**全关** —— 一个会自己往外发 HTTP 的框架，得是你明确要的，
+> 而且那条请求里带着任务目标与摘要（是内容，不是元数据）。
+
 ## 卡住了先跑这个
 
 ```bash

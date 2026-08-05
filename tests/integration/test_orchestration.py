@@ -85,6 +85,10 @@ def node(layout: NodeLayout) -> Config:
     layout.node_toml.write_text(NODE_TOML, encoding="utf-8")
     for name in ("cli", "boss", "coder", "reviewer"):
         Mailbox(layout.mailbox_dir(name)).ensure()
+    # `finish` 现在会校验产物真的存在 —— 脚本里声称交付的文件得先在磁盘上。
+    # 这本来就更诚实：worker 说它交付了什么，那东西就该找得到。
+    (layout.workspace / "tests").mkdir(parents=True, exist_ok=True)
+    (layout.workspace / "tests" / "test_date.py").write_text("# 写好的用例\n", encoding="utf-8")
     return Config.load_from(layout)
 
 
@@ -106,6 +110,8 @@ def verdict_turn(satisfied: bool = True, fix: str = "") -> Turn:
 
 
 def finish_turn(summary: str, artifacts: tuple[str, ...] = ()) -> Turn:
+    """`finish` 现在会校验产物真的存在，所以脚本里声称的文件得先造出来 ——
+    这本来就是更诚实的：worker 声称交付了什么，那东西就该在磁盘上。"""
     return Turn(
         tool_calls=(
             ToolCall(
