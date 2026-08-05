@@ -13,7 +13,8 @@ from __future__ import annotations
 import asyncio
 import signal
 import socket
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,8 @@ DEFAULT_PORT = 45778
 LOOPBACK = ("127.0.0.1", "localhost", "::1", "")
 WILDCARD_HOSTS = ("0.0.0.0", "::", "*")
 STATUS_INTERVAL = 5.0
+SHUTDOWN_GRACE = 5.0
+"""Ctrl-C 之后留给 uvicorn 自己收尾的时间。"""
 SCHEDULE_TICK = 10.0
 """定时任务循环多久醒一次。间隔本身由每条 schedule 的 `every` 决定。"""
 IDLE_PULL_INTERVAL = 3600.0
@@ -129,8 +132,13 @@ def serve_command(
 
     # 绑通配符是「监听哪儿」，不是「别人怎么找到我」—— 广播 0.0.0.0 出去，
     # 对端记下来之后永远连不上，报错还很难懂
-    reachable = local_ip() if host in WILDCARD_HOSTS else host
-    endpoint = advertise or f"http://{reachable}:{port}"
+    # 优先级：命令行 > node.toml 的 [node] endpoint > 自动猜。
+    # 自动猜**一定会有猜错的时候**（多网卡、隧道、VPN），所以两条覆盖路都留着，
+    # 并且把猜的结果打出来 —— 猜错的代价是「别人连不上你」，不该让人靠猜发现。
+    configured = nodes.primary.config.node.endpoint.strip() if nodes.ready else ""
+    guessed = local_ip() if host in WILDCARD_HOSTS else host
+    endpoint = advertise or configured or f"http://{guessed}:{port}"
+    picked_by = "--advertise" if advertise else ("node.toml" if configured else "自动识别")
     # 面板默认只在回环上开：一旦 --host 0.0.0.0（为了让同网段投递进来），
     # 面板就会跟着暴露给整个网段。要那样必须显式 --panel，不给默认踩坑的机会。
     # --panel-write 本身就是个比 --panel 更明确的表态，不必再让人多写一个 --panel
@@ -154,10 +162,20 @@ def serve_command(
     quiet_discovery = config is not None and not config.discovery.enabled
     console.print(
         f"[bold green]▶[/bold green] {name} 接收端 [dim]{endpoint}[/dim]"
+        + (f" [dim]（{picked_by}）[/dim]" if picked_by != "--advertise" else "")
         + ("  [dim]（discovery 未开启，不广播）[/dim]" if quiet_discovery else "")
     )
     if host == DEFAULT_HOST:
         console.print("[dim]只绑回环；要让同网段的机器投递进来，用 --host 0.0.0.0[/dim]")
+    elif picked_by == "自动识别":
+        # 多网卡的机器上这一步**一定会有猜错的时候**（Docker 网桥、隧道、VPN），
+        # 而猜错的表现是「别人连不上你」—— 一个很难往回追的症状。先摆出来。
+        console.print(
+            f"[dim]  这个地址是自动识别的（本机有多块网卡时可能挑错）。"
+            f"不对就 --advertise http://<你的地址>:{port}，"
+            # rich 把中括号当样式标记吃掉，得转义 —— 这个坑在 help 文本里踩过一次了
+            r"或在 node.toml 的 \[node] 里写 endpoint[/dim]"
+        )
     if show_panel:
         mode = "可发起任务与改配置" if panel_write else "只读"
         console.print(f"[bold]面板[/bold] {endpoint}/panel [dim]（{mode}）[/dim]")
@@ -278,7 +296,7 @@ async def _serve(
         remote_admin=remote_admin or any(c.config.security.remote_admin for c in nodes.all()),
         panel_token=panel_token,
     )
-    server = uvicorn.Server(
+    server = _OwnedServer(
         uvicorn.Config(
             app,
             host=host,
@@ -331,11 +349,17 @@ async def _serve(
         asyncio.create_task(_schedule_loop(nodes, log, stop), name="schedule"),
         asyncio.create_task(stop.wait(), name="stop"),
     ]
+    http = tasks[0]
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
         stop.set()
+        # **先让 uvicorn 自己收，再谈 cancel。** 直接 cancel 掉 serve()
+        # 会打断它的 lifespan，于是 Ctrl-C 时终端上糊一大段
+        # `asyncio.exceptions.CancelledError` 的 traceback —— 看着像崩了，其实是正常退出。
         server.should_exit = True
+        with suppress(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(http), timeout=SHUTDOWN_GRACE)
         for task in tasks:
             task.cancel()
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -344,6 +368,22 @@ async def _serve(
     if crashed:
         # 起不来却退 0，脚本和 systemd 都会以为成功了 —— 端口被占是最常见的那种
         raise AntHillError("；".join(crashed))
+
+
+class _OwnedServer(uvicorn.Server):
+    """信号由**我们**接，uvicorn 不要自己抢。
+
+    uvicorn 默认在 `serve()` 里换掉 SIGINT/SIGTERM 的处理器。那样 Ctrl-C 会同时
+    触发两条关闭路径（它自己的，和我们 `stop` 事件那条），互相打断，结果是终端上
+    糊一段 `asyncio.exceptions.CancelledError` 的 traceback —— 看着像崩了，
+    其实只是正常退出被打断了 lifespan。
+
+    这个进程还管着信标、状态、拉取、定时四个循环，本来就该由我们统一收尾。
+    """
+
+    @contextmanager
+    def capture_signals(self) -> Iterator[None]:
+        yield
 
 
 def _report_crashes(tasks: list[asyncio.Task[Any]], results: list[Any], log: EventLog) -> list[str]:

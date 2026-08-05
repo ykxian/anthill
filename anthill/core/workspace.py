@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import contextlib
 import socket
+from collections.abc import Iterable
+from itertools import count
 
 from anthill.core.config import Config, default_node_toml
 from anthill.core.envelope import NODE_NAME_RE
@@ -19,12 +21,68 @@ from anthill.core.paths import NodeLayout
 BOARD_SEED = "# BOARD\n\n> 当前协作状态快照，由 coordinator 单写者维护。\n"
 
 
+VIRTUAL_PREFIXES = ("lo", "docker", "br-", "veth", "virbr", "tap", "tailscale", "zt", "wg", "vbox")
+"""这些网卡上的地址**不该**被当成「局域网里别人能连到我的地址」。
+
+一台开发机上 Docker 能造出几十个 `br-xxxx`，再加隧道、VPN、虚拟机网桥 ——
+挑错一个，对端记下来之后永远连不上，而且报错很难懂。
+"""
+
+PHYSICAL_PREFIXES = ("en", "eth", "wl")
+"""看着像真网卡的名字，优先。"""
+
+
+def _is_virtual(name: str) -> bool:
+    # `tun` 用包含匹配：真见过叫 `sbtun0` 的隧道，`startswith` 漏得干干净净
+    return name.startswith(VIRTUAL_PREFIXES) or "tun" in name
+
+
+def _interface_ips() -> list[tuple[str, str]]:
+    """枚举本机网卡的 IPv4。拿不到就返回空 —— 调用方有兜底。
+
+    标准库没有跨平台的枚举接口，这里走 Linux 的 ioctl；别的平台直接空手而归。
+    """
+    try:
+        import fcntl
+        import struct
+
+        siocgifaddr = 0x8915
+        found = []
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            for _, name in socket.if_nameindex():
+                try:
+                    packed = struct.pack("256s", name.encode()[:15])
+                    raw = fcntl.ioctl(sock.fileno(), siocgifaddr, packed)
+                except OSError:
+                    continue  # 这块网卡没有 IPv4
+                found.append((name, socket.inet_ntoa(raw[20:24])))
+        return found
+    except (ImportError, AttributeError, OSError):  # pragma: no cover - 非 Linux
+        return []
+
+
 def local_ip() -> str:
-    """猜一个**对外可达**的本机 IP。连不上就退化成 127.0.0.1。
+    """猜一个**局域网里别人能连到**的本机 IP。猜不出就退化成 127.0.0.1。
 
     `0.0.0.0` 是绑定用的通配符，不是地址 —— 把它当 endpoint 广播出去，
     对端记下来之后永远连不上（而且报错还很难懂：走代理的话是一个空的 502）。
+
+    以前的做法是「连一个远地址、看内核挑了哪条路由」。那等于**问默认路由是什么**，
+    而默认路由完全可能是一条隧道或 VPN —— 真机上就撞到过：
+    一台有 40 个 Docker 网桥的机器，默认路由走 `sbtun0`，于是对外广播成
+    `172.19.0.1`，而它真正的局域网地址是 `10.15.3.61`。
+
+    现在先枚举网卡、排掉虚拟的那些，优先看着像真网卡的名字（en/eth/wl）；
+    都排掉了才退回旧办法。**猜错的代价是别人连不上你**，所以启动时会把
+    选中的地址和「怎么覆盖」一起打出来，别让人只能靠猜。
     """
+    candidates = [(n, ip) for n, ip in _interface_ips() if not _is_virtual(n) and ip != "127.0.0.1"]
+    physical = [ip for n, ip in candidates if n.startswith(PHYSICAL_PREFIXES)]
+    if physical:
+        return sorted(physical)[0]
+    if candidates:
+        return sorted(ip for _, ip in candidates)[0]
+
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         try:
             sock.connect(("10.255.255.255", 1))  # 不发包，只让内核挑一条路由
@@ -33,11 +91,20 @@ def local_ip() -> str:
             return "127.0.0.1"
 
 
-def default_node_name() -> str:
-    """默认拿主机名 —— 局域网里一眼能对上是哪台机器。"""
+def default_node_name(taken: Iterable[str] = ()) -> str:
+    """默认拿主机名 —— 局域网里一眼能对上是哪台机器。
+
+    但**一台机器上可以有好几个工作区**，而节点名必须唯一（信封上的收件人靠它
+    指人）。全都叫主机名的话，第二个工作区起 serve 时就会被跳过，还只给一句
+    「已经有一个叫 cs 的节点了」—— 用户既没做错什么，也不知道该怎么办。
+    所以这里避开已经占用的名字：`cs` → `cs-2` → `cs-3`。
+    """
     raw = socket.gethostname().split(".")[0].lower()
-    cleaned = "".join(c if c.isalnum() or c in "._-" else "-" for c in raw)
-    return cleaned or "node"
+    cleaned = "".join(c if c.isalnum() or c in "._-" else "-" for c in raw) or "node"
+    used = {n.lower() for n in taken}
+    if cleaned not in used:
+        return cleaned
+    return next(f"{cleaned}-{n}" for n in count(2) if f"{cleaned}-{n}" not in used)
 
 
 def create_workspace(layout: NodeLayout, *, node_name: str = "", force: bool = False) -> Config:
@@ -46,7 +113,7 @@ def create_workspace(layout: NodeLayout, *, node_name: str = "", force: bool = F
     已经有 node.toml 时默认拒绝 —— 这个函数会覆盖配置文件，
     而配置被无声覆盖是很难查的那种事故。
     """
-    name = node_name or default_node_name()
+    name = node_name or suggest_node_name()
     # 先验名字再动盘：不然会写出一份读不回来的 node.toml，
     # 留下一个「看着像工作区、其实起不来」的目录
     if not NODE_NAME_RE.match(name):
@@ -124,3 +191,33 @@ class ConfigRef:
             return self._layout.node_toml.stat().st_mtime
         except OSError:
             return None
+
+
+def suggest_node_name() -> str:
+    """给一个**这台机器上还没被占用**的节点名。
+
+    `init` 和 `serve` 都得走这一个入口 —— 各算各的话，`init` 那条路会绕过
+    去重，于是连着 init 两次仍然都叫主机名，第二个工作区起 serve 时被跳过。
+    """
+    return default_node_name(_names_in_use())
+
+
+def _names_in_use() -> list[str]:
+    """这台机器上已经有的节点名。
+
+    两个来源都要看，只看一个会漏：
+
+    - **机器级清单**（`~/.anthill/workspaces.json`）—— 面板建的、serve 记下的；
+    - **家目录下常见的兄弟目录** —— `anthill init` 建的工作区不进清单，
+      而人恰恰最常连着 init 两次。只靠清单的话第二次仍然重名。
+
+    读不出来就当没有 —— 起名字这件事不该因为一个清单文件坏了而失败。
+    """
+    names: list[str] = []
+    try:
+        from anthill.web.workspaces import listing
+
+        names += [str(e.get("node", "")) for e in listing() if e.get("node")]
+    except Exception:  # pragma: no cover - 清单坏了/循环导入，都只是少一点信息
+        pass
+    return [n for n in names if n]

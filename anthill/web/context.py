@@ -118,7 +118,9 @@ class NodeRegistry:
         if existing is not None and existing.layout.workspace != ctx.layout.workspace:
             raise AntHillError(
                 f"已经有一个叫 {ctx.name} 的节点了（{existing.layout.workspace}）——"
-                "两个工作区不能同名，否则信封上的收件人指谁就说不清了"
+                "两个工作区不能同名，否则信封上的收件人指谁就说不清了。\n"
+                f"  改名：在 {ctx.layout.node_toml} 的 [node] 里把 name 换掉；\n"
+                "  不想要它了：anthill serve 会自动跳过，或者从清单里删掉那条"
             )
         self._nodes[ctx.name] = ctx
         if primary or not self._primary:

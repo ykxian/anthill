@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import signal
 from pathlib import Path
 
 import pytest
@@ -290,3 +291,70 @@ def test_square_brackets_survive_in_help() -> None:
     result = runner.invoke(app, ["peers", "invite", "--help"])
 
     assert "[node]" in result.output
+
+
+# ---------- 广播哪个地址 ----------
+
+
+def test_serve_owns_the_signals_so_ctrl_c_is_quiet() -> None:
+    """uvicorn 默认会换掉 SIGINT/SIGTERM 的处理器。那样 Ctrl-C 会同时触发
+    两条关闭路径（它自己的、和我们的 stop 事件），互相打断，终端上糊一段
+    `asyncio.exceptions.CancelledError` —— 看着像崩了，其实是正常退出。
+
+    这个进程还管着信标、状态、拉取、定时四个循环，本来就该由我们统一收尾。
+    """
+    import uvicorn
+
+    from anthill.cli.serve_cmd import _OwnedServer
+
+    assert issubclass(_OwnedServer, uvicorn.Server)
+    server = _OwnedServer(uvicorn.Config(app=lambda *a: None))
+    handler_before = signal.getsignal(signal.SIGINT)
+    with server.capture_signals():
+        assert signal.getsignal(signal.SIGINT) is handler_before, "uvicorn 又把信号抢走了"
+
+
+def test_the_endpoint_from_config_wins_over_guessing(workspace: Path) -> None:
+    """自动识别一定会有猜错的时候（多网卡、隧道、VPN），所以两条覆盖路都得留着。"""
+    from anthill.core.config import Config
+
+    toml = NodeLayout(workspace).node_toml
+    toml.write_text(
+        toml.read_text(encoding="utf-8").replace(
+            "[node]", '[node]\nendpoint = "http://10.15.3.61:45778"', 1
+        ),
+        encoding="utf-8",
+    )
+
+    assert Config.load_from(NodeLayout(workspace)).node.endpoint == "http://10.15.3.61:45778"
+
+
+def test_two_inits_on_one_machine_do_not_collide(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一台机器上可以有好几个工作区，而节点名必须唯一（信封上的收件人靠它指人）。
+
+    以前两次 `init` 都叫主机名，第二个工作区起 serve 时被跳过，
+    只给一句「已经有一个叫 cs 的节点了」—— 用户既没做错什么，也不知道该怎么办。
+    `init` 那条路以前还绕过了去重（自己算名字），所以两条路得走同一个入口。
+    """
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    monkeypatch.setattr("socket.gethostname", lambda: "box")
+
+    for name in ("one", "two"):
+        assert runner.invoke(app, ["init", str(tmp_path / name)]).exit_code == 0
+
+    names = [Config.load_from(NodeLayout(tmp_path / n)).node.name for n in ("one", "two")]
+    assert names == ["box", "box-2"], names
+
+
+def test_init_registers_the_workspace_so_serve_can_find_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """不登记的话，机器级清单里看不见它 —— 面板上也看不见，重名检查也看不见。"""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    from anthill.web.workspaces import listing
+
+    runner.invoke(app, ["init", str(tmp_path / "solo")])
+
+    assert str(tmp_path / "solo") in [e["path"] for e in listing()]

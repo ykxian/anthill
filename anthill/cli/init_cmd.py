@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from pathlib import Path
 
 import typer
@@ -14,7 +15,11 @@ import typer
 from anthill.cli.common import console, fail, ok
 from anthill.core.errors import AntHillError
 from anthill.core.paths import NodeLayout
-from anthill.core.workspace import create_workspace, default_node_name
+from anthill.core.workspace import create_workspace, suggest_node_name
+from anthill.web.workspaces import remember
+
+DEFAULT_PORT = 45778
+"""和 serve 的默认端口一致；这里只是清单里的一个提示值，不影响实际监听。"""
 
 
 def init_command(
@@ -24,11 +29,15 @@ def init_command(
 ) -> None:
     """初始化 .anthill 工作区（node.toml + agents/ + blackboard/ + logs/）。"""
     layout = NodeLayout(path.resolve())
-    name = node_name or default_node_name()
+    name = node_name or suggest_node_name()
     try:
         config = create_workspace(layout, node_name=name, force=force)
     except AntHillError as exc:
         fail(f"{exc}（要重建请加 --force）" if "已存在" in str(exc) else str(exc))
+
+    # 记进机器级清单：serve 才看得见它，下一次 init 的重名检查也才看得见它
+    with suppress(AntHillError):
+        remember(layout.workspace, port=DEFAULT_PORT)
 
     ok(f"工作区已就绪：{layout.root}")
     console.print(f"  节点名   [b]{name}[/b]")
