@@ -34,6 +34,7 @@ from anthill.orchestrator.board import Blackboard
 from anthill.orchestrator.plan import Plan, PlanStep, RosterEntry, generate_plan
 from anthill.orchestrator.state import RunState, RunStore, StepRecord, StepState
 from anthill.providers.base import ChatProvider, Msg
+from anthill.security.approvals import ApprovalRequest, ApprovalStore
 from anthill.security.policy import USER_ROLE
 
 MAX_REWORK_ROUNDS = 2
@@ -47,6 +48,9 @@ worker 回的 TaskErrorPayload 里本来就带 `retryable`，但整个 orchestra
 DEFAULT_STEP_TIMEOUT = 600.0
 DEFAULT_NUDGE_AFTER = 180.0
 MAX_SUMMARY_CHARS = 4_000
+
+_APPROVED = object()
+"""`_approval_gate` 的哨兵：批过了，可以往下派。"""
 
 STEP_BODY = """\
 {task}
@@ -114,7 +118,9 @@ class CoordinatorHandler:
         """周期性扫描：先催办，再判超时。runtime 定时调用，handler 自己不起线程。"""
         for state in self._store.active():
             updated = await self._sweep_timeouts(state, ctx)
-            if updated is not state:
+            # **有待派步骤时也要推一把。** 以前只在超时/催办改动了状态时才 advance，
+            # 于是「卡在等审批」这种状态永远没人再看一眼 —— 人批了也没用。
+            if updated is not state or updated.ready_steps():
                 await self._advance(updated, ctx, env=None)
 
     # ---------- 开一次新运行 ----------
@@ -223,6 +229,11 @@ class CoordinatorHandler:
         self, state: RunState, step_id: str, ctx: HandlerContext, *, env: Envelope | None
     ) -> RunState:
         step = state.plan.step(step_id)
+        if step.needs_approval:
+            gate = self._approval_gate(state, step, ctx)
+            if gate is not _APPROVED:
+                return gate if isinstance(gate, RunState) else state
+
         sub_thread = new_thread_id()
         body = self._compose_body(state, step)
         hops = (env.hops + 1) if env is not None else 1
@@ -247,6 +258,52 @@ class CoordinatorHandler:
             thread=sub_thread,
         )
         return state.dispatch(step_id, thread=sub_thread, msg_id=sent.id)
+
+    def _approval_gate(
+        self, state: RunState, step: PlanStep, ctx: HandlerContext
+    ) -> RunState | object:
+        """`needs_approval` 的那道闸：没批过就先提交一条审批请求，然后**不派**。
+
+        返回 `_APPROVED` 表示可以往下走；返回 `state`（原样）表示这一轮先等着，
+        返回一个新 `RunState` 表示已经判失败（人拒绝了）。
+
+        为什么不阻塞等：coordinator 是事件驱动的，在 handler 里 await 一个要靠
+        另一条消息/另一次 tick 才会到的答复 = 死锁。所以「等」的表达方式是
+        **这一步继续留在 pending，下一次 tick 再看一眼**。
+
+        审批那套（`security/approvals.py`）本来就在，只是编排层从没用过 ——
+        「让人在关键一步之前确认」以前只能靠 Agent 自己触发危险操作时被策略引擎
+        拦下，非常间接。
+        """
+        store = ApprovalStore(ctx.layout.root)
+        request_id = _approval_id(state, step)
+        answer = store.answer_of(request_id)
+        if answer is not None:
+            store.close(request_id)
+            if answer.approved:
+                ctx.log.warn("step.approved", task=state.task_id, step=step.id, by=answer.by)
+                return _APPROVED
+            ctx.log.warn("step.rejected", task=state.task_id, step=step.id, by=answer.by)
+            return state.fail(step.id, error=f"这一步被拒绝了（{answer.by or '人工'}）")
+
+        if not store.request_path(request_id).is_file():
+            store.submit(
+                ApprovalRequest(
+                    id=request_id,
+                    agent=self.name,
+                    prompt=(
+                        f"计划要派出步骤 {step.id} 给 {step.assignee}：\n  {_clip_title(step.task)}"
+                    ),
+                    thread=state.root_thread,
+                )
+            )
+            ctx.log.warn(
+                "step.awaiting_approval",
+                task=state.task_id,
+                step=step.id,
+                hint="anthill approve",
+            )
+        return state
 
     def _compose_body(self, state: RunState, step: PlanStep) -> str:
         """把依赖步骤的产出喂给下一步 —— 否则 reviewer 根本不知道要审什么。"""
@@ -383,7 +440,10 @@ class CoordinatorHandler:
             if record.state is not StepState.RUNNING or not record.dispatched_at:
                 continue
             elapsed = _elapsed(record.dispatched_at, current)
-            if elapsed > self._settings.step_timeout:
+            # 每步可以有自己的超时：「写代码给 20 分钟、跑个 lint 给 30 秒」
+            # 这种再普通不过的要求，以前只有一个全局值表达不了
+            limit = state.plan.step(record.id).timeout or self._settings.step_timeout
+            if elapsed > limit:
                 ctx.log.warn(
                     "step.timeout", task=state.task_id, step=record.id, seconds=int(elapsed)
                 )
@@ -471,6 +531,18 @@ def _last_productive(state: RunState) -> StepRecord | None:
         if record.state is StepState.DONE:
             return record
     return None
+
+
+def _approval_id(state: RunState, step: PlanStep) -> str:
+    """审批 id 必须**稳定**：每次 tick 都重算一次，变了就会不停提交新请求。
+
+    `ApprovalRequest.id` 强制 ULID（它会被拼进文件路径），所以这里从 task_id
+    派生一个合法 ULID：拿 task_id 的前缀 + 步骤序号，同一步永远得到同一个。
+    """
+    index = [s.id for s in state.plan.steps].index(step.id)
+    # 十六进制的 0-9A-F 全都在 Crockford Base32 字母表里（它排除的是 I/L/O/U），
+    # 所以直接拿它当后两位，得到的仍然是一个合法 ULID。步骤数上限 12，两位够了。
+    return state.task_id[:-2] + f"{index:02X}"
 
 
 def _first_error(state: RunState) -> str:

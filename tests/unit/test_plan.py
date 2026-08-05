@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from anthill.core.errors import PlanError
 from anthill.orchestrator.plan import (
@@ -181,3 +182,101 @@ async def test_generate_plan_prompt_lists_the_available_roster() -> None:
 def test_step_assignee_accepts_both_name_and_role_forms() -> None:
     assert PlanStep(id="s1", assignee="coder", task="x").is_role is False
     assert PlanStep(id="s2", assignee="role:reviewer", task="x").is_role is True
+
+
+# ---------- 编排能表达的形状 ----------
+
+
+def test_for_each_expands_at_validation_time() -> None:
+    """在计划阶段展开而不是运行时：展开完仍然是一张静态 DAG，
+    调度、看板、崩溃恢复、状态机一行都不用改。"""
+    plan = Plan.model_validate(
+        {
+            "goal": "给每个文件补单测",
+            "steps": [
+                {
+                    "id": "t",
+                    "assignee": "coder",
+                    "task": "给 {item} 补单测",
+                    "for_each": ["a.py", "b.py"],
+                }
+            ],
+            "done_when": "",
+        }
+    )
+
+    assert [s.id for s in plan.steps] == ["t__1", "t__2"]
+    assert [s.task for s in plan.steps] == ["给 a.py 补单测", "给 b.py 补单测"]
+
+
+def test_a_fallback_step_becomes_ready_when_upstream_fails() -> None:
+    """兜底步骤等的**就是**上游失败 —— 只看 done 的话它永远等不到。"""
+    plan = Plan.model_validate(
+        {
+            "goal": "g",
+            "steps": [
+                {"id": "s1", "assignee": "coder", "task": "试试新办法"},
+                {
+                    "id": "fix",
+                    "assignee": "coder",
+                    "task": "退回老办法",
+                    "depends_on": ["s1"],
+                    "run_if": "upstream_failed",
+                },
+            ],
+            "done_when": "",
+        }
+    )
+
+    after_ok = plan.ready(done={"s1"}, taken={"s1"}, dead=set())
+    after_fail = plan.ready(done=set(), taken={"s1"}, dead={"s1"})
+
+    assert [s.id for s in after_ok] == []  # 上游成了，兜底不该跑
+    assert [s.id for s in after_fail] == ["fix"]
+
+
+def test_an_always_step_runs_either_way() -> None:
+    plan = Plan.model_validate(
+        {
+            "goal": "g",
+            "steps": [
+                {"id": "s1", "assignee": "coder", "task": "干活"},
+                {
+                    "id": "clean",
+                    "assignee": "coder",
+                    "task": "收尾",
+                    "depends_on": ["s1"],
+                    "run_if": "always",
+                },
+            ],
+            "done_when": "",
+        }
+    )
+
+    assert [s.id for s in plan.ready(done={"s1"}, taken={"s1"}, dead=set())] == ["clean"]
+    assert [s.id for s in plan.ready(done=set(), taken={"s1"}, dead={"s1"})] == ["clean"]
+
+
+def test_a_conditional_step_without_dependencies_is_refused() -> None:
+    """写了 run_if 却没有 depends_on ——「上游」指的是谁？"""
+    with pytest.raises(ValidationError, match="上游"):
+        Plan.model_validate(
+            {
+                "goal": "g",
+                "steps": [{"id": "s1", "assignee": "c", "task": "t", "run_if": "upstream_failed"}],
+                "done_when": "",
+            }
+        )
+
+
+def test_per_step_timeout_defaults_to_zero_meaning_global() -> None:
+    plan = Plan.model_validate(
+        {
+            "goal": "g",
+            "steps": [{"id": "s1", "assignee": "c", "task": "t", "timeout": 30}],
+            "done_when": "",
+        }
+    )
+
+    assert plan.steps[0].timeout == 30
+    assert PlanStep(id="x", assignee="c", task="t").timeout == 0

@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from anthill.core.atomic import atomic_write
 from anthill.core.ids import is_valid_id, now
-from anthill.orchestrator.plan import Plan
+from anthill.orchestrator.plan import Plan, RunIf
 
 STATE_FILE = "state.json"
 TASKS_DIR = "tasks"
@@ -140,7 +140,12 @@ class RunState(BaseModel):
     def ready_steps(self) -> tuple[str, ...]:
         """排除所有非 pending 的步骤，否则失败的那步会被当成「还没派」反复重派。"""
         taken = {r.id for r in self.steps if r.state is not StepState.PENDING}
-        return tuple(s.id for s in self.plan.ready(done=self.done_ids, taken=taken))
+        return tuple(
+            s.id
+            for s in self.plan.ready(
+                done=self.done_ids, taken=taken, dead=self.failed_ids | self.skipped_ids
+            )
+        )
 
     def block_unreachable(self) -> RunState:
         """上游失败/跳过的步骤永远等不到依赖，标成 skipped，让这次运行能收敛。
@@ -152,7 +157,10 @@ class RunState(BaseModel):
             blocked = {
                 r.id
                 for r in state.steps
-                if r.state is StepState.PENDING and any(_dead(state, dep) for dep in r.depends_on)
+                if r.state is StepState.PENDING
+                and any(_dead(state, dep) for dep in r.depends_on)
+                # 兜底/收尾步骤要的**就是**上游失败这件事，别把它们一起标掉
+                and _wants_upstream_ok(state, r.id)
             }
             if not blocked:
                 return state
@@ -229,6 +237,15 @@ class RunState(BaseModel):
 
 def _dead(state: RunState, step_id: str) -> bool:
     return state.step(step_id).state in (StepState.FAILED, StepState.SKIPPED)
+
+
+def _wants_upstream_ok(state: RunState, step_id: str) -> bool:
+    """这一步是不是「上游得成功我才跑」。
+
+    `run_if = upstream_failed` / `always` 的步骤正相反 —— 它们等的就是失败，
+    被 `block_unreachable` 一起标成 skipped 的话，兜底逻辑永远不会执行。
+    """
+    return state.plan.step(step_id).run_if is RunIf.OK
 
 
 class RunStore:

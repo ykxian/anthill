@@ -26,6 +26,7 @@ from anthill.orchestrator.coordinator import CoordinatorHandler, CoordinatorSett
 from anthill.orchestrator.state import RunStore, StepState
 from anthill.providers.base import ToolCall, Turn
 from anthill.providers.fake import FakeProvider
+from anthill.security.approvals import ApprovalStore
 
 TIMEOUT = 10.0
 
@@ -118,7 +119,7 @@ def finish_turn(summary: str, artifacts: tuple[str, ...] = ()) -> Turn:
 
 @asynccontextmanager
 async def running(
-    layout: NodeLayout, config: Config, name: str, handler: object
+    layout: NodeLayout, config: Config, name: str, handler: object, tick: float = 0.1
 ) -> AsyncIterator[AgentRuntime]:
     runtime = AgentRuntime(
         layout=layout,
@@ -126,7 +127,7 @@ async def running(
         agent_name=name,
         handler=handler,  # type: ignore[arg-type]
         log=EventLog(layout.log_file(name), agent=name, echo=False),
-        tick_interval=0.1,
+        tick_interval=tick,
     )
     stop = asyncio.Event()
     task = asyncio.create_task(runtime.run(stop))
@@ -795,3 +796,91 @@ async def test_retries_are_bounded(layout: NodeLayout, node: Config) -> None:
     state = RunStore(layout.blackboard).all()[0]
     assert state.step("s1").state is StepState.FAILED
     assert state.step("s1").attempts == 2
+
+
+# ---------- 人工审批节点 ----------
+
+
+def plan_with_approval() -> Turn:
+    return Turn(
+        text=json.dumps(
+            {
+                "goal": "上线前先让人点个头",
+                "steps": [
+                    {
+                        "id": "s1",
+                        "assignee": "coder",
+                        "task": "把改动发上去",
+                        "needs_approval": True,
+                    }
+                ],
+                "done_when": "",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+async def test_a_step_that_needs_approval_is_not_dispatched_until_someone_says_yes(
+    layout: NodeLayout, node: Config
+) -> None:
+    """审批那套（security/approvals.py）本来就在，编排层却从没用过 ——
+    「让人在关键一步之前确认」以前只能靠 Agent 自己触发危险操作时被策略引擎拦下，
+    非常间接。现在它是计划里的一等公民。
+    """
+    boss = FakeProvider([plan_with_approval(), verdict_turn(satisfied=True)])
+    coder_box = Mailbox(layout.mailbox_dir("coder"))
+
+    async with running(layout, node, "boss", coordinator_handler(layout, boss)):
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(ApprovalStore(layout.root).pending()))
+        await asyncio.sleep(0.3)
+
+        # 没批之前，那一步一个字都没发出去
+        assert not coder_box.list_new(), "没人点头就把活派出去了"
+        request = ApprovalStore(layout.root).pending()[0]
+        assert "s1" in request.prompt
+
+        ApprovalStore(layout.root).answer(request.id, approved=True, by="我")
+        # 等的是这条断言自己的前置条件 —— 信封落地发生在落盘之前，
+        # 只等「消息到了」会抢在 state.json 写完之前
+        await wait_until(
+            lambda: RunStore(layout.blackboard).all()[0].step("s1").state is StepState.RUNNING
+        )
+
+    assert coder_box.list_new(), "批了之后活得真的派出去"
+
+
+async def test_rejecting_a_step_fails_it_instead_of_hanging(
+    layout: NodeLayout, node: Config
+) -> None:
+    """拒绝是个明确答复，不该表现成「一直等」。"""
+    boss = FakeProvider([plan_with_approval(), verdict_turn()])
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+
+    async with running(layout, node, "boss", coordinator_handler(layout, boss)):
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(ApprovalStore(layout.root).pending()))
+        request = ApprovalStore(layout.root).pending()[0]
+        ApprovalStore(layout.root).answer(request.id, approved=False, by="我")
+        await wait_until(lambda: bool(finals_in(cli_box)))
+
+    state = RunStore(layout.blackboard).all()[0]
+    assert state.step("s1").state is StepState.FAILED
+    assert "拒绝" in state.step("s1").error
+    assert not Mailbox(layout.mailbox_dir("coder")).list_new()
+
+
+async def test_waiting_does_not_pile_up_duplicate_requests(
+    layout: NodeLayout, node: Config
+) -> None:
+    """每次 tick 都重算一次审批 id —— 不稳定的话会每几秒提交一条新请求，
+    把 approvals/ 刷爆，人也不知道该批哪条。"""
+    boss = FakeProvider([plan_with_approval(), verdict_turn()])
+
+    async with running(layout, node, "boss", coordinator_handler(layout, boss), tick=0.05):
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(ApprovalStore(layout.root).pending()))
+        await asyncio.sleep(0.5)  # 让 tick 转好几轮
+
+        assert len(ApprovalStore(layout.root).pending()) == 1

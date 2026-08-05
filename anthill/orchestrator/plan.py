@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from enum import StrEnum
 from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -18,6 +19,8 @@ from anthill.providers.base import ChatProvider, Msg
 
 MAX_PLAN_ATTEMPTS = 3
 MAX_STEPS = 12
+FANOUT_SEPARATOR = "__"
+ITEM_PLACEHOLDER = "{item}"
 ROLE_PREFIX = "role:"
 STEP_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,16}$")
 
@@ -35,6 +38,13 @@ PLAN_PROMPT = """\
 - `assignee` 写具体 Agent 名，或 `role:角色名`（同角色多人时由系统挑负载最低的）。
 - `depends_on` 写依赖的步骤 id；没有依赖就留空数组，它们会被并发派发。
 - `done_when` 写一句可判定的完成标准，最后由你自己拿它对照结果。
+
+可选字段（**用不上就别写**，绝大多数计划都不需要）：
+- `run_if`: `"upstream_failed"` 让这步只在上游失败时跑（兜底/回滚），
+  `"always"` 让它无论成败都跑（收尾/清理）。写了就必须有 depends_on。
+- `needs_approval`: true 表示派出去之前要人点头。只给真正有后果的那一步用。
+- `timeout`: 这一步的秒数上限，不写就用全局默认。
+- `for_each`: 一个列表，把这步展开成多个并发步骤，任务正文里写 `{{item}}` 占位。
 
 JSON 结构：
 {{
@@ -68,6 +78,24 @@ class RosterEntry(BaseModel):
         return f"- {self.name}（角色 {self.role}）{suffix}"
 
 
+class RunIf(StrEnum):
+    """这一步在什么条件下才跑。
+
+    没有表达式语言 —— 那会变成一门要文档、要转义、要防注入的小语言，而计划是
+    **模型生成**的，语言越花它写错的概率越高。三个取值覆盖真实需要的分支：
+    正常路径、失败兜底（清理/回滚/降级）、以及无论如何都要跑的收尾。
+    """
+
+    OK = "ok"
+    """默认：上游全部成功才跑。"""
+
+    UPSTREAM_FAILED = "upstream_failed"
+    """上游有失败才跑 —— 兜底、回滚、换条路。"""
+
+    ALWAYS = "always"
+    """无论上游成败都跑 —— 收尾、清理、通知。"""
+
+
 class PlanStep(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -75,6 +103,33 @@ class PlanStep(BaseModel):
     assignee: str
     task: str = Field(min_length=1, max_length=4_000)
     depends_on: tuple[str, ...] = ()
+
+    run_if: RunIf = RunIf.OK
+    """条件分支。见 `RunIf`。"""
+
+    needs_approval: bool = False
+    """派出去之前先等人点头。
+
+    审批那套（`security/approvals.py`）本来就在，只是编排层从没用过 ——
+    于是「让人在关键一步之前确认」这个最常见的需求，只能靠 Agent 自己触发
+    危险操作时被策略引擎拦下，非常间接。这里把它做成计划里的一等公民。
+    """
+
+    timeout: float = Field(default=0.0, ge=0)
+    """这一步的超时（秒）。0 = 用 coordinator 的全局默认。
+
+    `StepRecord.attempts` 早就有了，每步超时却一直只有全局一个值 ——
+    「写代码给 20 分钟、跑个 lint 给 30 秒」这种再普通不过的要求表达不了。
+    """
+
+    for_each: tuple[str, ...] = ()
+    """对一个列表展开成多步（map）。
+
+    `for_each = ["a.py", "b.py"]` 会在计划校验阶段展开成 `<id>__1` / `<id>__2`
+    两个并发步骤，任务正文里的 `{item}` 被替换掉。
+    **在计划阶段展开而不是运行时**：展开后仍然是一张静态 DAG，
+    调度、看板、崩溃恢复一行都不用改。
+    """
 
     @model_validator(mode="after")
     def _check_id(self) -> Self:
@@ -99,6 +154,33 @@ class Plan(BaseModel):
     steps: tuple[PlanStep, ...] = Field(min_length=1, max_length=MAX_STEPS)
     done_when: str = Field(default="", max_length=2_000)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _expand_for_each(cls, data: Any) -> Any:
+        """把 `for_each` 的步骤在**校验之前**展开。
+
+        展开完仍然是一张静态 DAG —— 调度、看板、崩溃恢复、状态机一行都不用改。
+        运行时展开的话，那四样东西全都要处理「步骤数会变」这件事。
+        """
+        if not isinstance(data, dict):
+            return data
+        steps = data.get("steps")
+        if not isinstance(steps, list):
+            return data
+        expanded: list[Any] = []
+        for step in steps:
+            items = step.get("for_each") if isinstance(step, dict) else None
+            if not items:
+                expanded.append(step)
+                continue
+            for index, item in enumerate(items, start=1):
+                clone = {k: v for k, v in step.items() if k != "for_each"}
+                clone["id"] = f"{step.get('id', 's')}{FANOUT_SEPARATOR}{index}"
+                clone["task"] = str(step.get("task", "")).replace(ITEM_PLACEHOLDER, str(item))
+                expanded.append(clone)
+        data = {**data, "steps": expanded}
+        return data
+
     @model_validator(mode="after")
     def _check_graph(self) -> Self:
         ids = [s.id for s in self.steps]
@@ -113,6 +195,12 @@ class Plan(BaseModel):
                 raise ValueError(f"步骤 {step.id} 依赖了自己")
         if _has_cycle(self.steps):
             raise ValueError("步骤依赖成环，无法拓扑调度")
+        for step in self.steps:
+            if step.run_if is not RunIf.OK and not step.depends_on:
+                raise ValueError(
+                    f"步骤 {step.id} 写了 run_if={step.run_if} 却没有 depends_on —— "
+                    "「上游」指的是谁？"
+                )
         return self
 
     def step(self, step_id: str) -> PlanStep:
@@ -121,19 +209,37 @@ class Plan(BaseModel):
                 return step
         raise KeyError(f"计划里没有步骤 {step_id!r}")
 
-    def ready(self, *, done: set[str], taken: set[str]) -> tuple[PlanStep, ...]:
-        """依赖已全部完成、且自己还没被处理过的步骤 —— 它们可以并发派发。
+    def ready(
+        self, *, done: set[str], taken: set[str], dead: set[str] | None = None
+    ) -> tuple[PlanStep, ...]:
+        """依赖已经落定、且自己还没被处理过的步骤 —— 它们可以并发派发。
 
         `taken` 必须包含**所有非 pending 的步骤**（在跑的、成功的、失败的、跳过的）。
         只排除「在跑的」会让失败步骤看起来又变回可派发 —— 那就是每个 tick 重派一次的死循环。
+
+        `dead`（失败/跳过的）是 `run_if` 用的：兜底步骤等的**就是**上游失败，
+        只看 `done` 的话它永远等不到。
         """
+        gone = dead or set()
+        settled = done | gone
         return tuple(
             step
             for step in self.steps
-            if step.id not in taken
-            and step.id not in done
-            and all(dep in done for dep in step.depends_on)
+            if step.id not in taken and step.id not in done and _deps_satisfied(step, done, settled)
         )
+
+
+def _deps_satisfied(step: PlanStep, done: set[str], settled: set[str]) -> bool:
+    """依赖满足没有 —— 判据取决于这一步在等什么。"""
+    if step.run_if is RunIf.OK:
+        return all(dep in done for dep in step.depends_on)
+    if step.run_if is RunIf.ALWAYS:
+        # 收尾/清理：上游落定就行，成败都不管
+        return all(dep in settled for dep in step.depends_on)
+    # upstream_failed：上游全部落定，且**至少有一个**真的失败了
+    return all(dep in settled for dep in step.depends_on) and any(
+        dep in (settled - done) for dep in step.depends_on
+    )
 
 
 def _has_cycle(steps: tuple[PlanStep, ...]) -> bool:
