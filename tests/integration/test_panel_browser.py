@@ -113,6 +113,27 @@ def fresh_panel(tmp_path: Path) -> Iterator[str]:
     yield from serve(None, cwd=empty, home=tmp_path / "home")
 
 
+@pytest.fixture
+def bridge_panel(tmp_path: Path) -> Iterator[str]:
+    """一个装着桥接 Agent、并且已经有人在等它回话的工作区。"""
+    workspace = tmp_path / "ws"
+    layout = NodeLayout(workspace)
+    create_workspace(layout, node_name="bridgebox")
+    layout.node_toml.write_text(
+        layout.node_toml.read_text(encoding="utf-8")
+        + '\n[agents.cc]\nrole = "worker"\nbridge = true\n',
+        encoding="utf-8",
+    )
+    inbox = layout.agent_dir("cc") / "bridge" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / "01KZ000000000000000000000A.md").write_text(
+        "---\nfrom: bridgebox:cli\nto: bridgebox:cc\ntype: chat\n---\n"
+        "这块接口我想改成异步的，你那边有依赖吗\n",
+        encoding="utf-8",
+    )
+    yield from serve(workspace, home=tmp_path / "home")
+
+
 def open_panel(browser: object, url: str) -> tuple[object, list[str]]:
     page = browser.new_page(viewport={"width": 1440, "height": 900})  # type: ignore[attr-defined]
     errors: list[str] = []
@@ -243,5 +264,51 @@ def test_a_brand_new_machine_can_create_its_workspace_from_the_page(
     page.wait_for_function(
         "() => document.getElementById('node').textContent === 'newbox'", timeout=20000
     )
+    assert errors == []
+    page.close()
+
+
+def test_the_bridge_tab_shows_the_queue_and_can_answer_it(
+    browser: object, bridge_panel: str, tmp_path: Path
+) -> None:
+    """「加它的地方和用它的地方是同一个地方」的验收。
+
+    以前在网页上加完 bridge Agent，页面上一点痕迹都没有 ——
+    还得去终端交代一遍「盯着那个目录」，而目录里空着，看着像没建成功。
+    """
+    page, errors = open_panel(browser, bridge_panel)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+
+    page.click('.tab[data-pane="bridge"]')
+    page.wait_for_selector("#bridge-body .waiting", timeout=15000)
+
+    assert "异步" in page.text_content("#bridge-body")
+    assert "inbox" in page.text_content("#bridge-prompt")  # 想粘给会话的那句话也在
+
+    page.fill("#bridge-body textarea", "有依赖，scheduler 里同步调的")
+    page.click("#bridge-body button")
+    page.wait_for_selector("#bridge-hint.ok", timeout=15000)
+
+    # 在页面上回的那句，落成的还是 outbox 里那个文件 —— 剩下的路和手写的完全一样，
+    # 由 bridge adapter 发出去（那段另有测试，这里不起 agentd，所以队列不会自己清空）。
+    draft = (
+        NodeLayout(tmp_path / "ws").agent_dir("cc")
+        / "bridge"
+        / "outbox"
+        / "01KZ000000000000000000000A.md"
+    )
+    assert draft.is_file()
+    assert "scheduler" in draft.read_text(encoding="utf-8")
+    assert errors == []
+    page.close()
+
+
+def test_a_node_without_a_bridge_agent_hides_the_tab(browser: object, panel: str) -> None:
+    """没有桥接 Agent 的节点不该看见一个点开全是空的标签页。"""
+    page, errors = open_panel(browser, panel)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+    page.wait_for_timeout(600)
+
+    assert page.is_hidden('.tab[data-pane="bridge"]')
     assert errors == []
     page.close()

@@ -297,6 +297,22 @@ button.danger:hover { color: var(--bad); border-color: color-mix(in srgb, var(--
   background: var(--paper); position: sticky; bottom: 0;
 }
 
+/* ---- 桥接：那个「人」的收件箱 ---- */
+.waiting {
+  border: 1px solid var(--line-soft); border-radius: var(--r);
+  background: var(--surface); padding: 14px 16px; margin-bottom: 10px;
+  box-shadow: var(--shadow);
+}
+.waiting .from { font-weight: 600; }
+.waiting .said { margin: 8px 0 10px; white-space: pre-wrap; word-break: break-word; }
+.waiting textarea { width: 100%; min-height: 76px; font-family: var(--sans); font-size: 13.5px; }
+.copy-line {
+  display: flex; gap: 8px; align-items: flex-start;
+  background: var(--surface-2); border: 1px solid var(--line-soft);
+  border-radius: var(--r); padding: 10px 12px; margin-bottom: 14px;
+}
+.copy-line code { flex: 1; min-width: 0; color: var(--muted); word-break: break-all; }
+
 /* ---- 工作区 ---- */
 .ws {
   display: flex; align-items: center; gap: 10px; padding: 10px 12px;
@@ -354,6 +370,7 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
       <button class="tab on" type="button" data-pane="runs">任务看板</button>
       <button class="tab" type="button" data-pane="chat">对话</button>
       <button class="tab" type="button" data-pane="events">消息流</button>
+      <button class="tab" type="button" data-pane="bridge" hidden>桥接</button>
       <button class="tab" type="button" data-pane="setup" hidden>工作区</button>
       <button class="tab" type="button" data-pane="config" hidden>配置</button>
     </nav>
@@ -383,6 +400,28 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
     <section class="pane" id="pane-events" hidden>
       <div class="eyebrow">消息流 <span class="count" id="events-count"></span></div>
       <div id="stream-body"></div>
+    </section>
+
+    <section class="pane hold" id="pane-bridge" hidden>
+      <div class="eyebrow">
+        桥接 <select id="bridge-pick" aria-label="哪个桥接 Agent"></select>
+        <span class="count" id="bridge-count"></span>
+      </div>
+      <div class="copy-line">
+        <code id="bridge-prompt"></code>
+        <button class="ghost" id="bridge-copy" type="button">复制</button>
+      </div>
+      <p class="meta" style="margin:-6px 0 14px">
+        这句话是给你那个常开的 Claude Code 会话粘的 —— 让它盯着目录自动收发。
+        不想开会话也行：下面的消息你可以直接在这儿回。
+      </p>
+      <form class="actions" id="bridge-say" style="margin-bottom:16px">
+        <input id="bridge-to" placeholder="主动说一句：发给谁（如 coder 或 lab:coder）" autocomplete="off" style="flex:0 0 260px" />
+        <input id="bridge-text" placeholder="说点什么…" autocomplete="off" />
+        <button type="submit">发出去</button>
+      </form>
+      <div id="bridge-body"></div>
+      <div class="hint" id="bridge-hint" hidden></div>
     </section>
 
     <section class="pane hold" id="pane-setup" hidden>
@@ -632,7 +671,7 @@ function draw() {
   renderTopo(state.nodes);
   renderRuns(state.nodes);
   renderEvents(state.nodes);
-  if (canWrite) { syncConfigNodes(); syncAgentPicker(); }
+  if (canWrite) { syncConfigNodes(); syncAgentPicker(); syncBridgePicker(); }
 }
 
 function applyCluster(data) {
@@ -777,8 +816,95 @@ $("chat-form").addEventListener("submit", async (event) => {
   }
 });
 
+// ---- 桥接：在页面上当那个「人」 ----
+// 桥接 Agent 收到的消息本来就是文件（bridge/inbox/*.md），这里只是把同一批文件
+// 摆到页面上。写回去的也还是文件，所以和盯着目录的 Claude Code 会话完全并存。
+const bridge = { agent: "", seen: "" };
+
+function bridgeAgents() {
+  const here = state.nodes.find((n) => n.local);
+  return (here?.agents || []).filter((a) => a.provider === "bridge").map((a) => a.name);
+}
+
+function syncBridgePicker() {
+  const names = bridgeAgents();
+  const tab = document.querySelector('.tab[data-pane="bridge"]');
+  if (tab) tab.hidden = !canWrite || names.length === 0;   // 没有桥接 Agent 就别摆这个标签页
+  const picker = $("bridge-pick");
+  if (picker.dataset.signature === names.join(",")) return;
+  picker.dataset.signature = names.join(",");
+  picker.innerHTML = names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+  if (!names.includes(bridge.agent)) bridge.agent = names[0] || "";
+  picker.value = bridge.agent;
+}
+
+function renderBridge(info) {
+  $("bridge-count").textContent = info.waiting.length
+    ? `${info.waiting.length} 条在等你`
+    : "没有在等你的消息";
+  $("bridge-prompt").textContent = info.prompt;
+  paint($("bridge-body"), info.waiting.length
+    ? info.waiting.map((w) => `
+      <div class="waiting">
+        <div class="row">
+          <span class="from">${esc(w.frm || "?")}</span>
+          <span class="pill">${esc(w.type || "chat")}</span>
+          <span class="grow"></span>
+          <span class="meta">${esc(w.short)}</span>
+        </div>
+        <div class="said">${esc(w.body)}</div>
+        <textarea data-reply="${esc(w.id)}" placeholder="替它回一句…"></textarea>
+        <div class="actions" style="margin-top:8px">
+          <button type="button" data-send-reply="${esc(w.id)}">回复</button>
+        </div>
+      </div>`).join("")
+    : `<div class="empty">还没有人找它 —— 给它发条消息试试（对话那一页）</div>`);
+}
+
+async function loadBridge() {
+  syncBridgePicker();
+  if (!bridge.agent) return;
+  try {
+    renderBridge(await api(u(scoped(`api/bridge/${encodeURIComponent(bridge.agent)}`))));
+    say("bridge-hint", "");
+  } catch (err) {
+    say("bridge-hint", String(err.message || err), "bad");
+  }
+}
+
+$("bridge-pick").addEventListener("change", (event) => {
+  bridge.agent = event.target.value;
+  loadBridge();
+});
+
+$("bridge-copy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("bridge-prompt").textContent);
+    say("bridge-hint", "已复制 —— 粘给你的 Claude Code 会话", "ok");
+  } catch (err) {
+    say("bridge-hint", "浏览器不让复制，手动选中上面那行吧", "bad");
+  }
+});
+
+$("bridge-say").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const to = $("bridge-to").value.trim();
+  const text = $("bridge-text").value.trim();
+  if (!to || !text) return;
+  try {
+    await api(u(scoped(`api/bridge/${encodeURIComponent(bridge.agent)}/speak`)), {
+      method: "POST",
+      body: JSON.stringify({ to, text }),
+    });
+    $("bridge-text").value = "";
+    say("bridge-hint", `已以 ${bridge.agent} 的身份发给 ${to}`, "ok");
+  } catch (err) {
+    say("bridge-hint", String(err.message || err), "bad");
+  }
+});
+
 // ---- 标签页 ----
-const PANES = ["runs", "chat", "events", "setup", "config"];
+const PANES = ["runs", "chat", "events", "bridge", "setup", "config"];
 
 function showPane(name) {
   for (const pane of PANES) {
@@ -789,6 +915,7 @@ function showPane(name) {
     tab.classList.toggle("on", tab.dataset.pane === name);
   }
   if (name === "chat") { syncAgentPicker(); loadChat(); }
+  if (name === "bridge") loadBridge();
   if (name === "setup") refreshSetup();
   if (name === "config") loadConfig();
 }
@@ -872,8 +999,29 @@ document.addEventListener("click", (event) => {
   const pair = event.target.closest?.("[data-pair]");
   if (pair) { startPairing(pair.dataset.pair); return; }
   const op = event.target.closest?.("[data-agent]");
-  if (op) runAgentOp(op.dataset.agent, op.dataset.op, op.dataset.node, op);
+  if (op) { runAgentOp(op.dataset.agent, op.dataset.op, op.dataset.node, op); return; }
+  const answer = event.target.closest?.("[data-send-reply]");
+  if (answer) sendBridgeReply(answer.dataset.sendReply, answer);
 });
+
+async function sendBridgeReply(msgId, button) {
+  const box = document.querySelector(`[data-reply="${msgId}"]`);
+  const text = (box?.value || "").trim();
+  if (!text) { say("bridge-hint", "先写点什么", "bad"); return; }
+  button.disabled = true;
+  try {
+    await api(u(scoped(`api/bridge/${encodeURIComponent(bridge.agent)}/reply/${encodeURIComponent(msgId)}`)), {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    say("bridge-hint", "已回复 —— 下一轮 tick 就发出去", "ok");
+    setTimeout(loadBridge, 1200);
+  } catch (err) {
+    say("bridge-hint", String(err.message || err), "bad");
+  } finally {
+    button.disabled = false;
+  }
+}
 
 async function removeWorkspace(path, purge) {
   const what = purge
@@ -1090,6 +1238,7 @@ pickUpToken();
 poll();
 setInterval(poll, CLUSTER_REFRESH);
 setInterval(() => { if (!$("pane-chat").hidden) loadChat(); }, 2000);
+setInterval(() => { if (!$("pane-bridge").hidden) loadBridge(); }, 3000);
 connect();
 enableActions();
 </script>

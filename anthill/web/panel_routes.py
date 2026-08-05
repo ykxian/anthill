@@ -41,6 +41,10 @@ from anthill.web.actions import (
     write_config,
 )
 from anthill.web.agents import AgentSpec, add_agent, remove_agent, start_agent, stop_agent
+from anthill.web.bridge_panel import BridgeReply
+from anthill.web.bridge_panel import inbox as bridge_inbox
+from anthill.web.bridge_panel import reply as bridge_reply
+from anthill.web.bridge_panel import speak as bridge_speak
 from anthill.web.chat import messages as chat_messages
 from anthill.web.chat import threads as chat_threads
 from anthill.web.cluster import build_cluster
@@ -139,6 +143,16 @@ def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog, token: str 
             return browse(path)
         except AntHillError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(f"{PANEL_PATH}/api/bridge/{{agent}}")
+    async def panel_bridge(request: Request, agent: str, node: str = "") -> dict[str, Any]:
+        """桥接 Agent 那边在等什么 —— 加它的地方和用它的地方该是同一个地方。"""
+        authorize(request, token, what="桥接收件箱")
+        ctx = _pick(nodes, node)
+        try:
+            return bridge_inbox(ctx.layout, ctx.config, agent)
+        except AntHillError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get(f"{PANEL_PATH}/api/state")
     async def panel_state(request: Request, node: str = "") -> dict[str, Any]:
@@ -312,6 +326,31 @@ def mount_panel_actions(
             if held is not None:
                 nodes.detach(held.name)  # 先不再照看它，再动盘
             return delete_workspace(path, purge=purge)
+        except AntHillError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(f"{PANEL_PATH}/api/bridge/{{agent}}/reply/{{msg_id}}", status_code=201)
+    async def panel_bridge_reply(
+        request: Request, agent: str, msg_id: str, body: BridgeReply = Body(...), node: str = ""
+    ) -> dict[str, Any]:
+        """在页面上替这个人回一句。写的还是 outbox 里那个文件，
+        所以和盯着目录的 Claude Code 会话完全并存。"""
+        _guard(request)
+        ctx = _pick(nodes, node)
+        try:
+            return bridge_reply(ctx.layout, ctx.config, agent, msg_id, body)
+        except AntHillError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(f"{PANEL_PATH}/api/bridge/{{agent}}/speak", status_code=201)
+    async def panel_bridge_speak(
+        request: Request, agent: str, body: BridgeReply = Body(...), node: str = ""
+    ) -> dict[str, Any]:
+        """以这个桥接 Agent 的身份主动说一句 —— 人随时插进正在进行的协作里。"""
+        _guard(request)
+        ctx = _pick(nodes, node)
+        try:
+            return bridge_speak(ctx.layout, ctx.config, agent, body)
         except AntHillError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

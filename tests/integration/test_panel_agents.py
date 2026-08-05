@@ -346,3 +346,126 @@ def test_the_panel_does_not_call_a_bridge_agent_echo(node: Bundle) -> None:
     assert brains["cc"] == "bridge"
     assert brains["term"] == "claude"
     assert brains["echo"] == "echo"
+
+
+# ---------- 在面板上当那个「人」 ----------
+
+
+def bridge_node(tmp_path: Path) -> Bundle:
+    layout = NodeLayout(tmp_path / "ws")
+    create_workspace(layout, node_name="box")
+    layout.node_toml.write_text(
+        layout.node_toml.read_text(encoding="utf-8")
+        + '\n[agents.cc]\nrole = "worker"\nbridge = true\n',
+        encoding="utf-8",
+    )
+    return layout, Config.load_from(layout), PeerRegistry(layout.root)
+
+
+def waiting_note(layout: NodeLayout, msg_id: str = "01KZ000000000000000000000A") -> str:
+    """伪造一条「在等人回」的消息 —— agentd 收到消息时写的就是这种文件。"""
+    inbox = layout.agent_dir("cc") / "bridge" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / f"{msg_id}.md").write_text(
+        f"---\nfrom: box:cli\nto: box:cc\ntype: chat\nthread: T1\nmsg_id: {msg_id}\n---\n"
+        "这块接口我想改成异步的，你那边有依赖吗\n",
+        encoding="utf-8",
+    )
+    return msg_id
+
+
+async def test_the_panel_shows_what_the_bridge_agent_is_waiting_on(tmp_path: Path) -> None:
+    """加它的地方和用它的地方该是同一个地方。
+
+    以前在网页上加完 bridge Agent 之后，页面上什么都看不到 ——
+    还得去终端交代一遍「盯着那个目录」。
+    """
+    node = bridge_node(tmp_path)
+    waiting_note(node[0])
+
+    async with client_for(node) as client:
+        body = (await client.get("/panel/api/bridge/cc")).json()
+
+    assert len(body["waiting"]) == 1
+    assert "异步" in body["waiting"][0]["body"]
+    assert body["waiting"][0]["frm"] == "box:cli"
+    assert body["dir"].endswith("agents/cc/bridge")
+    assert "inbox" in body["prompt"] and "outbox" in body["prompt"]  # 给会话粘的那句话
+
+
+async def test_replying_from_the_panel_writes_the_same_file_a_human_would(
+    tmp_path: Path,
+) -> None:
+    """页面上回的那句，落成的还是 outbox 里那个文件 ——
+    所以和盯着目录的 Claude Code 会话完全并存，不是另起一套。"""
+    node = bridge_node(tmp_path)
+    layout = node[0]
+    msg_id = waiting_note(layout)
+
+    async with client_for(node) as client:
+        response = await client.post(
+            f"/panel/api/bridge/cc/reply/{msg_id}", json={"text": "有依赖，scheduler 里同步调的"}
+        )
+
+    assert response.status_code == 201, response.text
+    draft = layout.agent_dir("cc") / "bridge" / "outbox" / f"{msg_id}.md"
+    assert draft.is_file()
+    assert "scheduler" in draft.read_text(encoding="utf-8")
+
+
+async def test_speaking_up_from_the_panel_needs_a_recipient(tmp_path: Path) -> None:
+    node = bridge_node(tmp_path)
+
+    async with client_for(node) as client:
+        blank = await client.post("/panel/api/bridge/cc/speak", json={"text": "喂"})
+        good = await client.post(
+            "/panel/api/bridge/cc/speak", json={"to": "coder", "text": "这块我来改，你别动"}
+        )
+
+    assert blank.status_code == 400
+    assert good.status_code == 201
+    drafts = list((node[0].agent_dir("cc") / "bridge" / "outbox").glob("*.md"))
+    assert len(drafts) == 1
+    assert "to: coder" in drafts[0].read_text(encoding="utf-8")
+
+
+async def test_a_non_bridge_agent_has_no_bridge_inbox(tmp_path: Path) -> None:
+    node = bridge_node(tmp_path)
+
+    async with client_for(node) as client:
+        response = await client.get("/panel/api/bridge/echo")
+
+    assert response.status_code == 404
+    assert "bridge = true" in response.json()["detail"]
+
+
+async def test_replying_to_something_nobody_asked_is_refused(tmp_path: Path) -> None:
+    """回一条不存在的消息 = 往 outbox 里塞一个没人认领的文件，直接拦掉。"""
+    node = bridge_node(tmp_path)
+
+    async with client_for(node) as client:
+        response = await client.post(
+            "/panel/api/bridge/cc/reply/01KZ000000000000000000000Z", json={"text": "?"}
+        )
+
+    assert response.status_code == 400
+
+
+async def test_a_reply_cannot_be_steered_out_of_the_bridge_directory(tmp_path: Path) -> None:
+    """`msg_id` 从 URL 来，下一步就是个文件名 —— 一个 `../` 就能写到目录外面去。
+
+    能走到这个接口的人本来就有写权限（等价于能在这台机器上执行命令），
+    所以这不是提权；但边界上的东西就该在边界上校验，不靠调用方老实。
+    """
+    node = bridge_node(tmp_path)
+    outside = tmp_path / "偷偷写到这儿.md"
+    outside.write_text("原文", encoding="utf-8")
+    escape = f"../../../../../{outside.stem}"
+
+    async with client_for(node) as client:
+        response = await client.post(
+            f"/panel/api/bridge/cc/reply/{escape}", json={"text": "覆盖掉"}
+        )
+
+    assert response.status_code in (400, 404)
+    assert outside.read_text(encoding="utf-8") == "原文"
