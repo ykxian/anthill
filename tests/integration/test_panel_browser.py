@@ -13,6 +13,7 @@ curl 测的是接口，ASGI 传输测的是路由，**都测不到「浏览器�
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import sys
@@ -47,25 +48,36 @@ def browser() -> Iterator[object]:
         engine.close()
 
 
-@pytest.fixture
-def panel(tmp_path: Path) -> Iterator[str]:
-    """起一个真的 serve，返回面板地址。"""
-    workspace = tmp_path / "ws"
-    create_workspace(NodeLayout(workspace), node_name="browserbox")
+def serve(
+    workspace: Path | None, *, cwd: Path | None = None, home: Path | None = None
+) -> Iterator[str]:
+    """`workspace=None` = 不给 `-w`，让它在 cwd 里找 —— 找不到就是「未配置」。
+
+    给了 `-w` 就是「没有也给我建一个」，那样永远到不了未配置状态。
+
+    **HOME 必须换掉。** 工作区清单和面板令牌都落在 `~/.anthill/`，
+    子进程没法用 monkeypatch 拦 —— 不换的话测试会往开发者的家目录里写东西，
+    而且下一次「全新机器」会把上一次建的工作区认回来，于是根本不新。
+    """
     port = free_port()
+    command = [
+        sys.executable,
+        "-m",
+        "anthill",
+        "serve",
+        "--port",
+        str(port),
+        "--panel-write",
+        "--quiet",
+    ]
+    if workspace is not None:
+        command[4:4] = ["--workspace", str(workspace)]
+    sandbox = home or (cwd or Path.cwd()) / "fake-home"
+    (sandbox / "projects").mkdir(parents=True, exist_ok=True)  # 目录浏览器得有东西可列
     process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "anthill",
-            "serve",
-            "--workspace",
-            str(workspace),
-            "--port",
-            str(port),
-            "--panel-write",
-            "--quiet",
-        ],
+        command,
+        cwd=str(cwd) if cwd else None,
+        env={**os.environ, "HOME": str(sandbox)},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -83,6 +95,22 @@ def panel(tmp_path: Path) -> Iterator[str]:
     finally:
         process.terminate()
         process.wait(timeout=10)
+
+
+@pytest.fixture
+def panel(tmp_path: Path) -> Iterator[str]:
+    """一个已经配好工作区的 serve。"""
+    workspace = tmp_path / "ws"
+    create_workspace(NodeLayout(workspace), node_name="browserbox")
+    yield from serve(workspace, home=tmp_path / "home")
+
+
+@pytest.fixture
+def fresh_panel(tmp_path: Path) -> Iterator[str]:
+    """一台**全新**机器：空目录，没给 -w，所以它不会擅自建 —— 就是「未配置」。"""
+    empty = tmp_path / "brand-new"
+    empty.mkdir()
+    yield from serve(None, cwd=empty, home=tmp_path / "home")
 
 
 def open_panel(browser: object, url: str) -> tuple[object, list[str]]:
@@ -178,4 +206,42 @@ def test_the_sidebar_form_does_not_overflow(browser: object, panel: str) -> None
     )
 
     assert overflow <= 1, f"侧栏横向溢出 {overflow}px"
+    page.close()
+
+
+def test_a_brand_new_machine_can_reach_the_setup_screen(browser: object, fresh_panel: str) -> None:
+    """真出过的死结：探写权限时拿 `api/config` 探，而它在「还没配工作区」时回 409 ——
+    于是全新机器被判成「不能写」，那个**专门给「还没有工作区」准备的**设置界面
+    反而永远出不来，没有任何办法把工作区配起来。
+    """
+    page, errors = open_panel(browser, fresh_panel)
+    page.wait_for_timeout(1500)
+
+    tab = page.query_selector('.tab[data-pane="setup"]')
+    assert tab is not None and not tab.is_hidden(), "工作区标签页没出来 —— 全新机器就没救了"
+
+    tab.click()
+    page.wait_for_selector("#dir-list .dir", timeout=15000)
+    assert not page.is_hidden("#picker")  # 没配好时目录浏览器该直接摊开
+    assert errors == []
+    page.close()
+
+
+def test_a_brand_new_machine_can_create_its_workspace_from_the_page(
+    browser: object, fresh_panel: str, tmp_path: Path
+) -> None:
+    page, errors = open_panel(browser, fresh_panel)
+    page.wait_for_timeout(1500)
+    page.click('.tab[data-pane="setup"]')
+    page.wait_for_selector("#ws-form", timeout=15000)
+
+    page.fill("#ws-name", "made-in-browser")
+    page.fill("#ws-node", "newbox")
+    page.click('#ws-form button[type="submit"]')
+
+    # 认下工作区之后页面会整个重来，节点名应当变成刚填的那个
+    page.wait_for_function(
+        "() => document.getElementById('node').textContent === 'newbox'", timeout=20000
+    )
+    assert errors == []
     page.close()

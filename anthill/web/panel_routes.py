@@ -221,6 +221,19 @@ def mount_panel_actions(
     def _guard(request: Request) -> None:
         authorize(request, token, what="面板的写操作")
 
+    @app.get(f"{PANEL_PATH}/api/can-write")
+    async def panel_can_write(request: Request) -> dict[str, Any]:
+        """页面靠它判断「写入口挂着没有」。
+
+        专门开一个端点，是因为拿别的路由来探会把两件事混起来：
+        **没有写权限**（路由压根不存在，404）和**还没配工作区**（409）。
+        混了的话，一台全新机器上会判成「不能写」，于是那个专门给
+        「还没有工作区」准备的设置界面反而永远出不来 —— 死路一条。
+        这个端点不看节点状态，只回答「你能不能写」。
+        """
+        _guard(request)
+        return {"ok": True}
+
     @app.post(f"{PANEL_PATH}/api/run", status_code=202)
     async def panel_run(
         request: Request, body: RunRequest = Body(...), node: str = ""

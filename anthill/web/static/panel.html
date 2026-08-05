@@ -935,9 +935,11 @@ function say(id, text, kind) {
 
 async function enableActions() {
   try {
-    // 探一个**只在写入口挂着时才存在**的路由。api/setup 是只读那一组的，
-    // 拿它探等于永远探到 true —— 于是没有写权限时也会把按钮摆出来，全部 404。
-    await api(u("api/config"));
+    // 专门的能力探测点。别拿 api/config 之类的业务路由来探 ——
+    // 它在「没有写权限」时 404，在「还没配工作区」时 409，两者混起来的话，
+    // 一台全新机器会被判成不能写，于是那个专门给「还没有工作区」准备的
+    // 设置界面反而永远出不来。
+    await api(u("api/can-write"));
   } catch (err) {
     return false;
   }
