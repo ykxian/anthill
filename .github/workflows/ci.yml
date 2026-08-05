@@ -8,6 +8,9 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # 集成测试里有近百处轮询等待。没有这一行的话，一个没收敛的等待就是一个
+    # 挂到 GitHub 六小时上限才被杀掉的任务 —— 那是一颗已经上膛的枪。
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -23,6 +26,12 @@ jobs:
       - name: Sync dependencies
         run: uv sync --all-groups --all-extras --python ${{ matrix.python-version }}
 
+      # 浏览器本体不在 pip 包里。不装的话那几条浏览器测试会 importorskip 之后
+      # 在 launch() 那步静默跳过 —— **投入最大、抓 bug 最多的一组，CI 里一次都没跑过**。
+      # M14 那两个「藏了很久」的 bug 如果重现，CI 照样全绿。
+      - name: Install chromium
+        run: uv run playwright install --with-deps chromium
+
       - name: Lint
         run: |
           uv run ruff check anthill tests
@@ -31,5 +40,9 @@ jobs:
       - name: Type check
         run: uv run mypy anthill
 
+      # ANTHILL_REQUIRE_BROWSER：装好了却还跳过 = 上面那步白做了，直接判失败。
+      # 光装不够 —— 还得让「跳过」在 CI 里变成响的。
       - name: Test
+        env:
+          ANTHILL_REQUIRE_BROWSER: "1"
         run: uv run pytest -q --cov=anthill --cov-report=term --cov-fail-under=80

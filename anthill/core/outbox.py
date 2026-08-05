@@ -16,7 +16,7 @@ from pathlib import Path
 
 from anthill.core.atomic import atomic_write
 from anthill.core.envelope import Envelope
-from anthill.core.errors import AntHillError
+from anthill.core.errors import AntHillError, MailboxError
 from anthill.core.ids import now
 from anthill.core.mailbox import Mailbox
 
@@ -25,6 +25,34 @@ BACKOFF_BASE = timedelta(seconds=1)
 """指数退避 1s → 2s → 4s → 8s → 16s，第 5 次仍失败进 dead letter。"""
 
 META_SUFFIX = ".meta.json"
+
+
+@dataclass(frozen=True, slots=True)
+class DeadLetter:
+    """一条死信 + 它为什么死。"""
+
+    msg_id: str
+    path: Path
+    error: str
+
+    @property
+    def to(self) -> str:
+        return self._field("to")
+
+    @property
+    def reason(self) -> str:
+        return self._field("last_error") or "（没记下原因）"
+
+    @property
+    def attempts(self) -> str:
+        return self._field("attempts")
+
+    def _field(self, key: str) -> str:
+        for line in self.error.splitlines():
+            name, _, value = line.partition("=")
+            if name.strip() == key:
+                return value.strip()
+        return ""
 
 
 def backoff_delay(attempts: int) -> timedelta:
@@ -169,7 +197,11 @@ class Outbox:
         if src.is_file():
             src.replace(dst)
         (dead_dir / f"{entry.msg_id}.error.txt").write_text(
-            f"attempts={entry.attempts}\nlast_error={entry.last_error}\n", encoding="utf-8"
+            f"to={entry.envelope.to}\n"
+            f"type={entry.envelope.type}\n"
+            f"attempts={entry.attempts}\n"
+            f"last_error={entry.last_error}\n",
+            encoding="utf-8",
         )
         return dst
 
@@ -181,3 +213,50 @@ class Outbox:
         if not dead_dir.is_dir():
             return []
         return sorted(p for p in dead_dir.iterdir() if p.suffix == ".json")
+
+    def dead_letter(self, msg_id: str) -> DeadLetter | None:
+        """连同「为什么死的」一起读出来。看不懂原因的死信等于没有死信。"""
+        path = self._mailbox.dead / f"{msg_id}.json"
+        if not path.is_file():
+            return None
+        reason = self._mailbox.dead / f"{msg_id}.error.txt"
+        return DeadLetter(
+            msg_id=msg_id,
+            path=path,
+            error=reason.read_text(encoding="utf-8") if reason.is_file() else "",
+        )
+
+    def dead_letter_list(self) -> list[DeadLetter]:
+        return [
+            letter
+            for path in self.dead_letters()
+            if (letter := self.dead_letter(path.stem)) is not None
+        ]
+
+    def requeue_dead(self, msg_id: str) -> OutboxEntry:
+        """把一条死信放回 pending 重新投。
+
+        没有这条路的话，死信就是个只能看计数的黑洞 —— 而进死信的最常见原因
+        （对端 agentd 晚起了一会儿）恰恰是**修好之后就该重投**的那种。
+        以前唯一的恢复手段是手动 `mv` 文件。
+
+        重投 = 重新计数：`attempts` 归零，不然刚放回去就又立刻判死。
+        """
+        path = self._mailbox.dead / f"{msg_id}.json"
+        if not path.is_file():
+            raise MailboxError(f"没有这条死信：{msg_id}")
+        env = Envelope.model_validate_json(path.read_text(encoding="utf-8"))
+        entry = OutboxEntry(envelope=env)
+        self._write(entry)
+        path.unlink(missing_ok=True)
+        (self._mailbox.dead / f"{msg_id}.error.txt").unlink(missing_ok=True)
+        return entry
+
+    def drop_dead(self, msg_id: str) -> bool:
+        """确认不要了，删掉。返回是否真的删了一条。"""
+        path = self._mailbox.dead / f"{msg_id}.json"
+        if not path.is_file():
+            return False
+        path.unlink()
+        (self._mailbox.dead / f"{msg_id}.error.txt").unlink(missing_ok=True)
+        return True

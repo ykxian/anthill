@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import shutil
 from datetime import timedelta
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from anthill.discovery.registry import PeerRegistry
 from anthill.security.keys import PairingToken, new_key
 from anthill.security.signing import sign_envelope
 from anthill.transport.base import Destination
-from anthill.transport.lan import LanTransport
+from anthill.transport.lan import FATAL_STATUS, LanTransport
 from anthill.web.app import create_app
 
 ENDPOINT = "http://lab.test"
@@ -369,3 +370,47 @@ async def test_a_bogus_return_address_header_is_ignored(pair: tuple[Node, Node, 
         )
 
     assert PeerRegistry(lab.layout.root).get("laptop").endpoint == before  # type: ignore[union-attr]
+
+
+async def test_a_recipient_whose_agentd_has_not_started_is_retryable_not_dead(
+    pair: tuple[Node, Node, bytes],
+) -> None:
+    """「对端晚起 10 秒 = 消息永久进死信」—— 真出过的坑。
+
+    这个 Agent 在对方配置里是**存在**的，只是 agentd 还没把邮箱建出来：
+    典型的暂时性故障。以前回 404，客户端判为不可重试直接进死信，
+    唯一的恢复手段是手动 mv 文件。而完全一样的情形在 local 传输里一直是可重试的
+    —— 两条路不该给出相反的判断。
+    """
+    _, lab, key = pair
+    shutil.rmtree(lab.layout.mailbox_dir("runner"))  # agentd 还没起来过
+    env = task_to_lab()
+
+    async with lab.client() as client:
+        response = await client.post(
+            "/deliver", json=sign_envelope(env, key).model_dump(mode="json", by_alias=True)
+        )
+
+    assert response.status_code == 503
+    assert response.status_code not in FATAL_STATUS, "客户端会据此判成不可重试，直接死信"
+
+
+async def test_the_lan_transport_actually_retries_that_case(
+    pair: tuple[Node, Node, bytes],
+) -> None:
+    """端到端：503 落到传输层就该是「可重试的失败」，而不是抛 DeliveryError。"""
+    laptop, lab, _ = pair
+    shutil.rmtree(lab.layout.mailbox_dir("runner"))
+    transport = LanTransport(
+        node_name="laptop",
+        peers=laptop.peers,
+        log=laptop.log,
+        client=httpx.AsyncClient(transport=httpx.ASGITransport(app=lab.app), base_url=ENDPOINT),
+    )
+
+    async with transport:
+        result = await transport.deliver(
+            task_to_lab(), Destination(node="lab", agent="runner", peer=laptop.peers.get("lab"))
+        )
+
+    assert result.ok is False  # 失败，但没抛 —— 也就是会进退避重试

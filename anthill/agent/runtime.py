@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 from dataclasses import asdict, dataclass
+from datetime import timedelta
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -28,6 +29,7 @@ from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
 from anthill.core.payloads import MessageType, TaskErrorPayload
+from anthill.core.retention import SweepResult, rotate_log, sweep_archive, sweep_flat
 from anthill.core.router import Router
 from anthill.core.seen import Claim, SeenStore
 from anthill.core.spool import Spool
@@ -40,6 +42,8 @@ from anthill.transport.registry import TransportRegistry
 COORDINATOR_ROLE = "coordinator"
 STATUS_FILE = "runtime.json"
 DEFAULT_TICK_INTERVAL = 5.0
+SWEEP_INTERVAL = 3600.0
+"""多久清一次归档。一小时够慢（清理不该占资源），也够快（不会攒到磁盘满）。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +152,7 @@ class AgentRuntime:
             asyncio.create_task(self._produce(queue), name="watch"),
             asyncio.create_task(self._consume(queue), name="consume"),
             asyncio.create_task(self.sender.run_retry_loop(stop), name="retry"),
+            asyncio.create_task(self._sweep_loop(stop), name="sweep"),
         ]
         if hasattr(self.handler, "tick"):
             # 只有需要「时间驱动」的 handler（coordinator 的催办与超时）才起这个任务
@@ -202,11 +207,58 @@ class AgentRuntime:
         """崩溃恢复：cur 里没处理完的退回 new，tmp 里的半成品清掉，seen.db 滚动清理。"""
         recovered = self.mailbox.recover_stale()
         swept = self.mailbox.sweep_tmp()
-        purged = self._seen.purge()
+        purged = self._seen.purge(timedelta(days=self.config.runtime.keep_days))
         if recovered or swept or purged:
             self.log.info(
                 "agentd.recover", requeued=len(recovered), swept_tmp=swept, purged_seen=purged
             )
+        self._sweep()
+
+    def _sweep(self) -> None:
+        """给所有单调增长的目录踩一次刹车。见 core/retention.py。
+
+        只在启动时清一次是不够的：agentd 一跑就是几天，而归档量是消息量的两倍以上
+        （每条业务消息还额外带一条回执信封）。所以启动清一次，之后定时再清。
+        """
+        keep = self.config.runtime.keep_days
+        result = SweepResult(
+            done_days=sweep_archive(self.mailbox.done, keep_days=keep),
+            sent=sweep_flat(self.mailbox.sent, keep_days=keep),
+            # 死信单独一个更长的保留期 —— 它是「需要人处理」的东西，
+            # 跟着归档一起清等于把问题藏起来
+            dead=sweep_flat(self.mailbox.dead, keep_days=self.config.runtime.dead_keep_days),
+            logs_rotated=int(
+                rotate_log(
+                    self.layout.log_file(self.agent_name),
+                    max_bytes=self.config.runtime.log_max_mb * 1024 * 1024,
+                )
+            ),
+        )
+        if not result.touched:
+            return
+        self.log.info(
+            "agentd.sweep",
+            done_days=result.done_days,
+            sent=result.sent,
+            dead=result.dead,
+            rotated=result.logs_rotated,
+        )
+        if result.dead:
+            # 删死信要吼一声：那是本来该有人看一眼的东西
+            self.log.warn("agentd.dead_expired", count=result.dead, kept_days=keep)
+
+    async def _sweep_loop(self, stop: asyncio.Event) -> None:
+        """定时清理。抛错只记日志 —— 清不掉不该杀掉整个 agentd。"""
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=SWEEP_INTERVAL)
+                return
+            except TimeoutError:
+                pass
+            try:
+                await asyncio.to_thread(self._sweep)
+            except OSError as exc:
+                self.log.error("agentd.sweep_failed", error=f"{type(exc).__name__}: {exc}")
 
     def _write_status(self) -> None:
         mode = self._watcher.mode or WatchMode.POLL

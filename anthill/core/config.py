@@ -22,6 +22,9 @@ DEFAULT_MULTICAST_GROUP = "239.77.77.7"
 DEFAULT_DISCOVERY_PORT = 45777
 DEFAULT_POLL_INTERVAL = 2.0
 DEFAULT_TASK_TIMEOUT = 600.0
+DEFAULT_KEEP_DAYS = 7
+DEFAULT_DEAD_KEEP_DAYS = 30
+DEFAULT_LOG_MAX_MB = 32
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_LLM_TIMEOUT = 120.0
@@ -212,6 +215,23 @@ class RuntimeSection(_Section):
     服务器上开这个：SSH 是单向的，服务器连不回你的笔记本（NAT 后面、也没跑 sshd），
     结果只能等你来拉。默认关闭 —— 关闭时路由不到就是死信，行为跟以前一样。
     """
+
+    keep_days: int = Field(default=DEFAULT_KEEP_DAYS, ge=0)
+    """归档（done/、outbox/sent/）与 seen.db 的保留天数。0 = 永不清理。
+
+    「消息就是文件」的代价是什么都不会自己消失，而归档量是消息量的**两倍以上**
+    （每条业务消息还额外产生一条回执信封）。跑长任务的节点会一直涨到磁盘满。
+    """
+
+    dead_keep_days: int = Field(default=DEFAULT_DEAD_KEEP_DAYS, ge=0)
+    """死信单独一个更长的保留期。
+
+    死信是「需要人处理」的东西，跟着归档一起清等于把问题藏起来 ——
+    正经出路是 `anthill dead list` 看一眼，然后 retry 或 drop。
+    """
+
+    log_max_mb: int = Field(default=DEFAULT_LOG_MAX_MB, ge=0)
+    """单个日志文件的上限，超了滚动成 `.1`（只留一代）。0 = 不滚动。"""
 
 
 class Config(_Section):

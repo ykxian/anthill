@@ -529,9 +529,13 @@ def _learn_return_path(peers: PeerRegistry, peer: PeerRecord, endpoint: str, log
 def _deposit(env: Envelope, layout: NodeLayout, log: EventLog) -> Any:
     mailbox = Mailbox(layout.mailbox_dir(env.to.agent))
     if not mailbox.exists:
-        log.warn("lan.rejected", msg=env.id, to=str(env.to), reason="no_mailbox")
+        # **503 而不是 404。** 这个 Agent 在配置里是存在的（_check_recipient 已经确认过），
+        # 只是 agentd 还没起来把邮箱建出来 —— 那是**暂时性**故障，等它起来就好了。
+        # 回 404 的话客户端判为不可重试直接进死信：「对端晚起 10 秒 = 消息永久丢失」。
+        # 同样的情形在 local 传输里一直是可重试的，两边不该给出相反的判断。
+        log.warn("lan.not_ready", msg=env.id, to=str(env.to), reason="no_mailbox")
         raise HTTPException(
-            status_code=404, detail=f"{env.to.agent} 的邮箱还没建（agentd 没启动过？）"
+            status_code=503, detail=f"{env.to.agent} 的邮箱还没建（agentd 没启动？稍后重试）"
         )
     try:
         return mailbox.deposit(env)

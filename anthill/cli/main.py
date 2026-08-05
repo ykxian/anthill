@@ -24,6 +24,7 @@ from anthill import __version__
 from anthill.cli.agent_cmd import agent_app
 from anthill.cli.chat_cmd import bridge_command, chat_command, talk_command
 from anthill.cli.common import console
+from anthill.cli.dead_cmd import dead_app
 from anthill.cli.init_cmd import init_command
 from anthill.cli.log_cmd import log_command
 from anthill.cli.msg_cmd import send_command
@@ -53,6 +54,7 @@ app.command("pull")(pull_command)
 app.command("status")(status_command)
 app.command("log")(log_command)
 app.add_typer(agent_app, name="agent")
+app.add_typer(dead_app, name="dead")
 app.add_typer(peers_app, name="peers")
 
 

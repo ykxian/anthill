@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from anthill.core.ids import now
+import pytest
+
+from anthill.core.errors import MailboxError
+from anthill.core.ids import new_id, now
 from anthill.core.outbox import MAX_ATTEMPTS, Outbox, backoff_delay
 
 
@@ -80,3 +83,50 @@ def test_corrupted_pending_entry_does_not_block_others(mailbox, make_task):
 
     assert [e.msg_id for e in pending] == [good.msg_id]
     assert list(mailbox.pending.glob("*.corrupt"))  # 隔离而非静默丢弃
+
+
+# ---------- 死信得有出路 ----------
+
+
+def test_a_dead_letter_records_who_it_was_for_and_why(mailbox, make_task):
+    """看不懂原因的死信等于没有死信。"""
+    outbox = Outbox(mailbox)
+    entry = outbox.enqueue(make_task())
+
+    outbox.abandon(entry, "对端 agentd 没启动")
+
+    letter = outbox.dead_letter(entry.msg_id)
+    assert letter is not None
+    assert letter.to == str(entry.envelope.to)
+    assert "没启动" in letter.reason
+
+
+def test_a_dead_letter_can_be_put_back_for_another_try(mailbox, make_task):
+    """进死信最常见的原因就是「对端晚起了十秒」—— 修好之后必须能重投。
+    以前唯一的恢复手段是手动 mv 文件。"""
+    outbox = Outbox(mailbox)
+    entry = outbox.enqueue(make_task())
+    outbox.abandon(entry, "连不上")
+
+    requeued = outbox.requeue_dead(entry.msg_id)
+
+    assert requeued.attempts == 0, "重投不清零的话，放回去立刻又被判死"
+    assert [e.msg_id for e in outbox.load_pending()] == [entry.msg_id]
+    assert outbox.dead_letters() == []
+
+
+def test_requeueing_something_that_is_not_dead_is_an_error(mailbox):
+    outbox = Outbox(mailbox)
+
+    with pytest.raises(MailboxError):
+        outbox.requeue_dead(new_id())
+
+
+def test_a_dead_letter_can_be_dropped(mailbox, make_task):
+    outbox = Outbox(mailbox)
+    entry = outbox.enqueue(make_task())
+    outbox.abandon(entry, "不要了")
+
+    assert outbox.drop_dead(entry.msg_id) is True
+    assert outbox.drop_dead(entry.msg_id) is False
+    assert outbox.dead_letters() == []

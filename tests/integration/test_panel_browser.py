@@ -26,9 +26,25 @@ import pytest
 from anthill.core.paths import NodeLayout
 from anthill.core.workspace import create_workspace
 
-playwright_api = pytest.importorskip(
-    "playwright.sync_api", reason="没装 playwright，跳过浏览器测试"
-)
+REQUIRE = os.environ.get("ANTHILL_REQUIRE_BROWSER") == "1"
+"""CI 里置 1：装好了浏览器却还跳过，说明装的那步白做了 —— 直接判失败。
+
+光在 CI 里 `playwright install` 是不够的。这组测试原本会 importorskip 通过、
+然后在 `launch()` 那步静默 skip —— **投入最大、抓 bug 最多的一组，CI 里一次都没跑过**。
+「跳过」在 CI 里必须是响的，否则 M14 那两个藏了很久的 bug 重现时 CI 照样全绿。
+"""
+
+
+def _unavailable(reason: str) -> None:
+    if REQUIRE:
+        pytest.fail(f"ANTHILL_REQUIRE_BROWSER=1 但浏览器测试跑不了：{reason}")
+    pytest.skip(reason)
+
+
+try:
+    import playwright.sync_api as playwright_api
+except ImportError:  # pragma: no cover - 取决于装没装
+    playwright_api = None  # type: ignore[assignment]
 
 
 def free_port() -> int:
@@ -39,11 +55,13 @@ def free_port() -> int:
 
 @pytest.fixture(scope="module")
 def browser() -> Iterator[object]:
+    if playwright_api is None:
+        _unavailable("没装 playwright")
     with playwright_api.sync_playwright() as p:
         try:
             engine = p.chromium.launch()
         except Exception as exc:
-            pytest.skip(f"chromium 起不来：{exc}")
+            _unavailable(f"chromium 起不来：{exc}")
         yield engine
         engine.close()
 

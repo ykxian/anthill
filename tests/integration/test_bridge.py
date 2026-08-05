@@ -266,6 +266,11 @@ async def test_a_chat_reply_follows_the_mention_rule(
     assert got.payload.mentions == ("cc",)  # 把球打回来
 
 
+def _pending(handler) -> bool:
+    """收件箱或草稿箱里还有没归档的东西。"""
+    return bool(list(handler.dir("inbox").glob("*.md")) or list(handler.dir("outbox").glob("*.md")))
+
+
 async def test_replying_archives_both_the_request_and_the_draft(
     node: tuple[NodeLayout, Config],
 ) -> None:
@@ -279,6 +284,9 @@ async def test_replying_archives_both_the_request_and_the_draft(
         await wait_until(lambda: (handler.dir("inbox") / f"{env.id}.md").is_file())
         write_draft(handler, f"{env.id}.md", "好了")
         await wait_until(lambda: any(e.type is MessageType.TASK_RESULT for e in envelopes(cli_box)))
+        # **等的是这条断言自己的前置条件。** 回信是先发出去、后归档的，
+        # 只等「结果到了」就断言「归档完了」，在满负载下会偶发地抢在归档前面。
+        await wait_until(lambda: not _pending(handler))
 
     assert list(handler.dir("inbox").glob("*.md")) == []
     assert list(handler.dir("outbox").glob("*.md")) == []
