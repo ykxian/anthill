@@ -3,6 +3,8 @@
 > 基于**文件邮箱**的分布式多 Agent 协同框架。
 > 蚂蚁不开会 —— 它们把信息素留在环境里，别的蚂蚁路过就能读懂并接力。
 
+**只想跑起来？看 [QUICKSTART.md](./QUICKSTART.md)。**
+
 [English README](./README.en.md) · 设计文档在 [`docs/`](./docs)（先读 [00-prd](./docs/00-prd.md)）
 
 本 README 只讲**当前已经能跑的东西**。
