@@ -150,8 +150,8 @@ coordinator 收到用户任务后，第一次 LLM 调用强制输出计划 JSON�
 
 | 工具 | 风险 | 说明 |
 |------|------|------|
-| `read_file` / `list_dir` | low | 限制在 workspace 与 blackboard 内（路径规范化后前缀校验，防 `../` 逃逸） |
-| `write_file` | medium | 同上限制；写 blackboard 任务目录 |
+| `read_file` / `list_dir` / `search_text` / `find_files` | low | 限制在 workspace 与 blackboard 内（路径规范化后前缀校验，防 `../` 逃逸）。检索做成受控只读工具，而不是让 Agent 去 `run_shell` 里 grep —— 那条路在无人值守时会被策略引擎判 DENY |
+| `write_file` / `edit_file` | medium | 同上限制；写 blackboard 任务目录。`edit_file` 是精确原文替换，改几行不必重写整个文件 |
 | `run_shell` | **high** | allowlist（pytest/ruff/git status 等）内降为 medium；其余 high |
 | `send_message` | low | 经路由层，受 hops 熔断约束 |
 | `finish` | low | 结构化交付 |

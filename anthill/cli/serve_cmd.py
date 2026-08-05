@@ -29,6 +29,7 @@ from anthill.core.workspace import load_or_create as load_workspace
 from anthill.core.workspace import local_ip
 from anthill.discovery.beacon import Announcement, Beacon
 from anthill.security.panel_token import load_or_create, token_path
+from anthill.transport.pull import pull_once, ssh_peers
 from anthill.web.app import create_app
 from anthill.web.cluster import write_status
 from anthill.web.context import NodeContext, NodeRegistry
@@ -39,6 +40,8 @@ DEFAULT_PORT = 45778
 LOOPBACK = ("127.0.0.1", "localhost", "::1", "")
 WILDCARD_HOSTS = ("0.0.0.0", "::", "*")
 STATUS_INTERVAL = 5.0
+IDLE_PULL_INTERVAL = 3600.0
+"""所有节点都关了自动拉取时的空转节奏 —— 不退出循环，好让人改了配置之后不用重启。"""
 
 
 def is_loopback(host: str) -> bool:
@@ -310,6 +313,7 @@ async def _serve(
         asyncio.create_task(server.serve(), name="http"),
         *(asyncio.create_task(b.run(stop), name=f"beacon:{i}") for i, b in enumerate(beacons)),
         asyncio.create_task(_status_loop(nodes, log, stop, enabled=summary), name="status"),
+        asyncio.create_task(_pull_loop(nodes, log, stop), name="pull"),
         asyncio.create_task(stop.wait(), name="stop"),
     ]
     try:
@@ -376,3 +380,48 @@ async def _status_loop(
         with suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=interval)
             return
+
+
+async def _pull_loop(nodes: NodeRegistry, log: EventLog, stop: asyncio.Event) -> None:
+    """定时替你去 SSH 对端取回信。
+
+    SSH 是单向的（服务器连不回 NAT 后面的笔记本），所以回信只能靠这边拉。
+    以前 `anthill pull` 是纯手工的一次性命令 —— **人不敲命令，对端的回信就永远不回来**，
+    跨机协作的回程等于靠人肉驱动。
+
+    **拉不动绝不能把 serve 带走**：对端关机、密钥换了、网络断了，
+    都只该让「这一轮没拉到」，不该让这台机器停止收消息。所以这里接住所有异常。
+    """
+    while not stop.is_set():
+        for ctx in nodes.all():
+            interval = ctx.config.runtime.auto_pull_seconds
+            if interval <= 0:
+                continue
+            for name, peer in ssh_peers(ctx.config):
+                try:
+                    report = await pull_once(ctx.layout, ctx.config, name, peer, log=log)
+                except Exception as exc:
+                    log.warn(
+                        "pull.failed",
+                        node=ctx.name,
+                        peer=name,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                    continue
+                if report.count:
+                    log.info("pull.done", node=ctx.name, peer=name, taken=report.count)
+                for note in report.skipped:
+                    log.warn("pull.skipped", node=ctx.name, peer=name, detail=note)
+        with suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=_pull_interval(nodes))
+            return
+
+
+def _pull_interval(nodes: NodeRegistry) -> float:
+    """多个节点各配各的，取最小的那个当循环节奏；都关了就退化成长睡。"""
+    intervals = [
+        ctx.config.runtime.auto_pull_seconds
+        for ctx in nodes.all()
+        if ctx.config.runtime.auto_pull_seconds > 0
+    ]
+    return min(intervals) if intervals else IDLE_PULL_INTERVAL

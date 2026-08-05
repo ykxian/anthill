@@ -49,7 +49,7 @@ flowchart LR
 依赖方向严格自上而下。**L1/L2 完全不含任何 LLM 逻辑**，可以单独测试，
 甚至单独拿去给「人肉 Agent」用 —— 这个项目最早就是那么开始的。
 
-## 现在能跑什么（M0 – M10）
+## 现在能跑什么（M0 – M15）
 
 **通信底座（M0/M1）**
 
@@ -64,7 +64,8 @@ flowchart LR
 **Agent 大脑（M2）**
 
 - ✅ **多家模型**：`ChatProvider` 抽象 + Anthropic / OpenAI 兼容端点（DeepSeek、Qwen、GLM 共用一份代码）
-- ✅ **ReAct 工具循环**：`read_file` / `write_file` / `list_dir` / `run_shell` / `finish`，
+- ✅ **ReAct 工具循环**：读写（`read_file` 支持翻页 / `write_file` / `edit_file` 局部改）、
+  检索（`search_text` / `find_files`）、`list_dir`、`run_shell`、`send_message`、`finish`，
   `finish` 强制结构化交付（summary + artifacts + status）
 - ✅ **三道闸门**：步数熔断、token 预算熔断、策略引擎（工具风险 × 来源信任 → 放行/确认/拒绝）
 - ✅ **路径逃逸防护**：所有路径参数规范化后前缀校验，`../` 与软链都出不去 workspace
@@ -125,7 +126,8 @@ flowchart LR
   （每步状态与交付）、合并后的实时消息流。单页 HTML + 原生 JS + WebSocket，
   **无构建链、无外部资源** —— 没外网的服务器上也能打开
 - ✅ 面板**默认只在绑回环时开启**：一旦 `--host 0.0.0.0`，它会跟着暴露给整个网段
-- ✅ 中英文 README、CHANGELOG、MIT LICENSE；657 个测试，覆盖率 87%
+- ✅ 中英文 README、CHANGELOG、MIT LICENSE
+  （截至 M15：975 个测试，覆盖率 87%；实现 14.7k 行 + 测试 12.7k 行）
 
 **接已有终端、对话、面板可写（M7）**
 
@@ -174,6 +176,41 @@ flowchart LR
   走同一套校验与备份
 - ✅ **在面板上启 / 停 agentd**：单机场景下最后一处非用终端不可的事没有了
 
+**一台机器一个 serve（M11–M12）**
+
+- ✅ **多路复用**：一个进程、一个端口，照看这台机器上的**全部工作区**。
+  路由键本来就写在信封上（`to.node`），所以这是一张查表，不是多进程编排
+- ✅ **面板上启 / 停别台机器的 agentd**；机器级工作区清单（增删改查）
+
+**没有显示器的机器（M13）**
+
+- ✅ **面板令牌**：「只认回环」的真实含义是「你是这台机器的主人」——
+  在机柜里的服务器上直接崩掉。令牌存 `~/.anthill/panel-token`（0600），
+  **永不从命令行参数取**（`ps` 是所有人都看得见的）
+- ✅ 它等价于「能在那台机器上执行命令」，分量和一把 SSH 私钥同档；
+  明文 HTTP 上会被嗅探，不可信网络请用 `ssh -L`
+
+**面板重做（M14）**
+
+- ✅ 温纸配色 + 技术排版，等宽字体只给机器数据
+- ✅ **装了真浏览器测试之后才发现：这个面板此前在浏览器里根本没跑通过**
+  （相对路径解析成了 `/api/...`；`websockets` 从来不是依赖）—— 而当时所有测试都是绿的。
+  现在 playwright 真开一个 chromium 点一遍
+
+**一次外部评审之后的修复（M15）**
+
+- ✅ **面板 WebSocket 补上鉴权**：它推的是和 `/api/state` 一样的快照，
+  以前 `accept()` 之前一行检查都没有。WebSocket 不受同源策略约束，
+  所以连默认的回环配置都中招
+- ✅ **崩溃恢复真的是「至少一次」了**：`seen.db` 以前一进 dispatch 就登记，
+  于是重放回来的消息一律被判重复 —— `recover_stale` 是个安慰剂。
+  改成 claimed / completed 两阶段
+- ✅ **广播不能再改路由**：伪造一个 UDP 包就能劫持已信任节点的全部出站消息
+  （`observe` 无条件覆盖 endpoint）。现在已信任的对端地址只认配对时那份
+- ✅ **能力补齐**：`edit_file`（局部改）、`search_text` / `find_files`（受控只读检索）、
+  `read_file` 分页；编排层真的读 `retryable` 了（一次网络抖动不再毁掉整次协作）；
+  死信有了 `anthill dead list/retry/drop`；所有单调增长的目录装上刹车
+
 ## 快速开始
 
 一条命令，剩下的都在面板上做：
@@ -219,7 +256,7 @@ model = "deepseek-chat"
 role = "worker"
 provider = "deepseek"
 persona = "你写最小可用的代码，改动前先读现状。"
-tools = ["read_file", "write_file", "list_dir", "run_shell", "finish"]
+tools = ["read_file", "write_file", "edit_file", "search_text", "run_shell", "finish"]
 ```
 
 ```bash
@@ -256,12 +293,12 @@ provider = "claude"          # 编排用强模型，干活用便宜模型 ——
 [agents.coder]
 role = "worker"
 provider = "deepseek"
-tools = ["read_file", "write_file", "list_dir", "run_shell", "send_message", "finish"]
+tools = ["read_file", "write_file", "edit_file", "list_dir", "search_text", "find_files", "run_shell", "send_message", "finish"]
 
 [agents.reviewer]
 role = "reviewer"
 provider = "claude"
-tools = ["read_file", "list_dir", "send_message", "finish"]   # 审查者只读
+tools = ["read_file", "list_dir", "search_text", "find_files", "send_message", "finish"]   # 审查者只读
 ```
 
 ```bash

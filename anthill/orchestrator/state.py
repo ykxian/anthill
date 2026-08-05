@@ -199,6 +199,22 @@ class RunState(BaseModel):
             step_id, state=StepState.FAILED, error=error, finished_at=now().isoformat()
         )
 
+    def reset_for_retry(self, step_id: str, *, error: str) -> RunState:
+        """把一步退回待派，好再派一次。**不清 `attempts`** —— 那是重试的刹车。
+
+        错误留着：重试成功了它就是一段有用的历史（「第一次超时了」），
+        重试也失败的话，最后一次的错误会覆盖上去。
+        """
+        return self._replace_step(
+            step_id,
+            state=StepState.PENDING,
+            error=error,
+            thread="",
+            msg_id="",
+            dispatched_at="",
+            nudged=False,  # 新的一次派发，催办计数重来
+        )
+
     def mark_nudged(self, step_id: str) -> RunState:
         return self._replace_step(step_id, nudged=True)
 

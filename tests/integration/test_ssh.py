@@ -15,17 +15,18 @@ from pathlib import Path
 import asyncssh
 import pytest
 
-from anthill.core.config import PeerSection
+from anthill.core.config import Config, PeerSection
 from anthill.core.envelope import Address, Envelope, TransportKind
 from anthill.core.errors import DeliveryError
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
-from anthill.core.payloads import MessageType, TaskRequestPayload
+from anthill.core.payloads import MessageType, TaskRequestPayload, TaskResultPayload
 from anthill.discovery.registry import PeerRegistry
 from anthill.security.keys import PairingToken, new_key
 from anthill.security.signing import verify_envelope
 from anthill.transport.base import Destination
+from anthill.transport.pull import pull_once, ssh_peers
 from anthill.transport.ssh import SshTarget, SshTransport
 
 
@@ -613,3 +614,85 @@ async def test_pull_refuses_envelopes_addressed_to_a_third_node(remote: FakeServ
 
     # Assert：拉取方看到 to.node 不是自己，应当拒收（这里断言的是判定依据本身）
     assert Envelope.from_json_bytes(raw).to.node == "elsewhere"
+
+
+# ---------- 回程不该靠人肉驱动 ----------
+
+
+def local_config(remote: FakeServer, workspace: Path) -> Config:
+    """一台本机：一个 SSH 对端（lab）、一个 LAN 对端（office）。"""
+    layout = NodeLayout(workspace).ensure_base()
+    Mailbox(layout.mailbox_dir("cli")).ensure()
+    layout.node_toml.write_text(
+        f"""
+[node]
+name = "laptop"
+workspace = "."
+
+[agents.cli]
+role = "user"
+
+[peers.lab]
+transport = "ssh"
+host = "127.0.0.1"
+port = {remote.port}
+user = "tester"
+remote_workspace = "{remote.workspace}"
+
+[peers.office]
+transport = "lan"
+endpoint = "http://10.0.0.9:45778"
+""",
+        encoding="utf-8",
+    )
+    return Config.load_from(layout)
+
+
+async def test_the_return_mail_can_be_pulled_without_a_human_typing_a_command(
+    remote: FakeServer, tmp_path: Path
+) -> None:
+    """`anthill pull` 以前是纯手工的一次性命令 —— **人不敲命令，
+    SSH 对端的回信就永远不回来**，跨机协作的回程等于靠人肉驱动。
+
+    这里验的是拉取逻辑已经从 CLI 里剥出来（不再往 console 打字），
+    可以被 serve 的循环直接调用，而且拉回来的信真的落进了本机邮箱。
+    """
+    workspace = tmp_path / "laptop"
+    config = local_config(remote, workspace)
+    layout = NodeLayout(workspace)
+    reply = Envelope.new(
+        sender=Address(node="lab", agent="runner"),
+        recipient=Address(node="laptop", agent="cli"),
+        type=MessageType.TASK_RESULT,
+        payload=TaskResultPayload(summary="服务器上跑完了"),
+    )
+    spool = remote.workspace / ".anthill" / "spool" / "laptop"
+    spool.mkdir(parents=True, exist_ok=True)
+    (spool / f"{reply.id}.json").write_bytes(reply.to_json_bytes())
+
+    report = await pull_once(layout, config, "lab", config.peers["lab"], connect=remote.connect)
+
+    assert report.count == 1
+    assert report.skipped == ()
+    inbox = Mailbox(layout.mailbox_dir("cli")).list_new()
+    assert [Mailbox.read_envelope(p).id for p in inbox] == [reply.id]
+    assert not (spool / f"{reply.id}.json").exists()  # 先落本地再删远端
+
+
+async def test_only_ssh_peers_need_pulling(remote: FakeServer, tmp_path: Path) -> None:
+    """LAN 那侧是推过来的，不需要拉 —— 别为它白开 SSH 连接。"""
+    config = local_config(remote, tmp_path / "laptop")
+
+    assert [name for name, _ in ssh_peers(config)] == ["lab"]
+
+
+async def test_nothing_spooled_is_not_an_error(remote: FakeServer, tmp_path: Path) -> None:
+    """目录还没建 = 没有待取的。这和「连不上」必须分开 ——
+    混成一个「一切正常」，用户会以为回信收完了，其实还堆在服务器上。"""
+    config = local_config(remote, tmp_path / "laptop")
+
+    report = await pull_once(
+        NodeLayout(tmp_path / "laptop"), config, "lab", config.peers["lab"], connect=remote.connect
+    )
+
+    assert report.count == 0

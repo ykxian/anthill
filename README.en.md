@@ -195,6 +195,48 @@ be tested on their own, or handed to "human agents" (which is exactly how this p
 - **Start and stop agentd from the panel** — the last thing that used to require a
   terminal window per agent.
 
+**One serve per machine (M11–M12)**
+
+- **Multiplexing**: one process, one port, looking after *every* workspace on the
+  machine. The routing key was already on the envelope (`to.node`), so this is a
+  lookup table — not multi-process orchestration.
+- Start and stop agentd on *other* machines from the panel; machine-level workspace
+  registry with full CRUD.
+
+**Machines with no monitor (M13)**
+
+- **Panel token**: "loopback only" really meant "you are this machine's owner", which
+  breaks the moment the machine is in a rack. The token lives in
+  `~/.anthill/panel-token` (0600) and is **never taken from a command-line argument**
+  (`ps` is world-readable).
+- It is equivalent to "can run commands on that machine" — treat it like an SSH private
+  key. It is sniffable over plaintext HTTP, so use `ssh -L` on untrusted networks.
+
+**Panel redesign (M14)**
+
+- Warm-paper palette with editorial-technical typography; monospace reserved for
+  machine data.
+- **Installing a real browser test revealed the panel had never worked in a browser at
+  all** — relative paths resolved to `/api/...`, and `websockets` was never a
+  dependency — while the whole suite was green. Playwright now drives a real chromium.
+
+**Fixes after an external review (M15)**
+
+- **The panel WebSocket now authenticates.** It pushes the same snapshot as
+  `/api/state`, and previously had no check at all before `accept()`. WebSockets are
+  not subject to the same-origin policy, so even the default loopback setup was exposed.
+- **Crash recovery is genuinely at-least-once now.** `seen.db` used to mark a message
+  on dispatch, so anything replayed after a crash was judged a duplicate and the
+  handler never re-ran — `recover_stale` was a placebo. It is now a two-phase
+  claim/complete.
+- **A forged broadcast can no longer reroute traffic.** `observe` overwrote a trusted
+  peer's endpoint unconditionally; a single spoofed UDP packet could hijack every
+  outbound message. A trusted peer's address now comes only from pairing.
+- **Capability gaps closed**: `edit_file`, `search_text` / `find_files` (controlled
+  read-only retrieval), paged `read_file`; the orchestrator actually reads `retryable`
+  (one network blip no longer kills a whole run); dead letters got
+  `anthill dead list/retry/drop`; every monotonically growing directory got a brake.
+
 ## Quick start
 
 One command; everything else happens in the panel:

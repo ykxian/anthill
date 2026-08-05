@@ -12,12 +12,17 @@ import pytest
 
 from anthill.core.errors import ProviderError
 from anthill.providers.anthropic_p import (
+    AnthropicProvider,
     parse_anthropic_response,
     split_system,
     to_anthropic_messages,
 )
-from anthill.providers.base import Msg, Role, ToolCall, classify_sdk_error
-from anthill.providers.openai_compat import parse_openai_response, to_openai_messages
+from anthill.providers.base import Msg, Role, ToolCall, ToolSpec, classify_sdk_error
+from anthill.providers.openai_compat import (
+    OpenAICompatProvider,
+    parse_openai_response,
+    to_openai_messages,
+)
 
 CALL = ToolCall(id="c1", name="read_file", arguments={"path": "a.py"})
 ASSISTANT_WITH_CALL = Msg(role=Role.ASSISTANT, content="我看看", tool_calls=(CALL,))
@@ -179,3 +184,125 @@ def test_sdk_errors_without_status_fall_back_to_class_name() -> None:
 
     assert classify_sdk_error(connection, provider="p").retryable
     assert not classify_sdk_error(other, provider="p").retryable
+
+
+# ---------- 真正发出去的那个请求体 ----------
+#
+# 这两个 provider 是全仓覆盖率最低的两块（61% / 62%），没盖到的正是
+# `complete()` —— 也就是**真正发给上游的请求体**长什么样。
+# 录制回放机制虽然写好了，但仓库里唯一走回放的用例是先用 FakeProvider 录一条再回放，
+# 测的是机制本身；这两个模块从没被真实模型的输出形态回归过。
+#
+# 真带子要 API key 和网络（也要花钱），CI 里做不到。但请求体这一半是纯逻辑，
+# 塞一个假 SDK 客户端进去就能测 —— 而它恰恰是对着真 API 最容易错的地方。
+
+
+class FakeSDK:
+    """记下收到的 kwargs；可以设定返回什么或抛什么。"""
+
+    def __init__(self, response: object = None, error: Exception | None = None) -> None:
+        self.response = response
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+        self.closed = False
+        self.chat = SimpleNamespace(completions=self)  # OpenAI 那家的路径
+        self.messages = self  # Anthropic 那家的路径
+
+    async def create(self, **kwargs: object) -> object:
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def anthropic_reply(text: str = "好") -> SimpleNamespace:
+    return SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=text)],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(input_tokens=10, output_tokens=3),
+    )
+
+
+def openai_reply(text: str = "好") -> SimpleNamespace:
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=text, tool_calls=None), finish_reason="stop"
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=3),
+    )
+
+
+HISTORY = [Msg.system("你是 coder"), Msg.user("看看 a.py")]
+TOOL = ToolSpec(name="read_file", description="读文件", parameters={"type": "object"})
+
+
+async def test_anthropic_hoists_the_system_prompt_out_of_messages() -> None:
+    """Anthropic 的 system 是**顶层字段**，不是一条 role=system 的消息 ——
+    混进 messages 里会直接 400。"""
+    provider = AnthropicProvider(model="claude-x", api_key="k")
+    sdk = FakeSDK(response=anthropic_reply())
+    provider._client = sdk  # type: ignore[attr-defined]
+
+    await provider.complete(HISTORY, [TOOL])
+
+    sent = sdk.calls[0]
+    assert sent["system"] == "你是 coder"
+    assert all(m["role"] != "system" for m in sent["messages"])  # type: ignore[index,union-attr]
+    assert sent["tools"]
+
+
+async def test_openai_keeps_the_system_prompt_as_a_message() -> None:
+    """OpenAI 那家正相反 —— system 就是消息列表里的第一条。两家的差别只此一处，
+    也正是这一处最容易照着另一家的写法写错。"""
+    provider = OpenAICompatProvider(model="deepseek-chat", api_key="k")
+    sdk = FakeSDK(response=openai_reply())
+    provider._client = sdk  # type: ignore[attr-defined]
+
+    await provider.complete(HISTORY, [TOOL])
+
+    sent = sdk.calls[0]
+    assert "system" not in sent
+    assert sent["messages"][0]["role"] == "system"  # type: ignore[index]
+
+
+async def test_no_tools_means_no_tools_key_at_all() -> None:
+    """空的 tools 列表有的端点会拒收 —— 没有工具就别带这个字段。"""
+    provider = OpenAICompatProvider(model="m", api_key="k")
+    sdk = FakeSDK(response=openai_reply())
+    provider._client = sdk  # type: ignore[attr-defined]
+
+    await provider.complete(HISTORY, [])
+
+    assert "tools" not in sdk.calls[0]
+
+
+@pytest.mark.parametrize(
+    "factory", [AnthropicProvider, OpenAICompatProvider], ids=["anthropic", "openai"]
+)
+async def test_an_sdk_error_becomes_a_classified_provider_error(factory: type) -> None:
+    """上游抛什么都不能原样冒出去 —— 编排层是靠 ProviderError.retryable
+    决定要不要重试的。"""
+    provider = factory(model="m", api_key="k")
+    provider._client = FakeSDK(error=RuntimeError("connection reset"))
+
+    with pytest.raises(ProviderError):
+        await provider.complete(HISTORY, [])
+
+
+@pytest.mark.parametrize(
+    "factory", [AnthropicProvider, OpenAICompatProvider], ids=["anthropic", "openai"]
+)
+async def test_closing_releases_the_sdk_client(factory: type) -> None:
+    provider = factory(model="m", api_key="k")
+    sdk = FakeSDK()
+    provider._client = sdk
+
+    await provider.aclose()
+    await provider.aclose()  # 关两次不该炸
+
+    assert sdk.closed

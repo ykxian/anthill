@@ -8,15 +8,19 @@ from __future__ import annotations
 
 from anthill.agent.tools.base import Tool
 from anthill.agent.tools.finish import FinishTool
-from anthill.agent.tools.fs import ListDirTool, ReadFileTool, WriteFileTool
+from anthill.agent.tools.fs import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from anthill.agent.tools.messaging import SendMessageTool
+from anthill.agent.tools.search import FindFilesTool, SearchTextTool
 from anthill.agent.tools.shell import RunShellTool
 from anthill.core.errors import ToolError
 
 TOOL_FACTORIES = {
     "read_file": ReadFileTool,
     "write_file": WriteFileTool,
+    "edit_file": EditFileTool,
     "list_dir": ListDirTool,
+    "search_text": SearchTextTool,
+    "find_files": FindFilesTool,
     "run_shell": RunShellTool,
     "send_message": SendMessageTool,
     "finish": FinishTool,

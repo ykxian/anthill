@@ -37,6 +37,13 @@ from anthill.providers.base import ChatProvider, Msg
 from anthill.security.policy import USER_ROLE
 
 MAX_REWORK_ROUNDS = 2
+MAX_STEP_ATTEMPTS = 3
+"""同一步最多派几次。
+
+worker 回的 TaskErrorPayload 里本来就带 `retryable`，但整个 orchestrator
+从来没读过它 —— 任何 task.error 一律直接判死，一次网络抖动就是整个 run 失败。
+上限放在这里：`retryable` 默认为 True，光看它挡不住无限重试。
+"""
 DEFAULT_STEP_TIMEOUT = 600.0
 DEFAULT_NUDGE_AFTER = 180.0
 MAX_SUMMARY_CHARS = 4_000
@@ -72,6 +79,7 @@ class CoordinatorSettings:
     step_timeout: float = DEFAULT_STEP_TIMEOUT
     nudge_after: float = DEFAULT_NUDGE_AFTER
     max_rework_rounds: int = MAX_REWORK_ROUNDS
+    max_step_attempts: int = MAX_STEP_ATTEMPTS
 
 
 class CoordinatorHandler:
@@ -159,10 +167,34 @@ class CoordinatorHandler:
             ctx.log.info("step.done", task=state.task_id, step=record.id, frm=str(env.from_))
         else:
             error = str(getattr(env.payload, "error", ""))[:MAX_SUMMARY_CHARS]
+            if self._should_retry(env, record):
+                # worker 明确说了这次失败可以重试，而且还没试够 —— 原样再派一次。
+                # 以前 retryable 这个标志在整个 orchestrator 里从没被读过，
+                # StepRecord.attempts 也记了没人用：一次网络抖动 = 整个 run 失败。
+                ctx.log.warn(
+                    "step.retrying",
+                    task=state.task_id,
+                    step=record.id,
+                    attempt=record.attempts,
+                    error=error,
+                )
+                state = state.reset_for_retry(record.id, error=error)
+                state = await self._dispatch(state, record.id, ctx, env=env)
+                await self._advance(state, ctx, env=env)
+                return
             state = state.fail(record.id, error=error)
             ctx.log.warn("step.failed", task=state.task_id, step=record.id, error=error)
 
         await self._advance(state, ctx, env=env)
+
+    def _should_retry(self, env: Envelope, record: StepRecord) -> bool:
+        """两个条件都要：worker 说这次可以重试，且这一步还没试够次数。
+
+        `retryable` 默认是 True（见 payloads.TaskErrorPayload），所以判据不能只看它 ——
+        次数上限才是防止无限重试的那一半。
+        """
+        retryable = bool(getattr(env.payload, "retryable", False))
+        return retryable and record.attempts < self._settings.max_step_attempts
 
     def _find_run(self, thread: str) -> tuple[RunState, StepRecord] | None:
         for state in self._store.active():
@@ -304,8 +336,12 @@ class CoordinatorHandler:
         return _parse_verdict(turn.text)
 
     def _append_rework(self, state: RunState, fix: str) -> RunState:
-        """返工只追加一步，派给最后一个有产出的执行者。"""
-        last = state.steps[-1]
+        """返工只追加一步，派给**最后一个真的有产出的**执行者。
+
+        以前取的是 `state.steps[-1]` —— 数组末位，而那可能是一个被 skipped、
+        从头到尾没干过活的步骤，返工就派给了一个完全不了解情况的人。
+        """
+        last = _last_productive(state) or state.steps[-1]
         step_id = f"fix{state.round + 1}"
         step = PlanStep(
             id=step_id,
@@ -427,6 +463,14 @@ def _render_goal(env: Envelope) -> str:
 def _clip_title(text: str, limit: int = 60) -> str:
     flat = " ".join(text.split())
     return (flat[:limit] or "子任务") if len(flat) > limit else (flat or "子任务")
+
+
+def _last_productive(state: RunState) -> StepRecord | None:
+    """最后一个真的交付了东西的步骤。返工该派给它，而不是派给数组末位。"""
+    for record in reversed(state.steps):
+        if record.state is StepState.DONE:
+            return record
+    return None
 
 
 def _first_error(state: RunState) -> str:

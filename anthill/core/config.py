@@ -25,6 +25,7 @@ DEFAULT_TASK_TIMEOUT = 600.0
 DEFAULT_KEEP_DAYS = 7
 DEFAULT_DEAD_KEEP_DAYS = 30
 DEFAULT_LOG_MAX_MB = 32
+DEFAULT_AUTO_PULL = 60.0
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_LLM_TIMEOUT = 120.0
@@ -233,6 +234,14 @@ class RuntimeSection(_Section):
     log_max_mb: int = Field(default=DEFAULT_LOG_MAX_MB, ge=0)
     """单个日志文件的上限，超了滚动成 `.1`（只留一代）。0 = 不滚动。"""
 
+    auto_pull_seconds: float = Field(default=DEFAULT_AUTO_PULL, ge=0)
+    """`serve` 每隔多久替你去 SSH 对端取一次回信。0 = 只能手动 `anthill pull`。
+
+    SSH 是单向的，回信只能靠这边去拉。以前 `anthill pull` 是纯手工的一次性命令 ——
+    **人不敲命令，对端的回信就永远不回来**，跨机协作的回程等于靠人肉驱动。
+    默认 60 秒：够勤快（回信不会压太久），也不至于把 SSH 连接打得太频。
+    """
+
 
 class Config(_Section):
     node: NodeSection
@@ -407,14 +416,15 @@ role = "worker"
 # role = "worker"
 # provider = "deepseek"
 # persona = "你写最小可用的代码，改动前先读现状。"
-# tools = ["read_file", "write_file", "list_dir", "run_shell", "send_message", "finish"]
+# tools = ["read_file", "write_file", "edit_file", "list_dir", "search_text", "find_files",
+#           "run_shell", "send_message", "finish"]
 # max_steps = 20           # 步数熔断
 # token_budget = 200000    # 费用熔断：单个任务累计 token 上限
 #
 # [agents.reviewer]        # 最小权限示范：审查者只读，不能写、不能跑命令
 # role = "reviewer"
 # provider = "deepseek"
-# tools = ["read_file", "list_dir", "send_message", "finish"]
+# tools = ["read_file", "list_dir", "search_text", "find_files", "send_message", "finish"]
 #
 # ---- 把已有的终端 Agent 接进来（Claude Code / Codex / aider…）----
 # 有 command 就走适配器，不需要 provider；它自己的权限体系我们不代管。

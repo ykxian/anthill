@@ -202,8 +202,8 @@ def test_envelope_names_from_a_remote_must_be_ulids() -> None:
     正常 SFTP 服务端不会返回带 / 的条目名，但对面被攻陷时会 ——
     校验成本三行，不校验的代价是别人能指使我们删任意文件。
     """
-    from anthill.cli.remote_cmd import _is_envelope_name
     from anthill.core.ids import new_id
+    from anthill.transport.pull import is_envelope_name as _is_envelope_name
 
     assert _is_envelope_name(f"{new_id()}.json")
     for bad in ("../../../etc/passwd", "../x.json", "x.json", "evil", f"{new_id()}.txt"):

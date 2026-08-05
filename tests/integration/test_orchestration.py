@@ -16,6 +16,7 @@ import pytest
 from anthill.agent.runtime import AgentRuntime
 from anthill.core.config import Config
 from anthill.core.envelope import Address, Envelope
+from anthill.core.errors import ProviderError
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
@@ -709,3 +710,88 @@ async def test_the_run_is_marked_finished_before_the_result_is_sent(
         finished_at_delivery = store.all()[0].finished
 
     assert finished_at_delivery
+
+
+# ---------- 一次抖动不该毁掉整次协作 ----------
+
+
+async def test_a_retryable_step_failure_is_retried_instead_of_killing_the_run(
+    layout: NodeLayout, node: Config
+) -> None:
+    """worker 明确回传的 `retryable` 以前在整个 orchestrator 里从没被读过：
+    任何 task.error 一律直接判死，**一次网络抖动就是整个 run 失败**。
+    StepRecord.attempts 也是记了没人用。
+    """
+    # Arrange：coder 第一次调模型撞上可重试的上游错误，第二次正常交付
+    boss = FakeProvider([plan_turn(), verdict_turn(satisfied=True)])
+    coder = FakeProvider(
+        [
+            ProviderError("上游 502", retryable=True),
+            finish_turn("重试之后写好了", ("tests/test_date.py",)),
+        ]
+    )
+    reviewer = FakeProvider([finish_turn("看过了，approve")])
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+
+    # Act
+    async with AsyncExitStack() as stack:
+        for name, provider in (("coder", coder), ("reviewer", reviewer)):
+            await stack.enter_async_context(
+                running(layout, node, name, worker_handler(layout, node, name, provider))
+            )
+        await stack.enter_async_context(
+            running(layout, node, "boss", coordinator_handler(layout, boss))
+        )
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(finals_in(cli_box)))
+
+    # Assert：整次协作成功，而那一步确实派了两次
+    final = finals_in(cli_box)[0]
+    assert final.type is MessageType.TASK_RESULT, final.payload
+    state = RunStore(layout.blackboard).all()[0]
+    assert state.step("s1").state is StepState.DONE
+    assert state.step("s1").attempts == 2
+
+
+async def test_a_non_retryable_failure_still_fails_immediately(
+    layout: NodeLayout, node: Config
+) -> None:
+    """`retryable=False` 是 worker 在说「重试没有意义」—— 得听它的，别白试三次。"""
+    boss = FakeProvider([plan_turn(), verdict_turn()])
+    coder = FakeProvider([ProviderError("API key 不对", retryable=False)])
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+
+    async with AsyncExitStack() as stack:
+        await stack.enter_async_context(
+            running(layout, node, "coder", worker_handler(layout, node, "coder", coder))
+        )
+        await stack.enter_async_context(
+            running(layout, node, "boss", coordinator_handler(layout, boss))
+        )
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(finals_in(cli_box)))
+
+    state = RunStore(layout.blackboard).all()[0]
+    assert state.step("s1").state is StepState.FAILED
+    assert state.step("s1").attempts == 1  # 只派过一次
+
+
+async def test_retries_are_bounded(layout: NodeLayout, node: Config) -> None:
+    """`retryable` 默认就是 True，光看它挡不住无限重试 —— 次数上限才是刹车。"""
+    boss = FakeProvider([plan_turn(), verdict_turn()])
+    coder = FakeProvider([ProviderError("一直抖", retryable=True)])
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+
+    async with AsyncExitStack() as stack:
+        await stack.enter_async_context(
+            running(layout, node, "coder", worker_handler(layout, node, "coder", coder))
+        )
+        await stack.enter_async_context(
+            running(layout, node, "boss", coordinator_handler(layout, boss, max_step_attempts=2))
+        )
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(finals_in(cli_box)))
+
+    state = RunStore(layout.blackboard).all()[0]
+    assert state.step("s1").state is StepState.FAILED
+    assert state.step("s1").attempts == 2
