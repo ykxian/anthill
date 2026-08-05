@@ -3,6 +3,101 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 版本号对应 [docs/04-roadmap.md](./docs/04-roadmap.md) 里的里程碑。
 
+## [0.18.0] · 一次外部评审之后的修复
+
+一位评审者实测复现了 4 个确定性 bug，另有 2 个读码确认的架构级问题，
+外加一批能力缺口与测试/文档缺口。值得单独记一笔的是它们的**分布**：
+几乎全部集中在 M9–M14 这批后期新增的面板/编排代码里 ——
+前面几层建立起来的安全与健壮性基线，后来的代码没跟上。
+
+### 安全
+
+- **面板 WebSocket 完全没有鉴权。** `panel_ws` 在 `accept()` 之前一行检查都没有，
+  而它推的是和 `/api/state` 一模一样的 `build_snapshot()`：编排任务的正文、
+  最近的日志、对端清单。REST 那个口子早堵上了，WS 这个同样的口子一直漏着。
+  后果一：`--host 0.0.0.0` 下「写操作只对本机开放」的承诺在读方向被整个绕过。
+  后果二：**WebSocket 不受同源策略约束**，浏览器里随便打开一个网页，那页面
+  `new WebSocket("ws://127.0.0.1:45778/panel/ws")` 就能持续读走整个节点状态 ——
+  默认的回环配置一样中招。`authorize` 改收 `HTTPConnection`（Request 与 WebSocket
+  的共同基类），HTTP 抛异常、WS 用 1008 关掉。此前这个路由**一条鉴权测试都没有**。
+- **一个伪造的 UDP 包能劫持已信任节点的全部出站消息。** `observe()` 是
+  `endpoint or existing.endpoint` —— 来包带地址就无条件覆盖，不看是否已信任，
+  而 beacon 收包没有任何认证，这个 endpoint 又正是投递用的 URL。
+  「绝不影响信任状态」技术上没说错（`trusted` 确实保住了），但路由被换了，
+  后果一样：局域网是明文 HTTP，任务内容直接泄露 + 静默 DoS。
+  现在已信任的对端地址只认配对时那份，广播里自称的地址记进 `seen_endpoint`
+  并在 `anthill peers` / 面板上标出来，由人决定要不要重新配对。
+
+### 崩溃恢复的真实语义是「最多一次」
+
+`_dispatch` 一进来就 `seen.mark()`，之后才跑 handler。kill -9 打在 handler
+执行中间时，`recover_stale()` 确实把信从 `cur/` 退回了 `new/`，但重新处理时
+`mark()` 返回 False —— 只补一条回执就 return，**handler 永远不会重跑**。
+`mailbox.py` 的注释写着「seen.db 幂等正好兜住」，实际恰好相反：
+seen.db 把重放抑制掉了，退信那一步是个安慰剂。
+这一条直接否掉了文件邮箱架构最核心的卖点。
+
+seen.db 改成两阶段：`claim()` 登记「开始处理」并记下是哪个**进程实例**领的，
+`complete()` 在**信归档之后**才落。崩溃重启后令牌变了，claim 返回 RETRY，
+handler 重跑；同一进程里并发撞上同一个 id 仍判 DUPLICATE。
+令牌用 pid + 随机量（只用 pid 的话，机器重启后 pid 复用会把崩溃前的记录
+误判成「本进程正在处理」，重放又被吃掉）。
+
+### 另外三个确定性 bug
+
+- `STATE_MARK` 漏了 `StepState.SKIPPED`，而渲染是下标取值 —— 并行 DAG
+  一支失败、另一支还在跑的那一刻 KeyError，BOARD.md 从此停更、tick.failed 刷屏。
+- `@app.post("/node/{name}/agents/{{agent}}/{{action}}")` 少了 `f` 前缀，
+  注册的是字面量双花括号，**多节点远端启停从来没匹配上过任何请求**。
+  更糟的是它的 404 被翻译成「对端没开远端管理」，反过来诱导人去打开
+  `remote_admin` —— 那是整套里最重的开关。新增 `tests/unit/test_routes.py` 钉住整类。
+- `fit_to_budget` 没清孤儿 tool 结果（而压缩那条路一直是清的）：切口落在
+  assistant(tool_calls) 与它的结果之间时，两家 API 都直接 400。
+  这是唯一一类「任务越接近成功越容易炸」的缺陷 —— 历史短时永远遇不到。
+
+### 能力缺口
+
+- **工具集从 6 个补到 9 个**：`edit_file`（精确原文替换，不唯一就拒绝）、
+  `search_text` / `find_files`（受控只读检索，风险 LOW，无人值守下能用）、
+  `read_file` 支持 `offset/limit` 翻页。
+  此前 Agent 想在陌生代码库里定位一处实现只能一层层 `list_dir`（封顶 200 项），
+  改一行要全量重写整个文件，文件后半部分永远读不到。
+  `run_shell` 本可以顶上，但白名单只有七条验证类命令，白名单外一律 HIGH →
+  无人值守时判 DENY —— 框架主打的场景下它形同虚设。
+- **编排层真的读 `retryable` 了。** worker 明确回传的这个标志在整个 orchestrator
+  里从没被读过，`StepRecord.attempts` 记了没人用 —— 一次网络抖动就是整个 run 失败。
+  返工也不再无脑派给 `steps[-1]`（可能是个被 skipped、从没干过活的步骤）。
+- **死信有了出路**：`anthill dead list / retry / drop`。此前 `dead_letters()`
+  只被用来数个数，唯一的恢复手段是手动 `mv` 文件 —— 而进死信最常见的原因
+  恰恰是「对端 agentd 晚起了十秒」这种修好就该重投的。
+- **LAN 不再把「对端还没起来」判成永久失败**：`/deliver` 对「Agent 在配置里有、
+  但邮箱还没建」改回 503（暂时性）而不是 404（永久）。完全相同的情形在 local
+  传输里一直是可重试的，两条路不该给出相反的判断。
+- **所有单调增长的目录装上刹车**（`core/retention.py`）：`done/` 按天目录整个删，
+  `outbox/sent` 按 mtime 删，日志滚动成 `.1` 而不是截断。死信单独一个更长的
+  保留期，删了要吼一声。启动清一次，之后每小时一次。归档量是消息量的两倍以上
+  —— 每条业务消息还额外产生一条回执信封。
+- **跨机回程不再靠人肉驱动**：`anthill pull` 的逻辑剥进 `transport/pull.py`，
+  `serve` 每 60 秒自己拉一次（`[runtime] auto_pull_seconds`）。
+
+### 测试与 CI
+
+- **CI 从来没跑过浏览器测试。** 没有 `playwright install`，那 9 条投入最大、
+  抓 bug 最多的测试会 importorskip 通过、然后在 `launch()` 静默 skip ——
+  M14 那两个「藏了很久」的 bug 如果重现，CI 照样全绿。装上 chromium，
+  并加 `ANTHILL_REQUIRE_BROWSER=1`：装好了还跳过就判失败。
+- **CI 加 `timeout-minutes: 20`** —— 集成测试里有近百处轮询等待。
+- 两个 provider 的 `complete()`（也就是真正发出去的请求体）补测：
+  61% → 92%，62% → 94%。**真模型带子仍然没有** —— 那要 API key、要联网、要花钱。
+- 修掉 `test_replying_archives_both_the_request_and_the_draft` 的偶发失败：
+  等的是「结果到了」，断言的却是「归档完了」，而回信是先发后归档。
+
+### 文档
+
+roadmap 补上 M11–M15（此前只存在于 CHANGELOG）；README 从「M0–M10、657 个测试」
+更到「M0–M15、985 个测试」；PRD 非目标里「Web 面板只读」这条已被 M7/M10/M13/M14
+推翻，明确标注而不是删掉 —— 范围是需求推着变的，不是偷偷扩的。
+
 ## [0.17.0] · 桥接搬到面板上：加它的地方和用它的地方是同一个地方
 
 用户的原话：「我在网页配置加入 Claude Code，结果还要手动去和终端说；
