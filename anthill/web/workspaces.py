@@ -148,3 +148,29 @@ def delete(raw: str, *, purge: bool = False) -> dict[str, Any]:
         except OSError as exc:
             raise AntHillError(f"删不掉 {root}：{exc.strerror or exc}") from exc
     return {"ok": True, "path": str(path), "purged": True}
+
+
+def clear(*, keep: Iterable[Path] = (), stale_only: bool = False) -> dict[str, Any]:
+    """一次把清单清干净。**只动清单，一个文件都不删。**
+
+    为什么不做「一键连目录一起删」：那一下能带走好几个工作区的邮箱、黑板、
+    甚至密钥，而网页上的一次误点是没有 undo 的。单个删除那条路仍然在
+    （`delete(..., purge=True)`），它一次只毁一个，而且要你先看清是哪一个。
+
+    `keep` 是本进程正照看着的那些 —— 把自己从清单里踢掉，面板下一秒就找不着
+    自己了，那不是用户想要的「清理」。
+
+    `stale_only=True` 只清路径已经不存在的那些：那是最常见也最安全的一次清理，
+    单独给一条路，省得为了扫垃圾把好的一起端了。
+    """
+    safe = {str(Path(p).expanduser().resolve()) for p in keep}
+    kept: list[dict[str, Any]] = []
+    removed = 0
+    for item in _read():
+        raw = str(item.get("path", ""))
+        if raw in safe or (stale_only and Path(raw).is_dir()):
+            kept.append(item)
+            continue
+        removed += 1
+    _write(kept)
+    return {"ok": True, "removed": removed, "kept": len(kept)}

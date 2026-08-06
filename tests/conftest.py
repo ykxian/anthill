@@ -36,6 +36,26 @@ role = "worker"
 """
 
 
+@pytest.fixture(autouse=True)
+def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """**没有一条测试该写进开发者真正的 `~/.anthill/`。**
+
+    那个目录里有机器级工作区清单、面板令牌、密钥库。这个坑踩过两次了：
+    先是浏览器测试（起子进程，`Path.home` 的 monkeypatch 拦不住），
+    后来 `anthill init` 改成会登记工作区，于是整个测试套件把用户的清单刷成了
+    二十几条 `/tmp/pytest-of-.../test_xxx0`。
+
+    两样都换掉：`Path.home()` 管本进程，`HOME` 管它 spawn 出去的子进程。
+    autouse，所以**新写的测试不用记得这件事**——这才是真的防住。
+    """
+    # **放在 tmp_path 外面**：不少测试会列 tmp_path 的内容
+    # （比如目录浏览器那几条），家目录混在里面会把断言弄脏。
+    home = tmp_path.parent / "fake-homes" / tmp_path.name
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("HOME", str(home))
+
+
 @pytest.fixture
 def layout(tmp_path: Path) -> NodeLayout:
     node = NodeLayout(tmp_path).ensure_base()

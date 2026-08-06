@@ -445,6 +445,12 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
         <h3>这台机器上的工作区 <span class="meta" id="setup-count"></span></h3>
         <p class="why">一个工作区就是一个节点。同一个 serve 进程按信封上的收件人分派，所以不必一个工作区起一个进程。</p>
         <div id="ws-list"></div>
+        <div class="actions" style="margin-top:10px">
+          <button class="ghost" id="ws-clear-stale" type="button">清掉失效的</button>
+          <button class="ghost danger" id="ws-clear-all" type="button">清空清单</button>
+          <span class="meta">只动清单，不删磁盘上的文件；本进程正在照看的会留下</span>
+        </div>
+        <div class="hint" id="ws-clear-hint"></div>
         <div class="actions" style="margin-top:12px">
           <button class="ghost" id="setup-toggle" type="button">选一个目录…</button>
         </div>
@@ -1169,6 +1175,26 @@ $("events-export").addEventListener("click", () => {
   a.click();
   URL.revokeObjectURL(url);
 });
+
+
+// 清单里攒垃圾是常态：测试跑过的临时目录、试着建了又不要的、别处删掉了的。
+// 一条条点太蠢。**但只清清单，不删文件** —— 一次能带走好几个工作区的邮箱、
+// 黑板甚至密钥，而网页上的一次误点没有 undo。单个删除那条路还在，
+// 它一次只毁一个，而且要你先看清是哪一个。
+async function clearWorkspaces(staleOnly) {
+  const what = staleOnly ? "路径已经不存在的那些" : "全部（本进程正在照看的除外）";
+  if (!window.confirm(`从清单里移除${what}？\n\n磁盘上的文件不会被删。`)) return;
+  try {
+    const r = await api(u(`api/setup/workspaces?stale_only=${staleOnly}`), { method: "DELETE" });
+    say("ws-clear-hint", `移除了 ${r.removed} 条，留下 ${r.kept} 条`, "ok");
+    refreshSetup();
+  } catch (err) {
+    say("ws-clear-hint", String(err.message || err), "bad");
+  }
+}
+
+$("ws-clear-stale").addEventListener("click", () => clearWorkspaces(true));
+$("ws-clear-all").addEventListener("click", () => clearWorkspaces(false));
 
 const PANES = ["runs", "chat", "events", "bridge", "models", "setup", "config"];
 

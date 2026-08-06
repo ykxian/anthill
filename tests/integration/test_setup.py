@@ -21,6 +21,7 @@ from anthill.discovery.registry import PeerRegistry
 from anthill.web.app import create_app
 from anthill.web.context import NodeContext
 from anthill.web.setup import browse, is_workspace
+from anthill.web.workspaces import clear, listing, remember
 
 
 @pytest.fixture
@@ -438,3 +439,57 @@ def test_a_wildcard_bind_is_never_advertised_as_an_address() -> None:
 
     assert "0.0.0.0" in WILDCARD_HOSTS
     assert local_ip() not in WILDCARD_HOSTS
+
+
+# ---------- 一键清清单 ----------
+
+
+def registry_with(entries: list[Path]) -> None:
+    for path in entries:
+        remember(path, port=45778)
+
+
+async def test_clearing_the_list_leaves_the_files_alone(tmp_path: Path) -> None:
+    """**只动清单，一个文件都不删。**
+
+    一次能带走好几个工作区的邮箱、黑板甚至密钥，而网页上的一次误点没有 undo。
+    单个删除那条路仍然在，它一次只毁一个，而且要你先看清是哪一个。
+    """
+    junk = tmp_path / "junk"
+    create_workspace(NodeLayout(junk), node_name="junk")
+    registry_with([junk])
+
+    result = clear()
+
+    assert result["removed"] == 1
+    assert listing() == []
+    assert (junk / ".anthill" / "node.toml").is_file(), "文件不该被删"
+
+
+async def test_the_workspace_this_process_watches_is_kept(tmp_path: Path) -> None:
+    """把自己从清单里踢掉，面板下一秒就找不着自己了 —— 那不是用户要的「清理」。"""
+    mine, junk = tmp_path / "mine", tmp_path / "junk"
+    for path in (mine, junk):
+        create_workspace(NodeLayout(path), node_name=path.name)
+    registry_with([mine, junk])
+
+    result = clear(keep=[mine])
+
+    assert result["removed"] == 1
+    assert [e["path"] for e in listing()] == [str(mine)]
+
+
+async def test_stale_only_spares_the_ones_that_still_exist(tmp_path: Path) -> None:
+    """最常见也最安全的一次清理：只扫路径已经没了的那些。"""
+    alive, gone = tmp_path / "alive", tmp_path / "gone"
+    create_workspace(NodeLayout(alive), node_name="alive")
+    registry_with([alive, gone])  # gone 从来没建过
+
+    result = clear(stale_only=True)
+
+    assert result["removed"] == 1
+    assert [e["path"] for e in listing()] == [str(alive)]
+
+
+async def test_clearing_an_empty_list_is_not_an_error(tmp_path: Path) -> None:
+    assert clear()["removed"] == 0

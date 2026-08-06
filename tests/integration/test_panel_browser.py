@@ -373,3 +373,26 @@ def test_a_working_coordinator_can_be_built_without_touching_a_terminal(
     assert "sk-from-the-browser" not in text, "密钥绝不能写进 node.toml"
     assert errors == []
     page.close()
+
+
+def test_clearing_the_workspace_list_from_the_page(
+    browser: object, panel: str, tmp_path: Path
+) -> None:
+    """清单里攒垃圾是常态（跑过的临时目录、试着建了又不要的、别处删掉了的），
+    一条条点太蠢。但**只清清单，不删文件** —— 网页上的一次误点没有 undo。
+    """
+    page, errors = open_panel(browser, panel)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+    page.on("dialog", lambda d: d.accept())
+
+    page.click('.tab[data-pane="setup"]')
+    page.wait_for_selector("#ws-clear-all", timeout=15000)
+    page.click("#ws-clear-all")
+    page.wait_for_selector("#ws-clear-hint.ok", timeout=15000)
+
+    # 本进程正照看的那个必须还在 —— 把自己踢掉，面板下一秒就找不着自己了
+    assert "移除了" in page.text_content("#ws-clear-hint")
+    assert (tmp_path / "ws" / ".anthill" / "node.toml").is_file(), "文件不该被删"
+    page.wait_for_selector("#ws-list .ws", timeout=15000)
+    assert errors == []
+    page.close()
