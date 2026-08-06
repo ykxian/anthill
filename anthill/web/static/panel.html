@@ -1101,6 +1101,16 @@ function renderConnect(info) {
       </p>
     </div>
     <div class="recipe">
+      <h4>一个会话同时挂几个工作区</h4>
+      <p class="why">
+        再加一台 MCP server 就行，<b>名字不同</b>即可（下面这条给的是当前这个工作区）。
+        客户端按 server 名给工具分命名空间，两套 <code>anthill_*</code> 不会撞；
+        每台 server 的自我介绍里都写着自己是哪个节点、哪个工作区，会话分得清。
+      </p>
+      <pre id="rcp-multi">${esc(c.multi || "")}</pre>
+      <div class="row"><button class="ghost" type="button" data-copy="rcp-multi">复制</button></div>
+    </div>
+    <div class="recipe">
       <h4>3 · 加一个 hook（可选，配合 2 用）</h4>
       <p class="why">
         每轮开始前替它查一次收件箱，省得它忘了调。写进 <code>${esc(c.hook_path || "")}</code>；
@@ -1121,10 +1131,14 @@ function renderConnect(info) {
                 ? `空闲 · 上次是 ${esc(k.last_cwd)}（那个目录重开会认回它）`
                 : "还没有人用过"}</span>
             <span class="pill ${k.pid ? "ok" : ""}">${k.pid ? "已绑定" : "空闲"}</span>
+            <button class="ghost" type="button"
+                    data-copy-text="ANTHILL_AGENT=${esc(k.agent)} claude">复制启动命令</button>
           </div>`).join("")
         : `<div class="meta">这个工作区里还没有桥接 Agent</div>`}
       <p class="why" style="margin-top:8px">
-        认领跟着<b>进程</b>走：会话关了就自动空出来。但**不会随机重排** ——
+        每行右边那条命令可以直接拿去起会话 —— <b>不想依赖自动认领的话，一律用它</b>，
+        谁是谁一眼看得见。<br>
+        认领跟着<b>进程</b>走：会话关了就自动空出来。但<b>不会随机重排</b> ——
         同一个工作目录重开的会话会<b>认回上次那个</b>，因为上下文（邮箱、thread、
         别人对它说过的话）是挂在 Agent 上的，认错人就串了历史。
         新来的会话优先拿没人用过的。
@@ -1173,12 +1187,13 @@ $("bridge-pick").addEventListener("change", (event) => {
 
 // 通用复制：哪一段都行。以前只有「那一句提示词」有复制按钮。
 document.addEventListener("click", async (event) => {
-  const btn = event.target.closest?.("[data-copy]");
+  const btn = event.target.closest?.("[data-copy], [data-copy-text]");
   if (!btn) return;
-  const box = $(btn.dataset.copy);
-  if (!box) return;
+  // 两种：复制某个块的内容，或者复制一段现成的字面文本（每行那条启动命令）
+  const text = btn.dataset.copyText ?? $(btn.dataset.copy)?.textContent;
+  if (!text) return;
   try {
-    await navigator.clipboard.writeText(box.textContent);
+    await navigator.clipboard.writeText(text);
     say("bridge-hint", "已复制", "ok");
   } catch (err) {
     say("bridge-hint", "浏览器不让复制，手动选中吧", "bad");

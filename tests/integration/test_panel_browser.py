@@ -312,6 +312,12 @@ def test_the_bridge_tab_shows_the_queue_and_can_answer_it(
     assert "cc" not in page.text_content("#rcp-mcp").split("mcp serve")[1].split("-w")[0]
     assert "ANTHILL_AGENT=cc" in page.text_content("#rcp-pin")
     assert "认领" in page.text_content("#bridge-recipes")
+    # 一个会话挂多个工作区：再加一台 server，名字不同即可
+    assert "anthill-" in page.text_content("#rcp-multi")
+    # 「谁占着哪个」每行都能直接复制一条启动命令 —— 不想依赖自动认领就一律用它
+    pin = page.query_selector("[data-copy-text]")
+    assert pin is not None
+    assert pin.get_attribute("data-copy-text") == "ANTHILL_AGENT=cc claude"
 
     page.fill("#bridge-body textarea", "有依赖，scheduler 里同步调的")
     page.click("#bridge-body button")

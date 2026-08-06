@@ -3,6 +3,32 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 版本号对应 [docs/04-roadmap.md](./docs/04-roadmap.md) 里的里程碑。
 
+## [0.22.3] · 每行一条启动命令；一个会话挂几个工作区
+
+用户两条建议，都采纳了。
+
+### `ANTHILL_AGENT` 摆到网页上
+
+「谁占着哪个」那张表，每行右边多一个**复制启动命令**（`ANTHILL_AGENT=cc2 claude`）。
+用户说得对：**不想依赖自动认领的话，一律用它** —— 谁是谁一眼看得见，
+也不用记名字。自动认领仍然是默认（什么都不配也能用），显式那条现在同样顺手。
+
+### 一个会话同时挂几个工作区：本来就行
+
+先验证再回答：两台 MCP server 各 `-w` 一个工作区，同时活着，
+各自认领各自的桥接 Agent，互不干扰 ——
+
+    server A: wsa / cc -> wsA
+    server B: wsb / cc -> wsB
+
+客户端按 server 名给工具分命名空间，两套 `anthill_*` 不会撞；
+而每台 server 的自我介绍（`instructions`）里都写着自己是哪个节点、哪个工作区，
+会话分得清谁是谁。这条不用改代码，只是以前没写出来 ——
+现在面板和 QUICKSTART 都给了现成的两条命令。
+
+（验证过程中顺带确认：`anthill init --node-name wsA` 会被拒绝，
+大写字母不合法 —— 那是对的，只是我第一次写测试脚本时把错误吞了。）
+
 ## [0.22.2] · 钉死某一个时，不许悄悄把别人顶下线
 
 用户确认「`ANTHILL_AGENT=cc2 claude` 就能指定接下来启动的 Claude Code 是哪个」——

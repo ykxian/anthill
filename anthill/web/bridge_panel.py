@@ -136,6 +136,13 @@ def connect_recipes(layout: NodeLayout, agent: str) -> dict[str, Any]:
         # 写死名字的话，同一份配置下开几个会话就有几个抢同一个 Agent。
         "mcp": f"claude mcp add --scope user anthill -- {exe} mcp serve -w {workspace}",
         "pin": f"ANTHILL_AGENT={agent} claude",
+        # 一个会话挂多个工作区：**再加一台 server 就行**，名字不同即可。
+        # MCP 客户端按 server 名给工具分命名空间，两套 anthill_* 不会撞；
+        # 而每台 server 的自我介绍里都写着自己是哪个节点、哪个工作区。
+        "multi": (
+            f"claude mcp add --scope user anthill-{Path(workspace).name} "
+            f"-- {exe} mcp serve -w {workspace}"
+        ),
     }
 
 

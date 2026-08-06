@@ -109,6 +109,22 @@ ANTHILL_AGENT=cc2 claude
 钉到一个**还活着**的会话头上会被拦下，不会悄悄顶掉它（两个会话同时是同一个 Agent
 会互相抢消息）。真要接管：`ANTHILL_TAKEOVER=1 ANTHILL_AGENT=cc2 claude`。
 
+> 面板桥接页的「谁占着哪个」那张表，每行右边都有一个「复制启动命令」——
+> **不想依赖自动认领的话，一律用它**：谁是谁一眼看得见，也不用记名字。
+
+### 一个会话同时挂几个工作区
+
+再加一台 MCP server 就行，**名字不同**即可：
+
+```bash
+claude mcp add --scope user anthill-projA -- /路径/anthill mcp serve -w /工作区A
+claude mcp add --scope user anthill-projB -- /路径/anthill mcp serve -w /工作区B
+```
+
+客户端按 server 名给工具分命名空间，两套 `anthill_*` 不会撞；
+每台 server 的自我介绍里都写着自己是哪个节点、哪个工作区，会话分得清。
+两个工作区各自认领各自的桥接 Agent，互不干扰。
+
 > 为什么命令里不写 Agent 名：Claude Code 的配置粒度是**目录**。写死的话，
 > 那个目录下开几个会话就有几个抢同一个 Agent —— 配置文件表达不出「谁对应谁」。
 > 能穿透到单个会话的只有环境变量（子进程继承），所以默认走自动认领，
