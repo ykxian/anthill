@@ -318,6 +318,10 @@ async def _serve(
             ),
             peers=ctx.peers,
             log=log,
+            # 同一个 serve 照看的别的节点不是「对端」—— 它们在一个进程里，
+            # 投递走本地文件。不排掉的话它们会互相「发现」，
+            # 总控视图里本机的第二个工作区就变成一条「连不上的对端」
+            siblings=frozenset(n for n in nodes.names() if n != ctx.name),
         )
         for ctx in nodes.all()
     ]

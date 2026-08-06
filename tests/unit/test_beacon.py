@@ -16,7 +16,9 @@ ME = Announcement(node="laptop", endpoint="http://10.0.8.9:45778", agents=("cli"
 PEER = Announcement(node="lab", endpoint="http://10.0.8.21:45778", agents=("runner",))
 
 
-def make_beacon(tmp_path: Path, *, enabled: bool = True) -> tuple[Beacon, PeerRegistry]:
+def make_beacon(
+    tmp_path: Path, *, enabled: bool = True, siblings: frozenset[str] = frozenset()
+) -> tuple[Beacon, PeerRegistry]:
     peers = PeerRegistry(tmp_path)
     beacon = Beacon(
         settings=DiscoverySection(enabled=enabled, port=45999),
@@ -24,6 +26,7 @@ def make_beacon(tmp_path: Path, *, enabled: bool = True) -> tuple[Beacon, PeerRe
         peers=peers,
         log=EventLog(None, agent="laptop", echo=False),
         interval=0.05,
+        siblings=siblings,
     )
     return beacon, peers
 
@@ -166,3 +169,27 @@ async def test_announce_is_a_noop_before_the_socket_exists(tmp_path: Path) -> No
     beacon, _ = make_beacon(tmp_path)
 
     beacon.announce_once()  # 不抛异常即可
+
+
+def test_a_sibling_node_on_the_same_serve_is_not_a_peer(tmp_path: Path) -> None:
+    """一个 serve 照看两个工作区时，它给两个节点各发一份 announce、也各收一份 ——
+    于是节点 A 会把同机器的节点 B「发现」成外部对端。
+
+    那既没意义（它们本来就在一个进程里，投递走本地文件），又实实在在坏事：
+    总控视图合并时先到先得，B 会被显示成「连不上的对端」，
+    而不是本机的第二个工作区 —— 侧栏里点都点不了。
+    """
+    beacon, peers = make_beacon(tmp_path, siblings=frozenset({PEER.node}))
+
+    beacon.on_datagram(PEER.to_bytes(), ("10.0.8.21", 45999))
+
+    assert peers.get(PEER.node) is None, "同一个 serve 的另一个节点不该进 peers"
+
+
+def test_a_real_stranger_is_still_discovered(tmp_path: Path) -> None:
+    """别把闸修得太宽 —— 真正的外部节点照常发现。"""
+    beacon, peers = make_beacon(tmp_path, siblings=frozenset({"某个本机节点"}))
+
+    beacon.on_datagram(PEER.to_bytes(), ("10.0.8.21", 45999))
+
+    assert peers.get(PEER.node) is not None

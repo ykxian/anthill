@@ -201,12 +201,16 @@ def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog, token: str 
             await build_cluster(c.layout, c.config, c.peers, log, request.app.state.cluster_cache)
             for c in nodes.all()
         ]
-        merged: list[dict[str, Any]] = []
+        # **本机那一格优先。** 以前是先到先得：主节点的视图排在最前，而它的
+        # peers 里可能有一条同名记录（同一台机器上的另一个工作区被组播「发现」了），
+        # 于是本机的第二个节点在页面上显示成「连不上的对端」—— 侧栏里点都点不了。
+        merged: dict[str, dict[str, Any]] = {}
         for view in views:
             for entry in view["nodes"]:
-                if not any(e["node"] == entry["node"] for e in merged):
-                    merged.append(entry)
-        return {"node": nodes.primary_name, "nodes": merged}
+                seen = merged.get(entry["node"])
+                if seen is None or (entry.get("local") and not seen.get("local")):
+                    merged[entry["node"]] = entry
+        return {"node": nodes.primary_name, "nodes": list(merged.values())}
 
     @app.get(f"{PANEL_PATH}/api/chats")
     async def panel_chats(request: Request, node: str = "") -> dict[str, Any]:

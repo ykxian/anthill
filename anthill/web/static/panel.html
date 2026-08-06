@@ -313,6 +313,14 @@ button.danger:hover { color: var(--bad); border-color: color-mix(in srgb, var(--
 }
 .copy-line code { flex: 1; min-width: 0; color: var(--muted); word-break: break-all; }
 
+/* 侧栏里本机的每个工作区都是一组，可点可折叠 —— 那才是「切换工作区」该在的地方 */
+.node-head.pickable { cursor: pointer; border-radius: var(--r-sm); }
+.node-head.pickable:hover { background: var(--surface-2); }
+.node-head.pickable:active { transform: translateY(1px); }
+.node-group.focus > .node-head .name { font-weight: 600; }
+.node-group.focus { border-left: 2px solid var(--accent); padding-left: 6px; }
+.node-head .tag.on { color: var(--accent); font-weight: 600; }
+
 /* ---- 工作区 ---- */
 .ws {
   display: flex; align-items: center; gap: 10px; padding: 10px 12px;
@@ -651,22 +659,36 @@ function renderTopo(nodes) {
   const live = nodes.reduce((n, x) => n + (x.agents || []).filter(a => a.running).length, 0);
   $("topo-count").textContent = `${nodes.length} 个节点 · ${live}/${total} 在跑`;
 
-  paint($("topo-body"), nodes.map(node => `
-    <div class="node-group ${node.reachable ? "" : "down"}">
-      <div class="node-head">
+  // 本机的每个工作区就是一个节点组。**名字全都摆着，点一下就切过去并展开** ——
+  // 「怎么切换工作区」以前只能靠顶栏一个没标签、还会隐藏的下拉，等于没有。
+  const focus = focusedNode();
+  const locals = nodes.filter((n) => n.local).length;
+  paint($("topo-body"), nodes.map(node => {
+    // 多个本机节点时，只展开你正在操作的那个；别的收起来，省得一屏全是 Agent 卡片
+    const folded = node.local && locals > 1 && node.node !== focus;
+    const count = (node.agents || []).length;
+    return `
+    <div class="node-group ${node.reachable ? "" : "down"} ${node.local && node.node === focus ? "focus" : ""}">
+      <div class="node-head ${node.local && locals > 1 ? "pickable" : ""}"
+           ${node.local && locals > 1 ? `data-focus-node="${esc(node.node)}"` : ""}>
         <span class="dot ${node.reachable ? "on" : ""}"></span>
         <span class="name grow truncate">${esc(node.node)}</span>
-        <span class="tag">${node.local ? "本机" : node.reachable ? "已连上" : "连不上"}</span>
+        ${node.local && locals > 1
+          ? (node.node === focus
+              ? `<span class="tag on">正在操作</span>`
+              : `<span class="tag">${count} 个 Agent</span>`)
+          : `<span class="tag">${node.local ? "本机" : node.reachable ? "已连上" : "连不上"}</span>`}
         ${node.pairable && canWrite
           ? `<button class="ghost" type="button" data-pair="${esc(node.node)}">配对</button>`
           : ""}
       </div>
-      ${node.reachable
+      ${folded ? "" : node.reachable
         ? (node.agents || []).map((a) => agentCard(a, node)).join("") ||
           `<div class="node-note">这个节点没有配置 Agent</div>`
         : `<div class="node-note">${esc(node.reason || "")}</div>`}
-      ${node.local && canWrite ? addAgentForm() : ""}
-    </div>`).join("") || `<div class="empty">还没有配置 Agent</div>`);
+      ${!folded && node.local && node.node === focus && canWrite ? addAgentForm() : ""}
+    </div>`;
+  }).join("") || `<div class="empty">还没有配置 Agent</div>`);
 }
 
 // 已完成任务留几条。以前是 3 —— 第 4 条起在界面上永久消失，
@@ -812,6 +834,11 @@ function syncLocalNodes(info) {
 
 const local = { node: "" };
 
+// 「你正在操作本机的哪个节点」。没显式切过就是服务端的主节点。
+function focusedNode(info) {
+  return local.node || (info && info.node) || state.node || "";
+}
+
 // 按当前选中的本机节点给面板接口带上 ?node=
 function scoped(path) {
   if (!local.node) return path;
@@ -819,8 +846,11 @@ function scoped(path) {
 }
 
 function draw() {
-  $("node").textContent = state.node || "?";
-  document.title = `AntHill · ${state.node || ""}`;
+  // 顶栏那个名字是「你在操作哪个节点」—— 切过去之后它必须跟着变，
+  // 否则页面上没有任何东西告诉你切成功了（真踩过：只有 local.node 变了，界面纹丝不动）
+  const focus = local.node || state.node;
+  $("node").textContent = focus || "?";
+  document.title = `AntHill · ${focus || ""}`;
   renderTopo(state.nodes);
   renderApprovals(state.nodes);
   renderRuns(state.nodes);
@@ -835,9 +865,13 @@ function applyCluster(data) {
 }
 
 function applyLocal(snapshot) {
-  // WS 推来的只是本机 —— 只换本机那一格，别把别的机器抹掉
+  // WS 推来的只是**主节点**那一格 —— 只换它，别的一律留着。
+  //
+  // 这里以前是 `filter(n => !n.local && ...)`，也就是顺手把**所有本机节点**都扔了。
+  // 一台机器只照看一个工作区时看不出问题；照看两个的时候，第二个每 2 秒
+  // 被 WS 推送抹掉一次，侧栏里一闪一闪的。
   state.node = snapshot.node || state.node;
-  state.nodes = [asNode(snapshot), ...state.nodes.filter(n => !n.local && n.node !== snapshot.node)];
+  state.nodes = [asNode(snapshot), ...state.nodes.filter(n => n.node !== snapshot.node)];
   draw();
 }
 
@@ -1265,26 +1299,36 @@ const ready = { ready: true };
 function renderWorkspaces(info) {
   ready.ready = info.ready;
   syncLocalNodes(info);
+  // **「正在操作哪个」是客户端的事，不是服务端的 `current`。**
+  // `current` 说的是 serve 的主节点（省略 ?node= 时的默认），它不会因为你在
+  // 页面上点了「切到这个」而改变 —— 以前直接拿它当高亮，于是切换之后界面上
+  // 一个字都不动，看着像没生效。
+  const focus = focusedNode(info);
   $("setup-count").textContent = info.ready
-    ? `${info.workspaces.length} 个 · 当前 ${info.node}`
+    ? `${info.workspaces.length} 个 · 正在操作 ${focus}`
     : "还没配 —— 挑一个目录";
   paint($("ws-list"), info.workspaces.length
-    ? info.workspaces.map((w) => `
-      <div class="ws ${w.current ? "now" : ""}">
-        <span class="dot ${w.current ? "on" : ""}"></span>
+    ? info.workspaces.map((w) => {
+        const here = Boolean(w.node) && w.node === focus;
+        return `
+      <div class="ws ${here ? "now" : ""}">
+        <span class="dot ${here ? "on" : ""}"></span>
         <span class="name">${esc(w.name)}</span>
         <span class="pill">${esc(w.node || "未命名")}</span>
         <span class="path grow truncate">${esc(w.path)}</span>
-        ${w.current
-          ? `<span class="meta">面板正在看这个</span>`
+        ${here
+          ? `<span class="meta">正在操作这个${w.current ? "" : "（主节点是 " + esc(info.node) + "）"}</span>`
           : `${w.attached
                ? `<button class="ghost" type="button" data-ws-node="${esc(w.node)}">切到这个</button>`
                : w.exists
                  ? `<button class="ghost" type="button" data-ws="${esc(w.path)}" data-ws-op="adopt">接管</button>`
                  : `<span class="meta">不是工作区</span>`}
-             <button class="ghost" type="button" data-ws="${esc(w.path)}" data-ws-op="forget">移出清单</button>
-             <button class="ghost danger" type="button" data-ws="${esc(w.path)}" data-ws-op="purge">删除</button>`}
-      </div>`).join("")
+             ${w.current
+               ? `<span class="meta">主节点</span>`
+               : `<button class="ghost" type="button" data-ws="${esc(w.path)}" data-ws-op="forget">移出清单</button>
+                  <button class="ghost danger" type="button" data-ws="${esc(w.path)}" data-ws-op="purge">删除</button>`}`}
+      </div>`;
+      }).join("")
     : `<div class="empty">这台机器上还没有工作区</div>`);
   // 没配好时直接把目录浏览器摊开，别让人还要找
   if (!info.ready && $("picker").hidden) openPicker(info.home);
@@ -1333,6 +1377,8 @@ $("crumb-up").addEventListener("click", (event) => browseTo(event.target.dataset
 document.addEventListener("click", (event) => {
   const dir = event.target.closest?.("[data-dir]");
   if (dir) { browseTo(dir.dataset.dir); return; }
+  const groupHead = event.target.closest?.("[data-focus-node]");
+  if (groupHead) { switchNode(groupHead.dataset.focusNode); return; }
   const switchTo = event.target.closest?.("[data-ws-node]");
   if (switchTo) { switchNode(switchTo.dataset.wsNode); return; }
   const ws = event.target.closest?.("[data-ws]");

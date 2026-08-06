@@ -441,3 +441,54 @@ def test_purging_workspaces_from_the_page_spares_the_current_one(
     assert (tmp_path / "ws" / ".anthill" / "node.toml").is_file(), "把自己删了"
     assert errors == []
     page.close()
+
+
+@pytest.fixture
+def two_workspaces(tmp_path: Path) -> Iterator[str]:
+    """一个 serve 照看两个工作区 —— 这是「怎么切换」那些 bug 的现场。"""
+    home = tmp_path / "home"
+    (home / ".anthill").mkdir(parents=True, exist_ok=True)
+    first, second = tmp_path / "collab", tmp_path / "collab-tst"
+    create_workspace(NodeLayout(first), node_name="collab")
+    create_workspace(NodeLayout(second), node_name="collab-tst")
+    (home / ".anthill" / "workspaces.json").write_text(
+        json.dumps([{"path": str(second), "port": 45778}]), encoding="utf-8"
+    )
+    yield from serve(first, home=home)
+
+
+def test_both_workspaces_show_up_and_can_be_switched(browser: object, two_workspaces: str) -> None:
+    """侧栏把本机每个工作区都摆出来，点一下就切过去并展开。
+
+    这里一次盯住三个真出过的问题：
+
+    1. 点了「切到这个」界面纹丝不动 —— 顶栏的名字读的是服务端的**主节点**，
+       行上的高亮也是服务端按主节点算的，都不看客户端的焦点；
+    2. 第二个本机节点被显示成「连不上的对端」—— 总控视图合并时先到先得，
+       而主节点的 peers 里有一条同名记录（同机器的另一个工作区被组播「发现」了）；
+    3. WebSocket 每 2 秒把别的本机节点抹掉 —— 那段过滤写的是「留下所有非本机的」。
+    """
+    page, errors = open_panel(browser, two_workspaces)
+    page.wait_for_selector("#topo-body .node-group", timeout=15000)
+
+    heads = page.query_selector_all("[data-focus-node]")
+    names = sorted(h.get_attribute("data-focus-node") for h in heads)
+    assert names == ["collab", "collab-tst"], "两个工作区都该摆在侧栏里，且都能点"
+    assert "连不上" not in page.inner_text("#topo-body"), "本机的另一个工作区被当成对端了"
+
+    assert page.text_content("#node") == "collab"
+    next(h for h in heads if h.get_attribute("data-focus-node") == "collab-tst").click()
+    page.wait_for_function(
+        "() => document.getElementById('node').textContent === 'collab-tst'", timeout=15000
+    )
+
+    # 展开的是切过去的那个（它下面才有「加一个 Agent」）
+    focused = page.query_selector(".node-group.focus")
+    assert focused is not None and "collab-tst" in focused.inner_text()
+
+    # WS 推几轮之后两个都还在 —— 以前第二个会被推送抹掉
+    page.wait_for_timeout(5000)
+    assert len(page.query_selector_all("[data-focus-node]")) == 2
+    assert page.text_content("#node") == "collab-tst", "焦点被推送覆盖了"
+    assert errors == []
+    page.close()

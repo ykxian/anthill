@@ -81,9 +81,18 @@ class Beacon:
         peers: PeerRegistry,
         log: EventLog,
         interval: float = ANNOUNCE_INTERVAL,
+        siblings: frozenset[str] = frozenset(),
     ) -> None:
         self._settings = settings
         self._announcement = announcement
+        self._siblings = siblings
+        """同一个 serve 照看的**别的本机节点**。
+
+        一个进程照看两个工作区时，它给两个节点各发一份 announce，也各收一份 ——
+        于是节点 A 会把同机器的节点 B「发现」成一个外部对端。那既没意义
+        （它们本来就在一个进程里，投递走本地文件），又实实在在坏事：
+        面板的总控视图会把 B 显示成「连不上的对端」，而不是本机的第二个工作区。
+        """
         self._peers = peers
         self._log = log
         self._interval = interval
@@ -100,6 +109,8 @@ class Beacon:
             return
         if announcement.node == self._announcement.node:
             return  # 自己的包
+        if announcement.node in self._siblings:
+            return  # 同一个 serve 照看的另一个本机节点，不是「对端」
         if announcement.proto.split(".", 1)[0] != PROTO_VERSION.split(".", 1)[0]:
             self._log.warn(
                 "discovery.proto_mismatch",
