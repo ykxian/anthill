@@ -701,7 +701,7 @@ const DONE_RUNS_SHOWN = 20;
 function renderApprovals(nodes) {
   // 只看本机 —— 别台机器的待审批要走 `anthill approve --peer`，
   // 而且那些 prompt 里是命令原文，没必要为了显示把它加进对外快照
-  const here = nodes.find((n) => n.local);
+  const here = focusedNodeData(nodes);
   const pending = here?.approvals || [];
   const box = $("approvals");
   box.hidden = pending.length === 0;
@@ -837,6 +837,17 @@ const local = { node: "" };
 // 「你正在操作本机的哪个节点」。没显式切过就是服务端的主节点。
 function focusedNode(info) {
   return local.node || (info && info.node) || state.node || "";
+}
+
+// 当前操作的那个本机节点的数据。
+//
+// **别写 `find(n => n.local)`** —— 一台机器可以照看好几个工作区，那句拿到的是
+// 「第一个」，不是你切过去的那个。桥接标签页就栽在这儿：bridge Agent 配在第二个
+// 工作区里时，切过去之后标签页仍然不出现，因为它一直在问第一个节点有没有。
+function focusedNodeData(nodes) {
+  const list = nodes || state.nodes || [];
+  const focus = focusedNode();
+  return list.find((n) => n.local && n.node === focus) || list.find((n) => n.local);
 }
 
 // 按当前选中的本机节点给面板接口带上 ?node=
@@ -1013,7 +1024,7 @@ $("chat-form").addEventListener("submit", async (event) => {
 const bridge = { agent: "", seen: "" };
 
 function bridgeAgents() {
-  const here = state.nodes.find((n) => n.local);
+  const here = focusedNodeData();
   return (here?.agents || []).filter((a) => a.provider === "bridge").map((a) => a.name);
 }
 

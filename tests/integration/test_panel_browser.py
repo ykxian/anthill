@@ -492,3 +492,50 @@ def test_both_workspaces_show_up_and_can_be_switched(browser: object, two_worksp
     assert page.text_content("#node") == "collab-tst", "焦点被推送覆盖了"
     assert errors == []
     page.close()
+
+
+@pytest.fixture
+def bridge_in_second(tmp_path: Path) -> Iterator[str]:
+    """两个工作区，bridge Agent 在**第二个**里。"""
+    home = tmp_path / "home"
+    (home / ".anthill").mkdir(parents=True, exist_ok=True)
+    first, second = tmp_path / "collab", tmp_path / "collab-tst"
+    create_workspace(NodeLayout(first), node_name="collab")
+    layout = NodeLayout(second)
+    create_workspace(layout, node_name="collab-tst")
+    layout.node_toml.write_text(
+        layout.node_toml.read_text(encoding="utf-8")
+        + '\n[agents.cc]\nrole = "worker"\nbridge = true\n',
+        encoding="utf-8",
+    )
+    (home / ".anthill" / "workspaces.json").write_text(
+        json.dumps([{"path": str(second), "port": 45778}]), encoding="utf-8"
+    )
+    yield from serve(first, home=home)
+
+
+def test_the_bridge_tab_follows_the_focused_workspace(
+    browser: object, bridge_in_second: str
+) -> None:
+    """桥接 Agent 配在**第二个**工作区里时，切过去之后那个标签页必须出现。
+
+    以前 `bridgeAgents()` 写的是 `find(n => n.local)` —— 一台机器照看好几个工作区时，
+    那句拿到的是「第一个」，不是你切过去的那个。于是标签页一直不出现，
+    而人在页面上明明已经切过去了。待审批那一格是同一个写法，一起修的。
+    """
+    page, errors = open_panel(browser, bridge_in_second)
+    page.wait_for_selector("#topo-body .node-group", timeout=15000)
+
+    assert page.is_hidden('.tab[data-pane="bridge"]'), "第一个工作区没有 bridge Agent"
+
+    page.click('[data-focus-node="collab-tst"]')
+    page.wait_for_function(
+        "() => document.getElementById('node').textContent === 'collab-tst'", timeout=15000
+    )
+    page.wait_for_selector('.tab[data-pane="bridge"]:not([hidden])', timeout=15000)
+
+    page.click('.tab[data-pane="bridge"]')
+    page.wait_for_selector("#bridge-prompt", timeout=15000)
+    assert "collab-tst" in page.text_content("#bridge-prompt"), "提示词指向了别的工作区"
+    assert errors == []
+    page.close()

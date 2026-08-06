@@ -90,14 +90,22 @@ uv run anthill serve -w . --host 0.0.0.0 --panel-write --panel-token
 uv sync --extra mcp
 ```
 
-在 Claude Code 的 MCP 配置里加：
+在**要接进来的那个项目目录里**跑一次（`anthill` 不在 PATH 上时写绝对路径）：
 
-```jsonc
-{"mcpServers": {"anthill": {
-  "command": "anthill",
-  "args": ["mcp", "serve", "cc", "-w", "/path/to/workspace"]
-}}}
+```bash
+claude mcp add anthill -- /path/to/.venv/bin/anthill mcp serve cc -w /path/to/workspace
 ```
+
+`claude mcp add` 默认是 **local 作用域**：只对这个项目目录生效，
+你在别处开的 Claude Code 不受影响。三种作用域：
+
+| `--scope` | 谁受影响 |
+|---|---|
+| `local`（默认） | 只有这个项目、只有你 |
+| `project` | 这个项目的所有人（写进 `.mcp.json`，会进 git） |
+| `user` | **你开的每一个会话** |
+
+只想试一次：`claude --mcp-config <文件>`。
 
 `cc` 是你那个桥接 Agent 的名字 —— **这个会话代表它**。之后会话就有了
 `anthill_inbox` / `anthill_reply` / `anthill_send` / `anthill_runs` / `anthill_status`，

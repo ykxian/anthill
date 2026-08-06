@@ -11,8 +11,20 @@
 
 ## 装
 
-把 `settings.json` 里那段合并进你的 `~/.claude/settings.json`
-（或者项目里的 `.claude/settings.json`），把 `WORKSPACE` 和 `AGENT` 换成你自己的。
+**别写进 `~/.claude/settings.json`** —— 那是全局的，你开的每一个 Claude Code
+都会去查这个收件箱，而通常只有一两个会话需要接进来。
+
+按作用域从窄到宽：
+
+| 放哪 | 谁受影响 | 进 git 吗 |
+|---|---|---|
+| `<项目>/.claude/settings.local.json` | 只有这个项目、只有你 | 不（默认被忽略） |
+| `<项目>/.claude/settings.json` | 这个项目的所有人 | 进 |
+| `~/.claude/settings.json` | **你开的每一个会话** | 不 |
+| `claude --settings <文件>` | 只有这一次启动 | 不 |
+
+想接进来的那个会话，用 `.claude/settings.local.json`；只想试一次，
+用 `claude --settings`。
 
 ```jsonc
 {

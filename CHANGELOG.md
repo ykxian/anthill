@@ -3,6 +3,23 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 版本号对应 [docs/04-roadmap.md](./docs/04-roadmap.md) 里的里程碑。
 
+## [0.21.6] · 桥接标签页在第二个工作区里不出现
+
+用户：「没看到你说的桥接标签页。」单工作区是好的，我真开浏览器复现出了另一半 ——
+**bridge Agent 配在第二个工作区里时，切过去之后标签页仍然不出现。**
+
+`bridgeAgents()` 写的是 `state.nodes.find(n => n.local)` —— 一台机器照看好几个
+工作区时，那句拿到的是「第一个」，不是你切过去的那个。于是它一直在问第一个节点
+有没有 bridge Agent。待审批那一格是同一个写法，一起修的。
+
+抽出一个 `focusedNodeData()`：先按焦点找，找不到才退回第一个。
+**`find(n => n.local)` 这个写法本身就是坑** —— 多工作区支持进来之后它就不对了，
+只是单工作区时看不出来。
+
+顺带把两处配置作用域写进文档：`claude mcp add` 默认 local（只对这个项目目录生效），
+hook 用 `.claude/settings.local.json` —— 都别写进全局，
+不然你开的每一个 Claude Code 都会去查这个收件箱。
+
 ## [0.21.5] · 「切到这个」其实没切；侧栏改成工作区切换器
 
 用户反馈：「按切到这个之后显然不对。」真开浏览器点了一遍，确实 —— `local.node`
