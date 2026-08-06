@@ -23,6 +23,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from anthill.adapters.bridge import BRIDGE_DIR, BridgeHandler, parse_note
+from anthill.adapters.bridge_session import read_claim
 from anthill.core.config import Config
 from anthill.core.errors import AntHillError
 from anthill.core.ids import is_valid_id, new_id
@@ -76,8 +77,12 @@ def inbox(layout: NodeLayout, config: Config, agent: str) -> dict[str, Any]:
         "agent": agent,
         "waiting": waiting,
         "dir": str(handler.root),
-        "prompt": watch_prompt(handler.root),
+        "prompt": watch_prompt(layout, agent),
         "connect": connect_recipes(layout, agent),
+        "claims": [
+            {"agent": name, **(c.as_dict() if (c := read_claim(layout, name)) else {"pid": 0})}
+            for name in bridge_agents(config)
+        ],
     }
 
 
@@ -109,8 +114,8 @@ def connect_recipes(layout: NodeLayout, agent: str) -> dict[str, Any]:
         "hooks": {
             "UserPromptSubmit": [
                 {
-                    "command": f"{exe} bridge {agent} --json -w {workspace}",
-                    "description": f"每轮开始前看看 AntHill 那边有没有消息在等 {agent}",
+                    "command": f"{exe} bridge --json -w {workspace}",
+                    "description": "每轮开始前看看 AntHill 那边有没有消息在等这个会话",
                 }
             ]
         }
@@ -118,18 +123,35 @@ def connect_recipes(layout: NodeLayout, agent: str) -> dict[str, Any]:
     return {
         "exe": exe,
         "workspace": workspace,
-        "hook_path": ".claude/settings.local.json",
+        "agent": agent,
+        "hook_path": "~/.claude/settings.json",
         "hook": json.dumps(hook, ensure_ascii=False, indent=2),
-        "mcp": f"claude mcp add anthill -- {exe} mcp serve {agent} -w {workspace}",
+        # **一次性的全局配置** —— 命令里不写 Agent 名，让每个会话自己认领。
+        # 写死名字的话，同一份配置下开几个会话就有几个抢同一个 Agent。
+        "mcp": f"claude mcp add --scope user anthill -- {exe} mcp serve -w {workspace}",
+        "pin": f"ANTHILL_AGENT={agent} claude",
     }
 
 
-def watch_prompt(root: Path) -> str:
-    """给常驻会话粘的那句话。写在这里，省得人自己拼路径拼错。"""
+def watch_prompt(layout: NodeLayout, agent: str) -> str:
+    """给常驻会话粘的那句话 —— 一个**真的监控循环**。
+
+    以前这句是「盯着这个目录，出现新的 .md 就读」。那不是监控，是「你想起来了
+    看一眼」：会话没有任何理由主动去看那个目录，它在等你说话。
+    现在给的是一条**会阻塞**的命令（`--wait`），循环跑它才叫一直盯着。
+    """
+    exe = anthill_exe()
+    workspace = str(layout.workspace)
+    root = layout.agent_dir(agent) / BRIDGE_DIR
     return (
-        f"盯着 {root / 'inbox'}，出现新的 .md 就读，"
-        f"把回复写进 {root / 'outbox'} 下同名的文件。"
-        "收消息不阻塞，你可以慢慢想；想主动说一句就在 outbox 里放一个带 `to:` 的文件。"
+        f"你现在是 AntHill 协作网络里的 Agent「{agent}」。请循环做这件事：\n"
+        f"1. 运行 `{exe} bridge {agent} --wait 300 --json -w {workspace}`。"
+        "它会阻塞到有人找你为止（最多 5 分钟），超时就返回空。\n"
+        f"2. 有消息就读懂它，然后回复："
+        f'`{exe} bridge {agent} --reply <消息id> --text "你的回复" -w {workspace}`。\n'
+        "3. 不管有没有消息，回到第 1 步再跑一次。\n"
+        f'想主动找别人说话：`{exe} bridge {agent} --to <对方> --text "..." -w {workspace}`。\n'
+        f"（这些命令读写的就是 {root} 下的文件，你也可以直接编辑。）"
     )
 
 

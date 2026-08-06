@@ -1063,34 +1063,61 @@ function syncBridgePicker() {
 // MCP 工具也是拉取式的，装完之后会话依然不会主动知道有消息在等它。
 function renderConnect(info) {
   const c = info.connect || {};
+  const claims = info.claims || [];
   paint($("bridge-recipes"), `
     <div class="recipe">
-      <h4>1 · 什么都不装：粘一句给会话</h4>
-      <p class="why">最省事，但<b>是被动的</b> —— 你不说「看一下收件箱」它就不看。</p>
+      <h4>1 · 粘一句给会话：一个真的监控循环</h4>
+      <p class="why">
+        什么都不用装。给的是一条<b>会阻塞</b>的命令 —— 会话循环跑它，
+        没人找就一直等着，有人找立刻醒。这才叫「一直盯着」。
+      </p>
       <pre id="rcp-prompt">${esc(info.prompt || "")}</pre>
       <div class="row"><button class="ghost" type="button" data-copy="rcp-prompt">复制</button></div>
     </div>
     <div class="recipe">
-      <h4>2 · 一个 hook：让它自己查收</h4>
+      <h4>2 · MCP：配一次，之后每个会话自己认领</h4>
       <p class="why">
-        写进<b>那个项目</b>的 <code>${esc(c.hook_path || "")}</code> ——
-        别写进 <code>~/.claude/settings.json</code>，那是全局的，
-        你开的每一个会话都会来查这个收件箱。
-        <b>真正去掉人肉转述的是这一步</b>，不是 MCP。
+        先 <code>uv sync --extra mcp</code>，然后<b>只跑这一次</b>（<code>--scope user</code>，
+        全局；命令里<b>不写 Agent 名</b>）：
+      </p>
+      <pre id="rcp-mcp">${esc(c.mcp || "")}</pre>
+      <div class="row"><button class="ghost" type="button" data-copy="rcp-mcp">复制</button></div>
+      <p class="why" style="margin-top:8px">
+        之后每开一个 Claude Code，它都会<b>自动认领一个还没人占的桥接 Agent</b> ——
+        同一个目录开三个会话也各对应一个，不用为每个会话配一次。
+        想钉死某一个就带上环境变量启动：
+      </p>
+      <pre id="rcp-pin">${esc(c.pin || "")}</pre>
+      <div class="row"><button class="ghost" type="button" data-copy="rcp-pin">复制</button></div>
+      <p class="why" style="margin-top:8px">
+        会话里让它调 <code>anthill_wait</code> 就是阻塞等消息；
+        <code>anthill_inbox</code> / <code>anthill_reply</code> / <code>anthill_send</code> 是收发。
+      </p>
+    </div>
+    <div class="recipe">
+      <h4>3 · 加一个 hook（可选，配合 2 用）</h4>
+      <p class="why">
+        每轮开始前替它查一次收件箱，省得它忘了调。写进 <code>${esc(c.hook_path || "")}</code>；
+        命令里同样不写 Agent 名，跟着认领走。
       </p>
       <pre id="rcp-hook">${esc(c.hook || "")}</pre>
       <div class="row"><button class="ghost" type="button" data-copy="rcp-hook">复制</button></div>
     </div>
     <div class="recipe">
-      <h4>3 · MCP：给会话原生的工具</h4>
-      <p class="why">
-        先 <code>uv sync --extra mcp</code>，然后在<b>要接进来的那个项目目录里</b>跑下面这条。
-        默认 local 作用域，只对那个目录生效。
-        会话就有了 <code>anthill_inbox</code> / <code>anthill_reply</code> /
-        <code>anthill_send</code>，不用理解目录结构。
+      <h4>谁占着哪个</h4>
+      ${claims.length
+        ? claims.map((k) => `
+          <div class="step">
+            <span class="sid">${esc(k.agent)}</span>
+            <span class="what grow truncate">${k.pid
+              ? `pid ${esc(k.pid)} · ${esc(k.cwd || "")}`
+              : "还没有会话认领"}</span>
+            <span class="pill ${k.pid ? "ok" : ""}">${k.pid ? "已绑定" : "空闲"}</span>
+          </div>`).join("")
+        : `<div class="meta">这个工作区里还没有桥接 Agent</div>`}
+      <p class="why" style="margin-top:8px">
+        认领跟着<b>进程</b>走：会话关了就自动空出来，下一个会话接手。不用手动释放。
       </p>
-      <pre id="rcp-mcp">${esc(c.mcp || "")}</pre>
-      <div class="row"><button class="ghost" type="button" data-copy="rcp-mcp">复制</button></div>
     </div>`);
 }
 

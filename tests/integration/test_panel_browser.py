@@ -305,10 +305,13 @@ def test_the_bridge_tab_shows_the_queue_and_can_answer_it(
     # 「把终端接进来」那三条路也在，而且路径是填好的
     page.click("#bridge-connect > summary")
     page.wait_for_selector("#rcp-mcp", timeout=15000)
-    assert "inbox" in page.text_content("#rcp-prompt")
-    assert "mcp serve cc" in page.text_content("#rcp-mcp")
-    assert "bridge cc --json" in page.text_content("#rcp-hook")
-    assert "settings.local.json" in page.text_content("#bridge-recipes"), "得说清别写全局"
+    # 1 是个真的监控循环（会阻塞的命令），不是「你想起来看一眼」
+    assert "--wait" in page.text_content("#rcp-prompt")
+    # 2 的命令里**不写 Agent 名** —— 写死的话同一份配置下的会话会抢同一个
+    assert "mcp serve -w" in page.text_content("#rcp-mcp")
+    assert "cc" not in page.text_content("#rcp-mcp").split("mcp serve")[1].split("-w")[0]
+    assert "ANTHILL_AGENT=cc" in page.text_content("#rcp-pin")
+    assert "认领" in page.text_content("#bridge-recipes")
 
     page.fill("#bridge-body textarea", "有依赖，scheduler 里同步调的")
     page.click("#bridge-body button")
@@ -544,5 +547,6 @@ def test_the_bridge_tab_follows_the_focused_workspace(
     page.click("#bridge-connect > summary")
     page.wait_for_selector("#rcp-mcp", timeout=15000)
     assert "collab-tst" in page.text_content("#rcp-mcp"), "命令指向了别的工作区"
+    assert "ANTHILL_AGENT=cc" in page.text_content("#rcp-pin")
     assert errors == []
     page.close()

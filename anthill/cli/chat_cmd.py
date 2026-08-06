@@ -21,6 +21,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from anthill.adapters.bridge import BridgeHandler, parse_note
+from anthill.adapters.bridge_session import pick_agent, wait_for_message
 from anthill.agent.sender import Sender
 from anthill.cli.common import console, fail, load
 from anthill.core.config import Config
@@ -227,12 +228,17 @@ def _scan(layout: NodeLayout, config: Config, *, thread: str, seen: set[str]) ->
 
 
 def bridge_command(
-    agent: str = typer.Argument(..., help="桥接 Agent 的名字（node.toml 里 bridge = true 的那个）"),
+    agent: str = typer.Argument(
+        "", help="桥接 Agent 名；留空 = 用 $ANTHILL_AGENT，再没有就自动认领一个没人占的"
+    ),
     reply: str = typer.Option("", "--reply", help="回复哪一条（信封 id，可只给后 6 位）"),
     text: str = typer.Option("", "--text", help="回复正文；留空则只列出待办"),
     to: str = typer.Option("", "--to", help="主动发一条：收件人"),
     kind: str = typer.Option("chat", "--kind", help="主动发一条时：chat 或 task"),
     as_json: bool = typer.Option(False, "--json", help="输出 JSON，给 hook / 脚本用"),
+    wait: float = typer.Option(
+        0.0, "--wait", help="阻塞到有新消息为止（秒）—— 常驻会话循环跑这条就是「一直盯着」"
+    ),
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
 ) -> None:
     """看看有什么消息在等你，或者直接写一条回复／主动发一条。
@@ -241,9 +247,20 @@ def bridge_command(
     这个命令只是懒得开编辑器时的捷径。
     """
     layout, config = load(workspace)
+    # 不给名字就按环境变量 / 自动认领挑一个 —— 同一个目录下开几个会话时，
+    # 配置文件是表达不出「谁对应谁」的，只有环境变量能穿透到单个会话
+    try:
+        agent = pick_agent(layout, config, agent)
+    except AntHillError as exc:
+        fail(str(exc))
     if not config.agent(agent).bridge:
         fail(f"Agent {agent!r} 不是桥接 Agent；node.toml 里给它加 bridge = true")
     handler = BridgeHandler(root=layout.agent_dir(agent), agent_name=agent)
+
+    if wait > 0 and not (to or reply):
+        # 阻塞到有东西为止。**这就是「一直盯着」缺的那块** ——
+        # MCP 与 hook 都是拉取式的，会话闲着时没有任何东西会把它叫醒。
+        wait_for_message(handler.dir("inbox"), timeout=wait)
 
     if to:
         _draft(

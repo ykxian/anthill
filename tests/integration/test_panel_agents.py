@@ -390,7 +390,10 @@ async def test_the_panel_shows_what_the_bridge_agent_is_waiting_on(tmp_path: Pat
     assert "异步" in body["waiting"][0]["body"]
     assert body["waiting"][0]["frm"] == "box:cli"
     assert body["dir"].endswith("agents/cc/bridge")
-    assert "inbox" in body["prompt"] and "outbox" in body["prompt"]  # 给会话粘的那句话
+    # 给会话粘的那句话现在是个**真的监控循环**（一条会阻塞的命令），
+    # 而不是「盯着这个目录」—— 后者会话根本没理由主动去看
+    assert "--wait" in body["prompt"]
+    assert "--reply" in body["prompt"]
 
 
 async def test_replying_from_the_panel_writes_the_same_file_a_human_would(

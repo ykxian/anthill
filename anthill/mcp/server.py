@@ -24,10 +24,12 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 from anthill.adapters.bridge import BridgeHandler, parse_note
+from anthill.adapters.bridge_session import claim, pick_agent, wait_for_message
 from anthill.core.config import Config
 from anthill.core.errors import AntHillError
 from anthill.core.ids import new_id
@@ -35,6 +37,8 @@ from anthill.core.paths import NodeLayout
 from anthill.orchestrator.state import RunStore, StepState
 
 PREVIEW = 2000
+MAX_WAIT = 600.0
+"""单次阻塞等待的上限。太长会让客户端那边看起来像卡死。"""
 
 
 def build_server(layout: NodeLayout, config: Config, agent: str) -> Any:
@@ -49,6 +53,10 @@ def build_server(layout: NodeLayout, config: Config, agent: str) -> Any:
     except ImportError as exc:  # pragma: no cover - 取决于装没装
         raise AntHillError("缺少 mcp 依赖；执行 `uv sync --extra mcp` 安装") from exc
 
+    # 名字没给就按「环境变量 > 自动认领一个没人占的」挑 —— 这是「一一对应」的关键：
+    # Claude Code 的配置粒度是目录，同一个目录下开几个会话就是几份一样的配置，
+    # 配置文件表达不出「谁对应谁」。见 adapters/bridge_session.py。
+    agent = pick_agent(layout, config, agent)
     section = config.agents.get(agent)
     if section is None:
         raise AntHillError(
@@ -63,6 +71,9 @@ def build_server(layout: NodeLayout, config: Config, agent: str) -> Any:
 
     server = _Server("anthill")
     handler = BridgeHandler(root=layout.agent_dir(agent), agent_name=agent)
+    # 认领它：别的会话再起一个 MCP server 时会自动挑别的，不会两个会话抢同一个。
+    # 松开靠 pid —— 这个进程没了，认领自动失效（见 read_claim）。
+    claim(layout, agent, force=True)
 
     @server.tool()
     def anthill_inbox() -> dict[str, Any]:
@@ -85,6 +96,22 @@ def build_server(layout: NodeLayout, config: Config, agent: str) -> Any:
                 }
             )
         return {"agent": agent, "count": len(waiting), "waiting": waiting}
+
+    @server.tool()
+    def anthill_wait(seconds: float = 300.0) -> dict[str, Any]:
+        """**等到有人找我为止**（最多 seconds 秒），然后把消息给我。
+
+        闲着没事干的时候调这个，而不是反复调 anthill_inbox 空转 ——
+        它会一直阻塞到有新消息进来。返回的形状和 anthill_inbox 一样。
+        超时了就再调一次。
+        """
+        known = {p.name for p in handler.dir("inbox").glob("*.md")}
+        fresh = wait_for_message(
+            handler.dir("inbox"), timeout=max(1.0, min(seconds, MAX_WAIT)), known=known
+        )
+        if not fresh:
+            return {"agent": agent, "count": 0, "waiting": [], "timed_out": True}
+        return anthill_inbox()
 
     @server.tool()
     def anthill_reply(message_id: str, text: str) -> dict[str, Any]:
@@ -165,6 +192,7 @@ def build_server(layout: NodeLayout, config: Config, agent: str) -> Any:
             "node": config.node.name,
             "workspace": str(layout.workspace),
             "me": agent,
+            "claimed_by_pid": os.getpid(),
             "agents": [
                 {"name": name, "role": section.role, "brain": brain_of(section)}
                 for name, section in sorted(config.agents.items())

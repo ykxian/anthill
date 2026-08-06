@@ -84,61 +84,46 @@ uv run anthill serve -w . --host 0.0.0.0 --panel-write --panel-token
 两条路写的是同一批文件（`bridge/inbox/` 收，`bridge/outbox/` 回），
 所以会话在盯着的同时，你照样可以在网页上先替它回一句。
 
-## 6. 和 Claude Code 打通（MCP）
-
-两个方向，解决的是不同问题，别搞混。
-
-### 让 Claude Code 调 AntHill
+## 6. 把 Claude Code 接进来
 
 ```bash
 uv sync --extra mcp
 ```
 
-在**要接进来的那个项目目录里**跑一次（`anthill` 不在 PATH 上时写绝对路径）：
+**只配这一次**（全局，命令里**不写 Agent 名**）：
 
 ```bash
-claude mcp add anthill -- /path/to/.venv/bin/anthill mcp serve cc -w /path/to/workspace
+claude mcp add --scope user anthill -- /路径/.venv/bin/anthill mcp serve -w /你的工作区
 ```
 
-`claude mcp add` 默认是 **local 作用域**：只对这个项目目录生效，
-你在别处开的 Claude Code 不受影响。三种作用域：
+之后每开一个 Claude Code，它都会**自动认领一个还没人占的桥接 Agent**。
+在面板上建三个 bridge Agent，开三个会话，就是一一对应 —— 包括**同一个目录下
+开三个**，因为认领跟着进程走，不跟着目录走。
 
-| `--scope` | 谁受影响 |
-|---|---|
-| `local`（默认） | 只有这个项目、只有你 |
-| `project` | 这个项目的所有人（写进 `.mcp.json`，会进 git） |
-| `user` | **你开的每一个会话** |
+想钉死某一个：
 
-只想试一次：`claude --mcp-config <文件>`。
-
-`cc` 是你那个桥接 Agent 的名字 —— **这个会话代表它**。之后会话就有了
-`anthill_inbox` / `anthill_reply` / `anthill_send` / `anthill_runs` / `anthill_status`，
-不用再理解目录结构，也不用你转述。
-
-> **MCP 不解决「被动」。** 工具也是拉取式的，模型自己决定什么时候调。
-> 真正让会话主动查收的是 hook —— 见 [examples/claude-code-hook/](./examples/claude-code-hook/)。
-> 那条路一个文件就够，不用等 MCP；两者互补。
->
-> 这个 server 只暴露桥接与只读查询。改配置、启停 agentd、审批**不从这条路出去** ——
-> 那些的分量是「能在这台机器上执行命令」。
-
-### 让 AntHill 的 Agent 用外部工具
-
-```toml
-[mcp.files]
-command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/srv/data"]
-risk = "medium"          # 默认 high
-
-[agents.coder]
-provider = "deepseek"
-mcp = ["files"]          # 只给它声明过的那几台
+```bash
+ANTHILL_AGENT=cc2 claude
 ```
 
-`anthill mcp tools` 看有哪些、谁在用。
+> 为什么命令里不写 Agent 名：Claude Code 的配置粒度是**目录**。写死的话，
+> 那个目录下开几个会话就有几个抢同一个 Agent —— 配置文件表达不出「谁对应谁」。
+> 能穿透到单个会话的只有环境变量（子进程继承），所以默认走自动认领，
+> 要指定就用 `ANTHILL_AGENT`。
 
-> 风险默认 **high**：外部工具能干什么我们不知道，策略引擎照常管着它
-> （无人值守时 high 直接拒绝）。要用就显式降级，**由你来做这个判断**。
-> 连不上的 server 只记一条日志，不会让 agentd 起不来。
+认领跟着**进程**走：会话关了自动空出来，下一个接手。不用手动释放、不用超时。
+面板的桥接页上能看到谁占着哪个。
+
+### 让它「一直盯着」
+
+MCP 工具和 hook 都是**拉取式**的 —— 会话闲着的时候没有任何东西会叫醒它。
+所以有一个会阻塞的调用：
+
+- 会话里让它调 **`anthill_wait`**（阻塞到有人找为止，超时再调一次）；
+- 不想装 MCP 的话，粘桥接页上那句话就行 —— 那是条循环跑
+  `anthill bridge --wait 300` 的指令，一个道理。
+
+`anthill_inbox` / `anthill_reply` / `anthill_send` 是收发。
 
 ## 7. 存一件常做的事 / 定时跑 / 跑完通知
 

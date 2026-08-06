@@ -15,7 +15,9 @@ mcp_app = typer.Typer(help="MCP：把 AntHill 暴露给 Claude Code 这类客户
 
 @mcp_app.command("serve")
 def serve(
-    agent: str = typer.Argument(..., help="这个会话代表哪个桥接 Agent"),
+    agent: str = typer.Argument(
+        "", help="代表哪个桥接 Agent；留空 = $ANTHILL_AGENT，再没有就自动认领一个没人占的"
+    ),
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
 ) -> None:
     """以 stdio 起一个 MCP server。
