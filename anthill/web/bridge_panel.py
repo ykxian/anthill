@@ -14,6 +14,9 @@ Claude Code 会话）把回复写进 `bridge/outbox/`。这本来就是给人留
 
 from __future__ import annotations
 
+import json
+import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +77,50 @@ def inbox(layout: NodeLayout, config: Config, agent: str) -> dict[str, Any]:
         "waiting": waiting,
         "dir": str(handler.root),
         "prompt": watch_prompt(handler.root),
+        "connect": connect_recipes(layout, agent),
+    }
+
+
+def anthill_exe() -> str:
+    """这台机器上 `anthill` 的可执行路径。
+
+    **不能直接写 `anthill`** —— 它在不在 PATH 上取决于装法（`uv run` 装出来的
+    只在 venv 里）。页面上给的命令要能原样粘出去就跑得通，所以这里给绝对路径。
+    """
+    candidate = Path(sys.executable).with_name("anthill")
+    if candidate.is_file():
+        return str(candidate)
+    return shutil.which("anthill") or "anthill"
+
+
+def connect_recipes(layout: NodeLayout, agent: str) -> dict[str, Any]:
+    """把「怎么让一个终端会话接进来」写成可以直接粘的三段。
+
+    以前这一页只给一句「盯着这个目录」的提示词 —— 那是最被动的一条路，
+    而另外两条（hook 自动查收、MCP 原生工具）只写在文档里。
+    人是在这一页上想起「我要把 Claude Code 接进来」的，东西就该摆在这儿。
+
+    路径全部由服务端填好：`anthill` 在不在 PATH 上、工作区在哪，
+    页面猜不出来，而猜错的结果是粘过去跑不通。
+    """
+    exe = anthill_exe()
+    workspace = str(layout.workspace)
+    hook = {
+        "hooks": {
+            "UserPromptSubmit": [
+                {
+                    "command": f"{exe} bridge {agent} --json -w {workspace}",
+                    "description": f"每轮开始前看看 AntHill 那边有没有消息在等 {agent}",
+                }
+            ]
+        }
+    }
+    return {
+        "exe": exe,
+        "workspace": workspace,
+        "hook_path": ".claude/settings.local.json",
+        "hook": json.dumps(hook, ensure_ascii=False, indent=2),
+        "mcp": f"claude mcp add anthill -- {exe} mcp serve {agent} -w {workspace}",
     }
 
 

@@ -302,7 +302,13 @@ def test_the_bridge_tab_shows_the_queue_and_can_answer_it(
     page.wait_for_selector("#bridge-body .waiting", timeout=15000)
 
     assert "异步" in page.text_content("#bridge-body")
-    assert "inbox" in page.text_content("#bridge-prompt")  # 想粘给会话的那句话也在
+    # 「把终端接进来」那三条路也在，而且路径是填好的
+    page.click("#bridge-connect > summary")
+    page.wait_for_selector("#rcp-mcp", timeout=15000)
+    assert "inbox" in page.text_content("#rcp-prompt")
+    assert "mcp serve cc" in page.text_content("#rcp-mcp")
+    assert "bridge cc --json" in page.text_content("#rcp-hook")
+    assert "settings.local.json" in page.text_content("#bridge-recipes"), "得说清别写全局"
 
     page.fill("#bridge-body textarea", "有依赖，scheduler 里同步调的")
     page.click("#bridge-body button")
@@ -535,7 +541,8 @@ def test_the_bridge_tab_follows_the_focused_workspace(
     page.wait_for_selector('.tab[data-pane="bridge"]:not([hidden])', timeout=15000)
 
     page.click('.tab[data-pane="bridge"]')
-    page.wait_for_selector("#bridge-prompt", timeout=15000)
-    assert "collab-tst" in page.text_content("#bridge-prompt"), "提示词指向了别的工作区"
+    page.click("#bridge-connect > summary")
+    page.wait_for_selector("#rcp-mcp", timeout=15000)
+    assert "collab-tst" in page.text_content("#rcp-mcp"), "命令指向了别的工作区"
     assert errors == []
     page.close()

@@ -313,6 +313,25 @@ button.danger:hover { color: var(--bad); border-color: color-mix(in srgb, var(--
 }
 .copy-line code { flex: 1; min-width: 0; color: var(--muted); word-break: break-all; }
 
+/* 「把终端接进来」那一块：三条路摆在一起，路径由服务端填好，点一下就复制 */
+#bridge-connect { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }
+#bridge-connect > summary {
+  cursor: pointer; padding: 10px 14px; font-weight: 600; font-size: 13.5px;
+  list-style: none;
+}
+#bridge-connect > summary::-webkit-details-marker { display: none; }
+#bridge-connect > summary::before { content: "▸ "; color: var(--accent); }
+#bridge-connect[open] > summary::before { content: "▾ "; }
+.recipe { padding: 4px 14px 14px; border-top: 1px solid var(--line-soft); }
+.recipe h4 { margin: 12px 0 4px; font-size: 13px; font-family: var(--sans); }
+.recipe .why { margin: 0 0 8px; font-size: 12px; color: var(--muted); line-height: 1.6; }
+.recipe pre {
+  margin: 0; padding: 9px 11px; overflow-x: auto;
+  background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: var(--r-sm);
+  font-family: var(--mono); font-size: 12px; line-height: 1.6; white-space: pre;
+}
+.recipe .row { margin-top: 6px; }
+
 /* 侧栏里本机的每个工作区都是一组，可点可折叠 —— 那才是「切换工作区」该在的地方 */
 .node-head.pickable { cursor: pointer; border-radius: var(--r-sm); }
 .node-head.pickable:hover { background: var(--surface-2); }
@@ -434,14 +453,10 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
         桥接 <select id="bridge-pick" aria-label="哪个桥接 Agent"></select>
         <span class="count" id="bridge-count"></span>
       </div>
-      <div class="copy-line">
-        <code id="bridge-prompt"></code>
-        <button class="ghost" id="bridge-copy" type="button">复制</button>
-      </div>
-      <p class="meta" style="margin:-6px 0 14px">
-        这句话是给你那个常开的 Claude Code 会话粘的 —— 让它盯着目录自动收发。
-        不想开会话也行：下面的消息你可以直接在这儿回。
-      </p>
+      <details id="bridge-connect" style="margin-bottom:14px">
+        <summary>把一个终端会话接进来（三选一）</summary>
+        <div id="bridge-recipes"></div>
+      </details>
       <form class="actions" id="bridge-say" style="margin-bottom:16px">
         <input id="bridge-to" placeholder="主动说一句：发给谁（如 coder 或 lab:coder）" autocomplete="off" style="flex:0 0 260px" />
         <input id="bridge-text" placeholder="说点什么…" autocomplete="off" />
@@ -518,7 +533,7 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
       <div class="card-block" style="margin-top:18px">
         <h3>存一个密钥</h3>
         <p class="why">
-          <code>node.toml</code> 里**永远只有变量名**，这条规矩没动 —— 它会进 git、会被
+          <code>node.toml</code> 里<b>永远只有变量名</b>，这条规矩没动 —— 它会进 git、会被
           <code>fetch</code> 拉走、会显示在配置页上。密钥单独存
           <code>~/.anthill/secrets.env</code>（权限 0600，和 peers.json 同一个待遇），
           <b>只进不出</b>：没有任何接口会把它读回来。
@@ -1040,11 +1055,50 @@ function syncBridgePicker() {
   picker.value = bridge.agent;
 }
 
+
+// 「把终端接进来」的三条路，路径由服务端填好 —— `anthill` 在不在 PATH 上、
+// 工作区在哪，页面猜不出来，而猜错的结果是粘过去跑不通。
+//
+// 顺序是有意的：从「什么都不装」到「最规整」。**并且要说清楚 MCP 不替代 hook** ——
+// MCP 工具也是拉取式的，装完之后会话依然不会主动知道有消息在等它。
+function renderConnect(info) {
+  const c = info.connect || {};
+  paint($("bridge-recipes"), `
+    <div class="recipe">
+      <h4>1 · 什么都不装：粘一句给会话</h4>
+      <p class="why">最省事，但<b>是被动的</b> —— 你不说「看一下收件箱」它就不看。</p>
+      <pre id="rcp-prompt">${esc(info.prompt || "")}</pre>
+      <div class="row"><button class="ghost" type="button" data-copy="rcp-prompt">复制</button></div>
+    </div>
+    <div class="recipe">
+      <h4>2 · 一个 hook：让它自己查收</h4>
+      <p class="why">
+        写进<b>那个项目</b>的 <code>${esc(c.hook_path || "")}</code> ——
+        别写进 <code>~/.claude/settings.json</code>，那是全局的，
+        你开的每一个会话都会来查这个收件箱。
+        <b>真正去掉人肉转述的是这一步</b>，不是 MCP。
+      </p>
+      <pre id="rcp-hook">${esc(c.hook || "")}</pre>
+      <div class="row"><button class="ghost" type="button" data-copy="rcp-hook">复制</button></div>
+    </div>
+    <div class="recipe">
+      <h4>3 · MCP：给会话原生的工具</h4>
+      <p class="why">
+        先 <code>uv sync --extra mcp</code>，然后在<b>要接进来的那个项目目录里</b>跑下面这条。
+        默认 local 作用域，只对那个目录生效。
+        会话就有了 <code>anthill_inbox</code> / <code>anthill_reply</code> /
+        <code>anthill_send</code>，不用理解目录结构。
+      </p>
+      <pre id="rcp-mcp">${esc(c.mcp || "")}</pre>
+      <div class="row"><button class="ghost" type="button" data-copy="rcp-mcp">复制</button></div>
+    </div>`);
+}
+
 function renderBridge(info) {
   $("bridge-count").textContent = info.waiting.length
     ? `${info.waiting.length} 条在等你`
     : "没有在等你的消息";
-  $("bridge-prompt").textContent = info.prompt;
+  renderConnect(info);
   paint($("bridge-body"), info.waiting.length
     ? info.waiting.map((w) => `
       <div class="waiting">
@@ -1079,12 +1133,17 @@ $("bridge-pick").addEventListener("change", (event) => {
   loadBridge();
 });
 
-$("bridge-copy").addEventListener("click", async () => {
+// 通用复制：哪一段都行。以前只有「那一句提示词」有复制按钮。
+document.addEventListener("click", async (event) => {
+  const btn = event.target.closest?.("[data-copy]");
+  if (!btn) return;
+  const box = $(btn.dataset.copy);
+  if (!box) return;
   try {
-    await navigator.clipboard.writeText($("bridge-prompt").textContent);
-    say("bridge-hint", "已复制 —— 粘给你的 Claude Code 会话", "ok");
+    await navigator.clipboard.writeText(box.textContent);
+    say("bridge-hint", "已复制", "ok");
   } catch (err) {
-    say("bridge-hint", "浏览器不让复制，手动选中上面那行吧", "bad");
+    say("bridge-hint", "浏览器不让复制，手动选中吧", "bad");
   }
 });
 
@@ -1252,7 +1311,7 @@ async function clearWorkspaces(staleOnly, purge) {
   const more = doomed.count > 12 ? `\n…（共 ${doomed.count} 个）` : "";
   const head = purge
     ? `删掉这 ${doomed.count} 个工作区的 .anthill/ 目录？\n\n` +
-      "这会带走它们的邮箱、黑板、密钥，**不可撤销**。\n" +
+      "这会带走它们的邮箱、黑板、密钥，不可撤销。\n" +
       "（你放在那些目录里的别的东西不动）\n\n"
     : `从清单里移除这 ${doomed.count} 个？磁盘上的文件不会被删。\n\n`;
   if (!window.confirm(head + listed + more)) return;
