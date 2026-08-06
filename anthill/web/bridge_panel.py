@@ -23,7 +23,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from anthill.adapters.bridge import BRIDGE_DIR, BridgeHandler, parse_note
-from anthill.adapters.bridge_session import read_claim
+from anthill.adapters.bridge_session import last_claim, read_claim
 from anthill.core.config import Config
 from anthill.core.errors import AntHillError
 from anthill.core.ids import is_valid_id, new_id
@@ -80,7 +80,13 @@ def inbox(layout: NodeLayout, config: Config, agent: str) -> dict[str, Any]:
         "prompt": watch_prompt(layout, agent),
         "connect": connect_recipes(layout, agent),
         "claims": [
-            {"agent": name, **(c.as_dict() if (c := read_claim(layout, name)) else {"pid": 0})}
+            {
+                "agent": name,
+                **(c.as_dict() if (c := read_claim(layout, name)) else {"pid": 0}),
+                # 空闲的也要说「上次是谁」—— 认领有目录亲和性，
+                # 空闲不等于下一个会话随机拿到它
+                "last_cwd": (p.cwd if (p := last_claim(layout, name)) else ""),
+            }
             for name in bridge_agents(config)
         ],
     }

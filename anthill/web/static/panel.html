@@ -1111,12 +1111,17 @@ function renderConnect(info) {
             <span class="sid">${esc(k.agent)}</span>
             <span class="what grow truncate">${k.pid
               ? `pid ${esc(k.pid)} · ${esc(k.cwd || "")}`
-              : "还没有会话认领"}</span>
+              : k.last_cwd
+                ? `空闲 · 上次是 ${esc(k.last_cwd)}（那个目录重开会认回它）`
+                : "还没有人用过"}</span>
             <span class="pill ${k.pid ? "ok" : ""}">${k.pid ? "已绑定" : "空闲"}</span>
           </div>`).join("")
         : `<div class="meta">这个工作区里还没有桥接 Agent</div>`}
       <p class="why" style="margin-top:8px">
-        认领跟着<b>进程</b>走：会话关了就自动空出来，下一个会话接手。不用手动释放。
+        认领跟着<b>进程</b>走：会话关了就自动空出来。但**不会随机重排** ——
+        同一个工作目录重开的会话会<b>认回上次那个</b>，因为上下文（邮箱、thread、
+        别人对它说过的话）是挂在 Agent 上的，认错人就串了历史。
+        新来的会话优先拿没人用过的。
       </p>
     </div>`);
 }

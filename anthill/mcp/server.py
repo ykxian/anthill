@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -69,7 +70,21 @@ def build_server(layout: NodeLayout, config: Config, agent: str) -> Any:
             "别的 Agent 有自己的大脑，不该由这个会话代答。"
         )
 
-    server = _Server("anthill")
+    # **让它一开口就知道自己是谁。** 自动认领的代价是「你不知道这个会话拿到了哪个」——
+    # instructions 会随会话一起进上下文，stderr 那行给人看（MCP 客户端会显示 server 日志）。
+    server = _Server(
+        "anthill",
+        instructions=(
+            f"你在 AntHill 协作网络里代表 Agent「{agent}」"
+            f"（节点 {config.node.name}，工作区 {layout.workspace}）。\n"
+            "别人发给你的消息用 anthill_inbox 看、anthill_reply 回；"
+            "闲着的时候调 anthill_wait 阻塞等新消息，别反复空转 anthill_inbox。"
+        ),
+    )
+    print(
+        f"[anthill] 这个会话 = {agent}（节点 {config.node.name}，工作区 {layout.workspace}）",
+        file=sys.stderr,
+    )
     handler = BridgeHandler(root=layout.agent_dir(agent), agent_name=agent)
     # 认领它：别的会话再起一个 MCP server 时会自动挑别的，不会两个会话抢同一个。
     # 松开靠 pid —— 这个进程没了，认领自动失效（见 read_claim）。

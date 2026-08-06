@@ -23,6 +23,7 @@ import pytest
 from anthill.adapters.bridge_session import (
     AGENT_ENV,
     claim,
+    last_claim,
     pick_agent,
     read_claim,
     release,
@@ -100,8 +101,10 @@ def test_a_dead_session_releases_its_agent(node: tuple[NodeLayout, Config]) -> N
     # 一个几乎不可能存在的 pid —— 装成「上一个会话已经没了」
     path.write_text('{"pid": 2147483646, "cwd": "/gone", "since": ""}', encoding="utf-8")
 
-    assert read_claim(layout, "cc1") is None
-    assert pick_agent(layout, config) == "cc1", "死掉的会话该把 Agent 让出来"
+    assert read_claim(layout, "cc1") is None, "死掉的会话该把 Agent 让出来"
+    # 让出来 ≠ 下一个会话就该拿它 —— 没人用过的优先（别去碰别人的历史）。
+    # 真要接手就显式指定。
+    assert pick_agent(layout, config, "cc1") == "cc1"
 
 
 def test_claiming_something_another_live_session_holds_is_refused(
@@ -182,3 +185,86 @@ def test_already_seen_messages_do_not_end_the_wait(tmp_path: Path) -> None:
 
 def test_a_missing_inbox_does_not_crash_the_loop(tmp_path: Path) -> None:
     assert wait_for_message(tmp_path / "从来没有过", timeout=1.0) == []
+
+
+# ---------- 重启之后别认错人 ----------
+
+
+def bind(layout: NodeLayout, config: Config, cwd: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """装成「某个目录里的一个会话起来了，认领完又退出了」。"""
+    monkeypatch.chdir(cwd)
+    name = pick_agent(layout, config)
+    claim(layout, name)
+    release(layout, name)
+    return name
+
+
+def test_a_session_gets_the_same_agent_back_after_a_restart(
+    node: tuple[NodeLayout, Config], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**这是自动认领最危险的地方。**
+
+    A 本来是 cc1、B 是 cc2；两个都重启一次、顺序反过来，纯粹「挑第一个空的」
+    会变成 A→cc2、B→cc1。而上下文是挂在 Agent 上的（邮箱、thread、
+    别人对「cc1 说过什么」的记忆）—— 认错人等于串了历史。
+
+    pid 每次都变，靠不住；**工作目录**跨重启是稳的。
+    """
+    layout, config = node
+    a, b = tmp_path / "projA", tmp_path / "projB"
+    for path in (a, b):
+        path.mkdir()
+
+    first = {"A": bind(layout, config, a, monkeypatch), "B": bind(layout, config, b, monkeypatch)}
+    # 反着重启
+    again = {"B": bind(layout, config, b, monkeypatch), "A": bind(layout, config, a, monkeypatch)}
+
+    assert first["A"] != first["B"], "两个目录该拿到不同的 Agent"
+    assert again == first, f"重启后对应关系变了：{first} -> {again}"
+
+
+def test_a_second_session_does_not_steal_the_first_ones_agent(
+    node: tuple[NodeLayout, Config], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """先来的那个用完退出之后，后来的**不该顺手接管它** —— 那样每开一次就洗一次牌，
+    而且直接读到了别人的会话历史。没人用过的优先。"""
+    layout, config = node
+    a, b = tmp_path / "projA", tmp_path / "projB"
+    for path in (a, b):
+        path.mkdir()
+
+    mine = bind(layout, config, a, monkeypatch)
+    theirs = bind(layout, config, b, monkeypatch)
+
+    assert mine != theirs
+
+
+def test_affinity_survives_even_when_the_agent_is_free(
+    node: tuple[NodeLayout, Config], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """松开认领**不能把记录删掉** —— 删了就等于每次重启重新洗牌。"""
+    layout, config = node
+    a = tmp_path / "projA"
+    a.mkdir()
+
+    name = bind(layout, config, a, monkeypatch)
+
+    assert read_claim(layout, name) is None, "退出之后该是空闲的"
+    assert last_claim(layout, name) is not None, "但得记得上次是谁"
+    assert last_claim(layout, name).cwd == str(a)
+
+
+def test_running_out_of_virgin_agents_falls_back_to_reuse(
+    node: tuple[NodeLayout, Config], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没有没人用过的了，才去接别人用过的 —— 这时候串上下文是不可避免的取舍，
+    但至少它是最后一档，不是第一档。"""
+    layout, config = node
+    for name in ("projA", "projB", "projC"):
+        (tmp_path / name).mkdir()
+    bind(layout, config, tmp_path / "projA", monkeypatch)
+    bind(layout, config, tmp_path / "projB", monkeypatch)
+
+    third = bind(layout, config, tmp_path / "projC", monkeypatch)
+
+    assert third in {"cc1", "cc2"}  # 只能接一个用过的，但不该抛

@@ -250,9 +250,13 @@ def bridge_command(
     # 不给名字就按环境变量 / 自动认领挑一个 —— 同一个目录下开几个会话时，
     # 配置文件是表达不出「谁对应谁」的，只有环境变量能穿透到单个会话
     try:
-        agent = pick_agent(layout, config, agent)
+        picked = pick_agent(layout, config, agent)
     except AntHillError as exc:
         fail(str(exc))
+    # 自动挑的时候一定要说一声挑到了谁 —— 不然人不知道这个终端对应哪个 Agent
+    if not agent and not as_json:
+        console.print(f"[dim]这个会话 = [b]{picked}[/b][/dim]")
+    agent = picked
     if not config.agent(agent).bridge:
         fail(f"Agent {agent!r} 不是桥接 Agent；node.toml 里给它加 bridge = true")
     handler = BridgeHandler(root=layout.agent_dir(agent), agent_name=agent)

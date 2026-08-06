@@ -87,19 +87,29 @@ def claim_path(layout: NodeLayout, agent: str) -> Path:
     return layout.agent_dir(agent) / BRIDGE_DIR / CLAIM_FILE
 
 
-def read_claim(layout: NodeLayout, agent: str) -> Claim | None:
-    """谁认领了这个 Agent。**认领的进程死了就当没认领** —— 那正是自动回收。"""
+def last_claim(layout: NodeLayout, agent: str) -> Claim | None:
+    """**上一次**是谁认领的 —— 不管那个进程还在不在。
+
+    「还在不在」是给「空不空」用的；这个是给**亲和性**用的：
+    上次在 `/home/x/projA` 的会话认领了 cc1，那么下次 `/home/x/projA` 里的会话
+    还该拿到 cc1。见 `pick_agent`。
+    """
     try:
         data = json.loads(claim_path(layout, agent).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    claim = Claim(
+    return Claim(
         agent=agent,
         pid=int(data.get("pid", 0) or 0),
         cwd=str(data.get("cwd", "")),
         since=str(data.get("since", "")),
     )
-    return claim if claim.alive else None
+
+
+def read_claim(layout: NodeLayout, agent: str) -> Claim | None:
+    """**现在**谁占着这个 Agent。认领的进程死了就当没人占 —— 那正是自动回收。"""
+    claim = last_claim(layout, agent)
+    return claim if claim is not None and claim.alive else None
 
 
 def bridge_agents(config: Config) -> list[str]:
@@ -115,19 +125,30 @@ def claim(layout: NodeLayout, agent: str, *, force: bool = False) -> Claim:
             f"  换一个：ANTHILL_AGENT=<别的名字>；或者在面板上再建一个桥接 Agent"
         )
     mine = Claim(agent=agent, pid=os.getpid(), cwd=str(Path.cwd()), since=now().isoformat())
-    path = claim_path(layout, agent)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(mine.as_dict(), ensure_ascii=False), encoding="utf-8")
+    _write_claim(layout, mine)
     return mine
 
 
 def release(layout: NodeLayout, agent: str) -> bool:
-    """松开认领。只松自己的 —— 别把别人的会话踢下线。"""
+    """松开认领。只松自己的 —— 别把别人的会话踢下线。
+
+    **不删文件，只把 pid 清零。** 记录留着是为了亲和性：下次同一个目录里的会话
+    还要靠它认回同一个 Agent（见 `pick_agent`）。删掉就等于每次重启重新洗牌。
+    """
     held = read_claim(layout, agent)
     if held is not None and held.pid != os.getpid():
         return False
-    claim_path(layout, agent).unlink(missing_ok=True)
+    previous = last_claim(layout, agent)
+    if previous is None:
+        return True
+    _write_claim(layout, Claim(agent=agent, pid=0, cwd=previous.cwd, since=previous.since))
     return True
+
+
+def _write_claim(layout: NodeLayout, record: Claim) -> None:
+    path = claim_path(layout, record.agent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record.as_dict(), ensure_ascii=False), encoding="utf-8")
 
 
 def pick_agent(layout: NodeLayout, config: Config, wanted: str = "") -> str:
@@ -162,6 +183,26 @@ def pick_agent(layout: NodeLayout, config: Config, wanted: str = "") -> str:
             f"这个工作区的桥接 Agent 都被别的会话占着了（{holders}）。\n"
             "  在面板上再建一个，或者用 ANTHILL_AGENT=<名字> 指定要抢哪个"
         )
+
+    # **认回上次那个。** 纯粹「挑第一个空的」有个要命的后果：A 本来是 cc1、B 是 cc2，
+    # 重启一轮顺序反了就变成 A→cc2、B→cc1 —— 而**上下文是挂在 Agent 上的**
+    # （邮箱、thread、别人对「cc1 说过什么」的记忆），认错人等于串了历史。
+    #
+    # 需要一个跨重启稳定的身份。pid 不行（每次都变），**工作目录行**：
+    # 同一个项目里重开的会话，还是那个项目的会话。三档优先级：
+    here = str(Path.cwd())
+    previous = {n: last_claim(layout, n) for n in free}
+    # 1. 上次就是我 —— 认回去，历史接得上
+    mine = [n for n in free if (p := previous[n]) is not None and p.cwd == here]
+    if mine:
+        return mine[0]
+    # 2. 谁都没用过的 —— 挑它，别去碰别人的历史
+    #    （少了这一档，第二个会话会顺手抢走第一个刚放开的那个，
+    #     于是「谁是谁」每开一次就洗一次牌）
+    virgin = [n for n in free if (p := previous[n]) is None or not p.cwd]
+    if virgin:
+        return virgin[0]
+    # 3. 实在没有了，才去接别人用过的 —— 这时候串上下文是不可避免的取舍
     return free[0]
 
 
