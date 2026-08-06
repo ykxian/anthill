@@ -268,3 +268,56 @@ def test_running_out_of_virgin_agents_falls_back_to_reuse(
     third = bind(layout, config, tmp_path / "projC", monkeypatch)
 
     assert third in {"cc1", "cc2"}  # 只能接一个用过的，但不该抛
+
+
+# ---------- 钉死某一个 ----------
+
+
+def test_pinning_never_silently_steals_a_live_session(
+    node: tuple[NodeLayout, Config], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ANTHILL_AGENT=cc2` 指到一个**还活着**的会话头上时，该报错，不该悄悄顶掉它。
+
+    抢了就是两个会话同时是 cc2：读同一个收件箱、抢同一批消息，
+    而各自的上下文完全不同 —— 那正好毁掉「一一对应」这件事本身。
+    """
+    layout, config = node
+    path = layout.agent_dir("cc2") / "bridge" / "claim.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'{{"pid": {os.getppid()}, "cwd": "/别人那儿", "since": ""}}', encoding="utf-8")
+    monkeypatch.setenv(AGENT_ENV, "cc2")
+
+    # 挑得出来（是个合法的桥接 Agent），但认领这一步会拦下
+    assert pick_agent(layout, config) == "cc2"
+    with pytest.raises(Exception, match="占着"):
+        claim(layout, "cc2")
+
+
+def test_taking_over_is_possible_but_has_to_be_explicit(
+    node: tuple[NodeLayout, Config], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """上一个会话真卡死了得有条出路 —— 但那必须是个显式动作。"""
+    layout, _ = node
+    path = layout.agent_dir("cc2") / "bridge" / "claim.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'{{"pid": {os.getppid()}, "cwd": "/别人那儿", "since": ""}}', encoding="utf-8")
+    monkeypatch.setenv("ANTHILL_TAKEOVER", "1")
+
+    assert claim(layout, "cc2").pid == os.getpid()
+
+
+def test_the_refusal_says_all_three_ways_out(
+    node: tuple[NodeLayout, Config],
+) -> None:
+    layout, _ = node
+    path = layout.agent_dir("cc2") / "bridge" / "claim.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'{{"pid": {os.getppid()}, "cwd": "/x", "since": ""}}', encoding="utf-8")
+
+    with pytest.raises(Exception) as caught:
+        claim(layout, "cc2")
+
+    message = str(caught.value)
+    assert "ANTHILL_AGENT" in message  # 换一个
+    assert "再建一个" in message  # 加一个
+    assert "ANTHILL_TAKEOVER" in message  # 接管

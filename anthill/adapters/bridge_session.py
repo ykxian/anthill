@@ -45,6 +45,8 @@ from anthill.core.paths import NodeLayout
 CLAIM_FILE = "claim.json"
 AGENT_ENV = "ANTHILL_AGENT"
 WORKSPACE_ENV = "ANTHILL_WORKSPACE"
+TAKEOVER_ENV = "ANTHILL_TAKEOVER"
+"""置 1 才允许从一个还活着的会话手里把 Agent 抢过来。"""
 POLL_INTERVAL = 0.5
 DEFAULT_WAIT = 300.0
 
@@ -116,13 +118,21 @@ def bridge_agents(config: Config) -> list[str]:
     return sorted(name for name, a in config.agents.items() if a.bridge)
 
 
-def claim(layout: NodeLayout, agent: str, *, force: bool = False) -> Claim:
-    """认领一个桥接 Agent。已经被**活着的**别的进程占着就抛。"""
+def claim(layout: NodeLayout, agent: str, *, force: bool | None = None) -> Claim:
+    """认领一个桥接 Agent。已经被**活着的**别的进程占着就抛。
+
+    **默认绝不抢。** 抢了就是两个会话同时是 `cc2`：它们读同一个收件箱、
+    抢同一批消息，而各自的上下文完全不同 —— 那正好毁掉「一一对应」这件事本身。
+    上一个会话真卡死了就用 `ANTHILL_TAKEOVER=1`，让它是个显式动作。
+    """
+    steal = force if force is not None else os.environ.get(TAKEOVER_ENV, "") == "1"
     held = read_claim(layout, agent)
-    if held is not None and held.pid != os.getpid() and not force:
+    if held is not None and held.pid != os.getpid() and not steal:
         raise AntHillError(
             f"{agent} 已经被另一个会话占着了（pid {held.pid}，在 {held.cwd}）。\n"
-            f"  换一个：ANTHILL_AGENT=<别的名字>；或者在面板上再建一个桥接 Agent"
+            f"  换一个：ANTHILL_AGENT=<别的名字>；\n"
+            "  在面板上再建一个桥接 Agent；\n"
+            f"  或者确认那个会话已经不用了，用 {TAKEOVER_ENV}=1 接管它"
         )
     mine = Claim(agent=agent, pid=os.getpid(), cwd=str(Path.cwd()), since=now().isoformat())
     _write_claim(layout, mine)

@@ -88,7 +88,11 @@ def build_server(layout: NodeLayout, config: Config, agent: str) -> Any:
     handler = BridgeHandler(root=layout.agent_dir(agent), agent_name=agent)
     # 认领它：别的会话再起一个 MCP server 时会自动挑别的，不会两个会话抢同一个。
     # 松开靠 pid —— 这个进程没了，认领自动失效（见 read_claim）。
-    claim(layout, agent, force=True)
+    #
+    # **不 force。** 显式 ANTHILL_AGENT 指到一个还活着的会话头上时，
+    # 该直接报错而不是悄悄把它顶掉 —— 两个会话同时是 cc2 会互相抢消息，
+    # 而那正好毁掉「一一对应」本身。真要接管有 ANTHILL_TAKEOVER=1。
+    claim(layout, agent)
 
     @server.tool()
     def anthill_inbox() -> dict[str, Any]:

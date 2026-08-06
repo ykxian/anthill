@@ -1085,10 +1085,16 @@ function renderConnect(info) {
       <p class="why" style="margin-top:8px">
         之后每开一个 Claude Code，它都会<b>自动认领一个还没人占的桥接 Agent</b> ——
         同一个目录开三个会话也各对应一个，不用为每个会话配一次。
-        想钉死某一个就带上环境变量启动：
+        想钉死某一个就带上环境变量启动（<b>同一个目录下开两个会话</b>时靠它区分 ——
+        目录一样，自动认领分不出谁是谁）：
       </p>
       <pre id="rcp-pin">${esc(c.pin || "")}</pre>
       <div class="row"><button class="ghost" type="button" data-copy="rcp-pin">复制</button></div>
+      <p class="why" style="margin-top:6px">
+        钉到一个<b>还活着</b>的会话头上会被直接拦下（不会悄悄顶掉它 ——
+        两个会话同时是同一个 Agent 会互相抢消息）。
+        真要接管加 <code>ANTHILL_TAKEOVER=1</code>。
+      </p>
       <p class="why" style="margin-top:8px">
         会话里让它调 <code>anthill_wait</code> 就是阻塞等消息；
         <code>anthill_inbox</code> / <code>anthill_reply</code> / <code>anthill_send</code> 是收发。

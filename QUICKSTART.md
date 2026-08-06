@@ -100,11 +100,14 @@ claude mcp add --scope user anthill -- /路径/.venv/bin/anthill mcp serve -w /�
 在面板上建三个 bridge Agent，开三个会话，就是一一对应 —— 包括**同一个目录下
 开三个**，因为认领跟着进程走，不跟着目录走。
 
-想钉死某一个：
+想钉死某一个（**同一个目录下开两个会话**时必须靠它——目录一样，自动认领分不出谁是谁）：
 
 ```bash
 ANTHILL_AGENT=cc2 claude
 ```
+
+钉到一个**还活着**的会话头上会被拦下，不会悄悄顶掉它（两个会话同时是同一个 Agent
+会互相抢消息）。真要接管：`ANTHILL_TAKEOVER=1 ANTHILL_AGENT=cc2 claude`。
 
 > 为什么命令里不写 Agent 名：Claude Code 的配置粒度是**目录**。写死的话，
 > 那个目录下开几个会话就有几个抢同一个 Agent —— 配置文件表达不出「谁对应谁」。
