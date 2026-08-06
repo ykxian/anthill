@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import httpx
@@ -21,7 +22,7 @@ from anthill.discovery.registry import PeerRegistry
 from anthill.web.app import create_app
 from anthill.web.context import NodeContext
 from anthill.web.setup import browse, is_workspace
-from anthill.web.workspaces import clear, listing, remember
+from anthill.web.workspaces import clear, doomed, listing, remember
 
 
 @pytest.fixture
@@ -493,3 +494,92 @@ async def test_stale_only_spares_the_ones_that_still_exist(tmp_path: Path) -> No
 
 async def test_clearing_an_empty_list_is_not_an_error(tmp_path: Path) -> None:
     assert clear()["removed"] == 0
+
+
+# ---------- 连目录一起删 ----------
+
+
+async def test_purging_removes_only_the_anthill_directory(tmp_path: Path) -> None:
+    """只删 `.anthill/`，**不碰你放在那个目录里的别的东西** —— 源码、笔记、
+    你自己的文件。和单个删除同一条规矩。"""
+    junk = tmp_path / "junk"
+    create_workspace(NodeLayout(junk), node_name="junk")
+    mine = junk / "我自己的笔记.md"
+    mine.write_text("别删我", encoding="utf-8")
+    registry_with([junk])
+
+    result = clear(purge=True)
+
+    assert result["purged"] == [str(junk)]
+    assert not (junk / ".anthill").exists()
+    assert mine.read_text(encoding="utf-8") == "别删我"
+
+
+async def test_the_watched_workspace_survives_a_purge(tmp_path: Path) -> None:
+    """把自己删掉的话，面板下一秒就找不着自己了。"""
+    mine, junk = tmp_path / "mine", tmp_path / "junk"
+    for path in (mine, junk):
+        create_workspace(NodeLayout(path), node_name=path.name)
+    registry_with([mine, junk])
+
+    clear(keep=[mine], purge=True)
+
+    assert (mine / ".anthill" / "node.toml").is_file()
+    assert not (junk / ".anthill").exists()
+
+
+async def test_a_stale_confirmation_count_aborts_everything(tmp_path: Path) -> None:
+    """名单在「你看」和「你点」之间变了，这一次就作废 ——
+    批量删除最该有的一道闸不是「你确定吗」，是「你确定要删这几个吗」。"""
+    one, two = tmp_path / "one", tmp_path / "two"
+    for path in (one, two):
+        create_workspace(NodeLayout(path), node_name=path.name)
+    registry_with([one, two])
+
+    with pytest.raises(AntHillError, match="对不上"):
+        clear(purge=True, expect=1)  # 用户看到的是 1 个，实际有 2 个
+
+    assert (one / ".anthill").is_dir(), "一个都不该被删"
+    assert (two / ".anthill").is_dir()
+    assert len(listing()) == 2, "清单也不该被动"
+
+
+async def test_a_matching_count_goes_through(tmp_path: Path) -> None:
+    junk = tmp_path / "junk"
+    create_workspace(NodeLayout(junk), node_name="junk")
+    registry_with([junk])
+
+    assert clear(purge=True, expect=1)["purged"] == [str(junk)]
+
+
+async def test_doomed_lists_exactly_what_will_be_touched(tmp_path: Path) -> None:
+    mine, junk = tmp_path / "mine", tmp_path / "junk"
+    for path in (mine, junk):
+        create_workspace(NodeLayout(path), node_name=path.name)
+    registry_with([mine, junk])
+
+    assert doomed(keep=[mine]) == [str(junk)]
+
+
+async def test_one_undeletable_workspace_does_not_stop_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """删不掉一个，不该让剩下的都不删 —— 汇总上报，让人知道哪些还留着。"""
+    stubborn, fine = tmp_path / "stubborn", tmp_path / "fine"
+    for path in (stubborn, fine):
+        create_workspace(NodeLayout(path), node_name=path.name)
+    registry_with([stubborn, fine])
+
+    real = shutil.rmtree
+
+    def picky(target, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if "stubborn" in str(target):
+            raise OSError("权限不够")
+        return real(target, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", picky)
+    result = clear(purge=True)
+
+    assert result["purged"] == [str(fine)]
+    assert result["failed"] == [str(stubborn)]
+    assert not (fine / ".anthill").exists()

@@ -64,6 +64,7 @@ from anthill.web.workspaces import WorkspaceSpec
 from anthill.web.workspaces import clear as clear_workspaces
 from anthill.web.workspaces import create as create_workspace_entry
 from anthill.web.workspaces import delete as delete_workspace
+from anthill.web.workspaces import doomed as doomed_workspaces
 from anthill.web.workspaces import listing as list_workspaces
 
 PANEL_HTML = Path(__file__).parent / "static" / "panel.html"
@@ -359,22 +360,52 @@ def mount_panel_actions(
         except AntHillError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.delete(f"{PANEL_PATH}/api/setup/workspaces")
-    async def panel_workspaces_clear(request: Request, stale_only: bool = False) -> dict[str, Any]:
-        """一次把清单清干净。**只动清单，一个文件都不删。**
+    @app.get(f"{PANEL_PATH}/api/setup/workspaces/doomed")
+    async def panel_workspaces_doomed(request: Request, stale_only: bool = False) -> dict[str, Any]:
+        """这次清理会碰到哪些 —— **先给人看，再动手**。
 
-        为什么不做「一键连目录一起删」：那一下能带走好几个工作区的邮箱、黑板、
-        甚至密钥，而网页上的一次误点没有 undo。单个删除那条路仍然在，
-        它一次只毁一个，而且要你先看清是哪一个。
-
-        本进程正照看着的那些会留下 —— 把自己从清单里踢掉，面板下一秒就找不着
-        自己了，那不是用户想要的「清理」。
+        批量删除最该有的一道闸不是「你确定吗」，而是「你确定要删**这几个**吗」。
+        前端拿到这份名单，把数目跟着删除请求回传；对不上就整个拒绝。
         """
-        _guard(request)
-        result = clear_workspaces(
+        authorize(request, token, what="工作区清单")
+        paths = doomed_workspaces(
             keep=[c.layout.workspace for c in nodes.all()], stale_only=stale_only
         )
-        log.warn("panel.workspaces_cleared", removed=result["removed"], stale_only=stale_only)
+        return {"paths": paths, "count": len(paths)}
+
+    @app.delete(f"{PANEL_PATH}/api/setup/workspaces")
+    async def panel_workspaces_clear(
+        request: Request, stale_only: bool = False, purge: bool = False, expect: int = -1
+    ) -> dict[str, Any]:
+        """清清单；`purge=true` 连 `.anthill/` 一起删（带走邮箱、黑板、密钥）。
+
+        只删 `.anthill/`，**不碰你放在那个目录里的别的东西** —— 和单个删除同一条规矩。
+
+        `expect` 必须等于刚才 `/doomed` 给出的数目：中间有人加了/删了工作区，
+        这一次就作废，不会误伤。**网页上的一次误点没有 undo**，所以这道闸不是可选的。
+
+        本进程正照看着的那些永远留下 —— 把自己删掉，面板下一秒就找不着自己了。
+        """
+        _guard(request)
+        try:
+            result = clear_workspaces(
+                keep=[c.layout.workspace for c in nodes.all()],
+                stale_only=stale_only,
+                purge=purge,
+                expect=None if expect < 0 else expect,
+            )
+        except AntHillError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        # 删文件是要留痕的：谁都可能第二天问「我那个工作区呢」
+        log.warn(
+            "panel.workspaces_cleared",
+            removed=result["removed"],
+            purged=len(result["purged"]),
+            failed=len(result["failed"]),
+            stale_only=stale_only,
+        )
+        for path in result["purged"]:
+            log.warn("panel.workspace_purged", path=path)
         return result
 
     @app.post(f"{PANEL_PATH}/api/bridge/{{agent}}/reply/{{msg_id}}", status_code=201)

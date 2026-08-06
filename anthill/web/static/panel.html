@@ -448,7 +448,8 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
         <div class="actions" style="margin-top:10px">
           <button class="ghost" id="ws-clear-stale" type="button">清掉失效的</button>
           <button class="ghost danger" id="ws-clear-all" type="button">清空清单</button>
-          <span class="meta">只动清单，不删磁盘上的文件；本进程正在照看的会留下</span>
+          <button class="ghost danger" id="ws-purge-all" type="button">连目录一起删</button>
+          <span class="meta">前两个只动清单；第三个会删掉 .anthill/（邮箱、黑板、密钥）。本进程正在照看的永远留下</span>
         </div>
         <div class="hint" id="ws-clear-hint"></div>
         <div class="actions" style="margin-top:12px">
@@ -1181,20 +1182,55 @@ $("events-export").addEventListener("click", () => {
 // 一条条点太蠢。**但只清清单，不删文件** —— 一次能带走好几个工作区的邮箱、
 // 黑板甚至密钥，而网页上的一次误点没有 undo。单个删除那条路还在，
 // 它一次只毁一个，而且要你先看清是哪一个。
-async function clearWorkspaces(staleOnly) {
-  const what = staleOnly ? "路径已经不存在的那些" : "全部（本进程正在照看的除外）";
-  if (!window.confirm(`从清单里移除${what}？\n\n磁盘上的文件不会被删。`)) return;
+async function clearWorkspaces(staleOnly, purge) {
+  // **先问服务端要一份名单，把它原样摆给人看。** 批量删除最该有的一道闸不是
+  // 「你确定吗」，而是「你确定要删**这几个**吗」—— 这也是 expect 那个参数的用处：
+  // 名单在你看和你点之间变了，这一次就作废。
+  let doomed;
   try {
-    const r = await api(u(`api/setup/workspaces?stale_only=${staleOnly}`), { method: "DELETE" });
-    say("ws-clear-hint", `移除了 ${r.removed} 条，留下 ${r.kept} 条`, "ok");
+    doomed = await api(u(`api/setup/workspaces/doomed?stale_only=${staleOnly}`));
+  } catch (err) {
+    say("ws-clear-hint", String(err.message || err), "bad");
+    return;
+  }
+  if (!doomed.count) {
+    say("ws-clear-hint", "没有需要清理的", "ok");
+    return;
+  }
+
+  const listed = doomed.paths.slice(0, 12).join("\n");
+  const more = doomed.count > 12 ? `\n…（共 ${doomed.count} 个）` : "";
+  const head = purge
+    ? `删掉这 ${doomed.count} 个工作区的 .anthill/ 目录？\n\n` +
+      "这会带走它们的邮箱、黑板、密钥，**不可撤销**。\n" +
+      "（你放在那些目录里的别的东西不动）\n\n"
+    : `从清单里移除这 ${doomed.count} 个？磁盘上的文件不会被删。\n\n`;
+  if (!window.confirm(head + listed + more)) return;
+  // 真删文件的那一下再问一次 —— 一次误点没有 undo
+  if (purge && !window.confirm(`最后确认：真的删掉这 ${doomed.count} 个目录里的 .anthill/？`)) return;
+
+  try {
+    const r = await api(
+      u(`api/setup/workspaces?stale_only=${staleOnly}&purge=${purge}&expect=${doomed.count}`),
+      { method: "DELETE" },
+    );
+    const failed = (r.failed || []).length;
+    say(
+      "ws-clear-hint",
+      `移除 ${r.removed} 条，留下 ${r.kept} 条` +
+        (purge ? `；删掉 ${(r.purged || []).length} 个目录` : "") +
+        (failed ? `；${failed} 个没删掉（权限？）` : ""),
+      failed ? "bad" : "ok",
+    );
     refreshSetup();
   } catch (err) {
     say("ws-clear-hint", String(err.message || err), "bad");
   }
 }
 
-$("ws-clear-stale").addEventListener("click", () => clearWorkspaces(true));
-$("ws-clear-all").addEventListener("click", () => clearWorkspaces(false));
+$("ws-clear-stale").addEventListener("click", () => clearWorkspaces(true, false));
+$("ws-clear-all").addEventListener("click", () => clearWorkspaces(false, false));
+$("ws-purge-all").addEventListener("click", () => clearWorkspaces(false, true));
 
 const PANES = ["runs", "chat", "events", "bridge", "models", "setup", "config"];
 

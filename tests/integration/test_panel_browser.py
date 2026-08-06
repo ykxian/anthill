@@ -13,6 +13,7 @@ curl 测的是接口，ASGI 传输测的是路由，**都测不到「浏览器�
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -381,6 +382,14 @@ def test_clearing_the_workspace_list_from_the_page(
     """清单里攒垃圾是常态（跑过的临时目录、试着建了又不要的、别处删掉了的），
     一条条点太蠢。但**只清清单，不删文件** —— 网页上的一次误点没有 undo。
     """
+    junk = tmp_path / "junk"
+    create_workspace(NodeLayout(junk), node_name="junkbox")
+    registry = tmp_path / "home" / ".anthill" / "workspaces.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(
+        json.dumps([{"path": str(junk), "port": 45778}], ensure_ascii=False), encoding="utf-8"
+    )
+
     page, errors = open_panel(browser, panel)
     page.wait_for_selector("#topo-body .card", timeout=15000)
     page.on("dialog", lambda d: d.accept())
@@ -390,9 +399,45 @@ def test_clearing_the_workspace_list_from_the_page(
     page.click("#ws-clear-all")
     page.wait_for_selector("#ws-clear-hint.ok", timeout=15000)
 
+    assert "移除" in page.text_content("#ws-clear-hint")
+    assert (junk / ".anthill" / "node.toml").is_file(), "只清清单的那个按钮不该删文件"
     # 本进程正照看的那个必须还在 —— 把自己踢掉，面板下一秒就找不着自己了
-    assert "移除了" in page.text_content("#ws-clear-hint")
-    assert (tmp_path / "ws" / ".anthill" / "node.toml").is_file(), "文件不该被删"
+    assert (tmp_path / "ws" / ".anthill" / "node.toml").is_file()
     page.wait_for_selector("#ws-list .ws", timeout=15000)
+    assert errors == []
+    page.close()
+
+
+def test_purging_workspaces_from_the_page_spares_the_current_one(
+    browser: object, panel: str, tmp_path: Path
+) -> None:
+    """「连目录一起删」那个按钮真的会删文件，所以在真浏览器里走一遍。
+
+    验的是两条不能破的：**本进程正照看的那个必须活下来**（删掉它面板下一秒
+    就找不着自己了），以及**只删 .anthill/**，人自己放在那儿的东西不动。
+    """
+    # 造一个「别的工作区」，并让 serve 那边的清单认得它
+    junk = tmp_path / "junk"
+    create_workspace(NodeLayout(junk), node_name="junkbox")
+    keepsake = junk / "我自己的笔记.md"
+    keepsake.write_text("别删我", encoding="utf-8")
+    registry = tmp_path / "home" / ".anthill" / "workspaces.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(
+        json.dumps([{"path": str(junk), "port": 45778}], ensure_ascii=False), encoding="utf-8"
+    )
+
+    page, errors = open_panel(browser, panel)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+    page.on("dialog", lambda d: d.accept())  # 两道确认都点是
+
+    page.click('.tab[data-pane="setup"]')
+    page.wait_for_selector("#ws-purge-all", timeout=15000)
+    page.click("#ws-purge-all")
+    page.wait_for_selector("#ws-clear-hint.ok", timeout=15000)
+
+    assert not (junk / ".anthill").exists(), "该删的没删掉"
+    assert keepsake.read_text(encoding="utf-8") == "别删我", "只该删 .anthill/"
+    assert (tmp_path / "ws" / ".anthill" / "node.toml").is_file(), "把自己删了"
     assert errors == []
     page.close()

@@ -150,27 +150,75 @@ def delete(raw: str, *, purge: bool = False) -> dict[str, Any]:
     return {"ok": True, "path": str(path), "purged": True}
 
 
-def clear(*, keep: Iterable[Path] = (), stale_only: bool = False) -> dict[str, Any]:
-    """一次把清单清干净。**只动清单，一个文件都不删。**
+def doomed(*, keep: Iterable[Path] = (), stale_only: bool = False) -> list[str]:
+    """这次清理会碰到哪些工作区。**先算出来给人看，再动手。**
 
-    为什么不做「一键连目录一起删」：那一下能带走好几个工作区的邮箱、黑板、
-    甚至密钥，而网页上的一次误点是没有 undo 的。单个删除那条路仍然在
-    （`delete(..., purge=True)`），它一次只毁一个，而且要你先看清是哪一个。
+    批量删除最该有的一道闸不是「你确定吗」，而是「你确定要删**这几个**吗」——
+    所以这个函数单独存在：路由拿它算出名单发给前端，前端把数目回传，
+    对不上就整个拒绝。中间有人加了/删了工作区，这一次就作废，不会误伤。
+    """
+    safe = {str(Path(p).expanduser().resolve()) for p in keep}
+    return [
+        raw
+        for item in _read()
+        if (raw := str(item.get("path", "")))
+        and raw not in safe
+        and not (stale_only and Path(raw).is_dir())
+    ]
+
+
+def clear(
+    *,
+    keep: Iterable[Path] = (),
+    stale_only: bool = False,
+    purge: bool = False,
+    expect: int | None = None,
+) -> dict[str, Any]:
+    """一次把清单清干净。
+
+    `purge=False`（默认）**只动清单，一个文件都不删**。
+    `purge=True` 连 `.anthill/` 一起删 —— 那会带走邮箱、黑板、密钥。
+
+    只删 `.anthill/`，**不碰你放在那个目录里的别的东西**（源码、笔记、
+    你自己的文件）—— 和单个删除同一条规矩。
+
+    `expect` 是防误点那道闸：调用方必须先看到「要删几个」并把这个数回传，
+    对不上就整个拒绝。中间有人加了/删了工作区，这一次就作废，不会误伤。
 
     `keep` 是本进程正照看着的那些 —— 把自己从清单里踢掉，面板下一秒就找不着
     自己了，那不是用户想要的「清理」。
 
-    `stale_only=True` 只清路径已经不存在的那些：那是最常见也最安全的一次清理，
-    单独给一条路，省得为了扫垃圾把好的一起端了。
+    `stale_only=True` 只清路径已经不存在的那些：那是最常见也最安全的一次清理。
     """
-    safe = {str(Path(p).expanduser().resolve()) for p in keep}
-    kept: list[dict[str, Any]] = []
-    removed = 0
-    for item in _read():
-        raw = str(item.get("path", ""))
-        if raw in safe or (stale_only and Path(raw).is_dir()):
-            kept.append(item)
-            continue
-        removed += 1
-    _write(kept)
-    return {"ok": True, "removed": removed, "kept": len(kept)}
+    targets = doomed(keep=keep, stale_only=stale_only)
+    if expect is not None and expect != len(targets):
+        raise AntHillError(
+            f"清单和你看到的对不上了（你确认的是 {expect} 个，现在是 {len(targets)} 个）——"
+            "这一次没有执行。刷新一下再来。"
+        )
+
+    condemned = set(targets)
+    _write([item for item in _read() if str(item.get("path", "")) not in condemned])
+
+    purged: list[str] = []
+    failed: list[str] = []
+    if purge:
+        import shutil
+
+        for raw in targets:
+            root = Path(raw) / ANTHILL_DIR
+            if not root.is_dir():
+                continue
+            try:
+                shutil.rmtree(root)
+                purged.append(raw)
+            except OSError:
+                # 删不掉一个，不该让剩下的都不删 —— 汇总上报，让人知道哪些还留着
+                failed.append(raw)
+    return {
+        "ok": True,
+        "removed": len(targets),
+        "kept": len(_read()),
+        "purged": purged,
+        "failed": failed,
+    }
