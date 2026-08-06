@@ -60,8 +60,12 @@ class PeerRecord(BaseModel):
 class PeerRegistry:
     """`.anthill/peers.json` 的读写。文件权限 0600 —— 里面有共享密钥明文。"""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, self_name: str = "") -> None:
         self._root = root
+        self._self_name = self_name
+        """本节点叫什么。知道了才拦得住「信任一个和自己同名的对端」——
+        那会让 `to.node` 指谁彻底说不清（是我，还是它？）。"""
+
         self._peers: dict[str, PeerRecord] = {}
         self._keys: dict[str, bytes] = {}
         self._mtime: float | None = None
@@ -139,6 +143,13 @@ class PeerRegistry:
 
     def trust(self, token: PairingToken, *, replace: bool = False) -> PeerRecord:
         """用配对令牌信任一个节点。指纹与上次不一致时拒绝，除非显式 replace。"""
+        if self._self_name and token.node == self._self_name:
+            # 按目录名给节点起名之后这事更容易撞上了：两台机器上都有个叫
+            # `collab` 的工作区，配对完 `to.node = "collab"` 指谁？
+            raise PeerError(
+                f"对端也叫 {token.node!r}，和本节点重名 —— 收件人写这个名字时指谁就说不清了。\n"
+                '  改掉其中一边的 node.toml：[node] name = "别的名字"，重启后再配对'
+            )
         print_ = fingerprint(token.key)
         existing = self._peers.get(token.node)
         if existing and existing.trusted and existing.fingerprint != print_ and not replace:

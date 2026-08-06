@@ -29,7 +29,7 @@ def init_command(
 ) -> None:
     """初始化 .anthill 工作区（node.toml + agents/ + blackboard/ + logs/）。"""
     layout = NodeLayout(path.resolve())
-    name = node_name or suggest_node_name()
+    name = node_name or suggest_node_name(layout.workspace)
     try:
         config = create_workspace(layout, node_name=name, force=force)
     except AntHillError as exc:

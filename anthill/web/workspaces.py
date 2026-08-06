@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from anthill.core.atomic import atomic_write
 from anthill.core.errors import AntHillError
 from anthill.core.paths import ANTHILL_DIR, NodeLayout
-from anthill.core.workspace import create_workspace, default_node_name
+from anthill.core.workspace import create_workspace
 from anthill.web.setup import is_workspace
 
 REGISTRY_DIR = ANTHILL_DIR
@@ -123,7 +123,8 @@ def create(spec: WorkspaceSpec) -> dict[str, Any]:
 
     layout = NodeLayout(path)
     if not layout.node_toml.is_file():
-        create_workspace(layout, node_name=spec.node_name or default_node_name())
+        # 不传 node_name 时按目录名起 —— create_workspace 里就是这么做的
+        create_workspace(layout, node_name=spec.node_name)
     remember(path, port=spec.port)
     return {"ok": True, "path": str(path), "node": _node_name(path)}
 

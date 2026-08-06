@@ -354,7 +354,10 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
     <span class="mark">▲</span> AntHill
     <span class="who">节点 <b id="node">…</b></span>
   </span>
-  <select id="node-pick" aria-label="本机节点" hidden></select>
+  <span id="node-switch" hidden>
+    <span class="who">切换</span>
+    <select id="node-pick" aria-label="切换到本机的哪个节点"></select>
+  </span>
   <span class="spacer"></span>
   <span id="conn"><span class="dot"></span><span id="conn-text">连接中</span></span>
 </header>
@@ -797,7 +800,9 @@ function syncLocalNodes(info) {
   // 一个 serve 可以照看本机好几个节点；只有真的多于一个时才把选择器摆出来
   const picker = $("node-pick");
   const names = (info.nodes || []).map((n) => n.node);
-  picker.hidden = names.length < 2;
+  // 只有一个节点时藏起来 —— 但那也意味着「怎么切换」在界面上完全没有痕迹，
+  // 所以工作区那一页每行都有「切到这个」，人是去那儿找的
+  $("node-switch").hidden = names.length < 2;
   if (picker.dataset.signature === names.join(",")) return;
   picker.dataset.signature = names.join(",");
   picker.innerHTML = names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
@@ -1271,8 +1276,13 @@ function renderWorkspaces(info) {
         <span class="pill">${esc(w.node || "未命名")}</span>
         <span class="path grow truncate">${esc(w.path)}</span>
         ${w.current
-          ? `<span class="meta">当前</span>`
-          : `<button class="ghost" type="button" data-ws="${esc(w.path)}" data-ws-op="forget">移出清单</button>
+          ? `<span class="meta">面板正在看这个</span>`
+          : `${w.attached
+               ? `<button class="ghost" type="button" data-ws-node="${esc(w.node)}">切到这个</button>`
+               : w.exists
+                 ? `<button class="ghost" type="button" data-ws="${esc(w.path)}" data-ws-op="adopt">接管</button>`
+                 : `<span class="meta">不是工作区</span>`}
+             <button class="ghost" type="button" data-ws="${esc(w.path)}" data-ws-op="forget">移出清单</button>
              <button class="ghost danger" type="button" data-ws="${esc(w.path)}" data-ws-op="purge">删除</button>`}
       </div>`).join("")
     : `<div class="empty">这台机器上还没有工作区</div>`);
@@ -1323,8 +1333,14 @@ $("crumb-up").addEventListener("click", (event) => browseTo(event.target.dataset
 document.addEventListener("click", (event) => {
   const dir = event.target.closest?.("[data-dir]");
   if (dir) { browseTo(dir.dataset.dir); return; }
+  const switchTo = event.target.closest?.("[data-ws-node]");
+  if (switchTo) { switchNode(switchTo.dataset.wsNode); return; }
   const ws = event.target.closest?.("[data-ws]");
-  if (ws) { removeWorkspace(ws.dataset.ws, ws.dataset.wsOp === "purge"); return; }
+  if (ws) {
+    if (ws.dataset.wsOp === "adopt") { adoptWorkspace(ws.dataset.ws); return; }
+    removeWorkspace(ws.dataset.ws, ws.dataset.wsOp === "purge");
+    return;
+  }
   const pair = event.target.closest?.("[data-pair]");
   if (pair) { startPairing(pair.dataset.pair); return; }
   const op = event.target.closest?.("[data-agent]");
@@ -1332,6 +1348,33 @@ document.addEventListener("click", (event) => {
   const answer = event.target.closest?.("[data-send-reply]");
   if (answer) sendBridgeReply(answer.dataset.sendReply, answer);
 });
+
+// 「切到这个」= 把面板的视角换到本机的另一个节点。header 那个下拉是同一件事，
+// 但它只有 ≥2 个节点时才出现，而人是到工作区那一页去找「怎么切换」的。
+function switchNode(node) {
+  if (!node) return;
+  local.node = node;
+  const picker = $("node-pick");
+  if (picker) picker.value = node;
+  poll();
+  refreshSetup();
+}
+
+// 「接管」= 让这个 serve 现在就开始照看它，不用重启。
+// 清单里有、但本进程启动之后才加进来的工作区就是这种状态。
+async function adoptWorkspace(path) {
+  try {
+    const r = await api(u("api/setup/workspace"), {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    });
+    say("ws-clear-hint", `已接管 ${r.node || path}，现在可以切过去了`, "ok");
+    poll();
+    refreshSetup();
+  } catch (err) {
+    say("ws-clear-hint", String(err.message || err), "bad");
+  }
+}
 
 async function sendBridgeReply(msgId, button) {
   const box = document.querySelector(`[data-reply="${msgId}"]`);

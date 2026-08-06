@@ -99,7 +99,7 @@ class AgentRuntime:
         self._seen: SeenStore = self.mailbox.open_seen()
         self._tracker = DeliveryTracker()
         self._router = Router(config, layout)
-        self._peers = PeerRegistry(layout.root)
+        self._peers = PeerRegistry(layout.root, self_name=config.node.name)
         self._transports = TransportRegistry(config, layout, peers=self._peers, log=self.log)
         self.sender = Sender(
             identity=self.identity,

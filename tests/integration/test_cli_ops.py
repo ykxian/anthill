@@ -341,11 +341,17 @@ def test_two_inits_on_one_machine_do_not_collide(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
     monkeypatch.setattr("socket.gethostname", lambda: "box")
 
-    for name in ("one", "two"):
+    # 目录名不同 —— 名字直接跟着目录走，一眼看得懂谁是谁。
+    # 主机名派生的 `box` / `box-2` 什么也没说，那是只考虑「一台机器一个工作区」时的选择。
+    for name in ("collab", "collab-tst"):
         assert runner.invoke(app, ["init", str(tmp_path / name)]).exit_code == 0
+    named = [Config.load_from(NodeLayout(tmp_path / n)).node.name for n in ("collab", "collab-tst")]
+    assert named == ["collab", "collab-tst"], named
 
-    names = [Config.load_from(NodeLayout(tmp_path / n)).node.name for n in ("one", "two")]
-    assert names == ["box", "box-2"], names
+    # 目录名撞了（不同父目录下的同名目录）—— 本机唯一是硬要求，加序号
+    twin = tmp_path / "elsewhere" / "collab"
+    assert runner.invoke(app, ["init", str(twin)]).exit_code == 0
+    assert Config.load_from(NodeLayout(twin)).node.name == "collab-2"
 
 
 def test_init_registers_the_workspace_so_serve_can_find_it(

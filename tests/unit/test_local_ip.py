@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from anthill.core.workspace import PHYSICAL_PREFIXES, _is_virtual, local_ip
@@ -106,3 +108,65 @@ def test_a_weird_hostname_still_yields_a_legal_node_name(monkeypatch: pytest.Mon
     monkeypatch.setattr("socket.gethostname", lambda: "My Box！.lan")
 
     assert NODE_NAME_RE.match(default_node_name())
+
+
+# ---------- 节点名跟着目录走 ----------
+
+
+def test_the_directory_name_is_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """一台机器上放着 collab 和 collab-tst 时，`collab` / `collab-tst` 一眼看得懂；
+    主机名派生出来的 `cs` / `cs-2` 什么也没说。"""
+    from anthill.core.workspace import default_node_name
+
+    monkeypatch.setattr("socket.gethostname", lambda: "cs")
+
+    assert default_node_name(directory=Path("/x/collab")) == "collab"
+    assert default_node_name(directory=Path("/x/collab-tst")) == "collab-tst"
+
+
+@pytest.mark.parametrize("generic", ["workspace", "tmp", "src", "demo", "app"])
+def test_a_generic_directory_name_falls_back_to_the_hostname(
+    generic: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`workspace` 这种目录名说明不了任何事，不如退回主机名 ——
+    主机名至少能在局域网里对上是哪台机器。"""
+    from anthill.core.workspace import default_node_name
+
+    monkeypatch.setattr("socket.gethostname", lambda: "cs")
+
+    assert default_node_name(directory=Path("/x") / generic) == "cs"
+
+
+@pytest.mark.parametrize(
+    ("dirname", "expected"),
+    [
+        ("My Proj!", "my-proj"),
+        ("2024-demo", "2024-demo"),  # NODE_NAME_RE 允许数字开头，别卡得比它还严
+        ("我的项目", "cs"),  # 非 ASCII 整个作废，退回主机名
+        (".hidden", "hidden"),
+    ],
+)
+def test_odd_directory_names_still_yield_legal_node_names(
+    dirname: str, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`str.isalnum()` 对中文返回 True —— 直接用它的话 `我的项目` 会被放过去，
+    然后在 NODE_NAME_RE 那关炸掉。这个坑在密钥的变量名上刚踩过一次。"""
+    from anthill.core.envelope import NODE_NAME_RE
+    from anthill.core.workspace import default_node_name
+
+    monkeypatch.setattr("socket.gethostname", lambda: "cs")
+    name = default_node_name(directory=Path("/x") / dirname)
+
+    assert name == expected
+    assert NODE_NAME_RE.match(name)
+
+
+def test_two_workspaces_with_the_same_directory_name_still_differ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """本机唯一是硬要求 —— 信封上的收件人靠这个名字指人。"""
+    from anthill.core.workspace import default_node_name
+
+    monkeypatch.setattr("socket.gethostname", lambda: "cs")
+
+    assert default_node_name(["collab"], directory=Path("/a/collab")) == "collab-2"

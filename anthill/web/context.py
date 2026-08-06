@@ -31,7 +31,7 @@ class NodeContext:
     def __init__(self, layout: NodeLayout, config: Config | None = None) -> None:
         self.layout = layout
         self._ref = ConfigRef(layout, config)
-        self.peers = PeerRegistry(layout.root)
+        self.peers = PeerRegistry(layout.root, self_name=self.config.node.name)
 
     @property
     def config(self) -> Config:

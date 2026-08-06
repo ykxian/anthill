@@ -11,6 +11,7 @@ import contextlib
 import socket
 from collections.abc import Iterable
 from itertools import count
+from pathlib import Path
 
 from anthill.core.config import Config, default_node_toml
 from anthill.core.envelope import NODE_NAME_RE
@@ -91,20 +92,54 @@ def local_ip() -> str:
             return "127.0.0.1"
 
 
-def default_node_name(taken: Iterable[str] = ()) -> str:
-    """默认拿主机名 —— 局域网里一眼能对上是哪台机器。
+GENERIC_DIR_NAMES = frozenset({"anthill", "workspace", "work", "demo", "test", "tmp", "src", "app"})
+"""这些目录名说明不了任何事，不如退回主机名。"""
 
-    但**一台机器上可以有好几个工作区**，而节点名必须唯一（信封上的收件人靠它
-    指人）。全都叫主机名的话，第二个工作区起 serve 时就会被跳过，还只给一句
-    「已经有一个叫 cs 的节点了」—— 用户既没做错什么，也不知道该怎么办。
-    所以这里避开已经占用的名字：`cs` → `cs-2` → `cs-3`。
+
+def _slug(raw: str) -> str:
+    """把一段文字捏成合法节点名：小写 ASCII 字母数字与 `._-`，必须字母开头。
+
+    **只认 ASCII** —— `str.isalnum()` 对中文返回 True，直接用它的话
+    `我的项目` 会被当成合法名字放过去，然后在 `NODE_NAME_RE` 那关炸掉。
+    这个坑在密钥的变量名上刚踩过一次。
     """
-    raw = socket.gethostname().split(".")[0].lower()
-    cleaned = "".join(c if c.isalnum() or c in "._-" else "-" for c in raw) or "node"
+    lowered = raw.strip().lower()
+    kept = "".join(c if (c.isascii() and (c.isalnum() or c in "._-")) else "-" for c in lowered)
+    cleaned = kept.strip("-._")
+    # 首字符照 NODE_NAME_RE 的要求来（字母或数字都行），别卡得比它还严 ——
+    # 那会让 `2024-demo` 这种正常目录名白白退回主机名
+    while cleaned and not (cleaned[0].isascii() and cleaned[0].isalnum()):
+        cleaned = cleaned[1:]
+    return cleaned
+
+
+def default_node_name(taken: Iterable[str] = (), *, directory: Path | None = None) -> str:
+    """给这个工作区起个名字。
+
+    **优先用目录名。** 一台机器上放着 `collab` 和 `collab-tst` 时，
+    `collab` / `collab-tst` 一眼就知道谁是谁；而主机名派生出来的 `cs` / `cs-2`
+    什么也没说 —— 那是最早只考虑「一台机器一个工作区」时的选择。
+
+    目录名说明不了事（`workspace`、`tmp`、`src` 这类）或者拿不到时，退回主机名。
+    主机名的好处是局域网里一眼对得上是哪台机器，那条理由仍然成立。
+
+    最后一定保证**本机唯一**（信封上的收件人靠这个名字指人），撞了就加序号。
+
+    ⚠️ 跨机不保证唯一：两台机器上都有个 `collab` 目录是很正常的事。
+    真撞上时配对会直接拒绝并让人改名（见 `PeerRegistry.trust`）——
+    与其在这儿猜一个又长又丑的名字，不如让那一步说清楚。
+    """
     used = {n.lower() for n in taken}
-    if cleaned not in used:
-        return cleaned
-    return next(f"{cleaned}-{n}" for n in count(2) if f"{cleaned}-{n}" not in used)
+    base = ""
+    if directory is not None:
+        candidate = _slug(directory.name)
+        if candidate and candidate not in GENERIC_DIR_NAMES:
+            base = candidate
+    if not base:
+        base = _slug(socket.gethostname().split(".")[0]) or "node"
+    if base not in used:
+        return base
+    return next(f"{base}-{n}" for n in count(2) if f"{base}-{n}" not in used)
 
 
 def create_workspace(layout: NodeLayout, *, node_name: str = "", force: bool = False) -> Config:
@@ -113,7 +148,7 @@ def create_workspace(layout: NodeLayout, *, node_name: str = "", force: bool = F
     已经有 node.toml 时默认拒绝 —— 这个函数会覆盖配置文件，
     而配置被无声覆盖是很难查的那种事故。
     """
-    name = node_name or suggest_node_name()
+    name = node_name or suggest_node_name(layout.workspace)
     # 先验名字再动盘：不然会写出一份读不回来的 node.toml，
     # 留下一个「看着像工作区、其实起不来」的目录
     if not NODE_NAME_RE.match(name):
@@ -193,13 +228,13 @@ class ConfigRef:
             return None
 
 
-def suggest_node_name() -> str:
+def suggest_node_name(directory: Path | None = None) -> str:
     """给一个**这台机器上还没被占用**的节点名。
 
     `init` 和 `serve` 都得走这一个入口 —— 各算各的话，`init` 那条路会绕过
     去重，于是连着 init 两次仍然都叫主机名，第二个工作区起 serve 时被跳过。
     """
-    return default_node_name(_names_in_use())
+    return default_node_name(_names_in_use(), directory=directory)
 
 
 def _names_in_use() -> list[str]:

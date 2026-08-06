@@ -256,3 +256,21 @@ def test_pairing_again_clears_the_warning(tmp_path: Path):
     assert peer is not None
     assert peer.endpoint == "http://10.0.0.7:45778"
     assert peer.endpoint_conflict is False
+
+
+def test_a_peer_with_our_own_name_is_refused(tmp_path: Path):
+    """按目录名给节点起名之后这事更容易撞上：两台机器上都有个叫 `collab`
+    的工作区，配对完 `to.node = "collab"` 指谁 —— 是我，还是它？
+
+    跨机唯一没法在起名时保证（两台机器互相不知道），所以闸设在配对这一步。
+    """
+    registry = PeerRegistry(tmp_path, self_name="collab")
+
+    with pytest.raises(PeerError, match="重名"):
+        registry.trust(PairingToken(node="collab", key=KEY, endpoint=ENDPOINT))
+
+
+def test_a_differently_named_peer_is_fine(tmp_path: Path):
+    registry = PeerRegistry(tmp_path, self_name="collab")
+
+    assert registry.trust(PairingToken(node="lab", key=KEY, endpoint=ENDPOINT)).trusted
