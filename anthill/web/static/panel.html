@@ -321,6 +321,31 @@ button.danger:hover { color: var(--bad); border-color: color-mix(in srgb, var(--
 .xchg .line.back { color: var(--muted); }
 .xchg .line.back::before { content: "↳ "; color: var(--accent); }
 
+/* Agent 往来：一段 thread 一张卡，读起来得像对话而不是像日志表格。
+   同一个人连着说的话不重复标名字（.cont），名字列右对齐让正文起始位置对齐。 */
+.convo {
+  border: 1px solid var(--line-soft); border-radius: var(--r);
+  background: var(--surface); padding: 12px 16px 14px; margin-bottom: 12px;
+  box-shadow: var(--shadow);
+}
+.convo .head {
+  display: flex; gap: 8px; align-items: baseline;
+  padding-bottom: 8px; margin-bottom: 6px; border-bottom: 1px solid var(--line-soft);
+}
+.convo .peers { font-weight: 600; font-size: 13.5px; }
+.turn { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; }
+.turn.cont { padding-top: 0; }
+.turn .who {
+  flex: 0 0 86px; text-align: right; font-weight: 600; font-size: 12px;
+  color: var(--accent); font-family: var(--mono);
+}
+.turn .text { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; font-size: 13px; }
+.turn .when { flex: 0 0 auto; font-size: 11px; font-family: var(--mono); }
+.convo .day {
+  margin: 8px 0 4px 96px; font-size: 11px; color: var(--muted);
+  font-family: var(--mono); letter-spacing: .04em;
+}
+
 .copy-line {
   display: flex; gap: 8px; align-items: flex-start;
   background: var(--surface-2); border: 1px solid var(--line-soft);
@@ -414,6 +439,7 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
     <nav class="tabs">
       <button class="tab on" type="button" data-pane="runs">任务看板</button>
       <button class="tab" type="button" data-pane="chat">对话</button>
+      <button class="tab" type="button" data-pane="traffic">Agent 往来</button>
       <button class="tab" type="button" data-pane="events">消息流</button>
       <button class="tab" type="button" data-pane="bridge" hidden>桥接</button>
       <button class="tab" type="button" data-pane="setup" hidden>工作区</button>
@@ -442,6 +468,21 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
         </form>
         <div class="hint" id="chat-hint" hidden></div>
       </div>
+    </section>
+
+    <section class="pane" id="pane-traffic" hidden>
+      <div class="eyebrow">Agent 往来 <span class="count" id="traffic-count"></span></div>
+      <p class="why" style="margin:0 0 12px">
+        Agent 之间实际聊了什么，按会话拼起来。消息流那一页有谁发给谁、什么时候，
+        但没有正文；这一页是正文。回执不占篇幅，条数记在每段末尾。
+      </p>
+      <div class="actions" style="margin-bottom:10px">
+        <input id="traffic-q" placeholder="过滤：Agent 名，或话里的一段字…" autocomplete="off" class="grow" />
+        <label class="meta" style="display:flex;gap:6px;align-items:center;white-space:nowrap">
+          <input type="checkbox" id="traffic-peers" /> 只看 Agent 之间的
+        </label>
+      </div>
+      <div id="traffic-body"></div>
     </section>
 
     <section class="pane" id="pane-events" hidden>
@@ -1191,7 +1232,7 @@ function renderLog(history) {
           ${x.failed ? `<span class="pill bad">发送失败</span>` : ""}
           ${x.direction === "in" && !x.answered ? `<span class="pill">没回</span>` : ""}
           <span class="grow"></span>
-          <span class="meta">${esc(fmtTime(x.ts))} ${esc(x.short || "")}</span>
+          <span class="meta">${esc(fmtStamp(x.ts))} ${esc(x.short || "")}</span>
         </div>
         ${x.incoming ? `<div class="line said">${esc(x.incoming)}</div>` : ""}
         ${x.reply ? `<div class="line back">${esc(x.reply)}</div>` : ""}
@@ -1229,6 +1270,98 @@ function renderBridge(info) {
       </div>`).join("")
     : `<div class="empty">还没有人找它 —— 给它发条消息试试（对话那一页）</div>`);
 }
+
+// Agent 之间聊了什么。**消息流回答不了这个问题** —— 它只有元数据。
+// 一段 thread 就是一段对话，同一个人连着说的话不重复标名字。
+const traffic = { q: "", peersOnly: false, data: { threads: [] } };
+
+function renderTraffic(data) {
+  traffic.data = data || { threads: [] };
+  const all = traffic.data.threads || [];
+  const shown = all.filter(matchesTraffic);
+  $("traffic-count").textContent = all.length
+    ? `${shown.length} 段会话` + (traffic.data.truncated ? "（只读了最近一批）" : "")
+    : "";
+  paint($("traffic-body"), shown.length
+    ? shown.map(renderThread).join("")
+    : `<div class="empty">${all.length
+        ? "没有匹配的会话"
+        : "还没有 Agent 之间的往来 —— 在「对话」那一页发一条试试"}</div>`);
+}
+
+function matchesTraffic(t) {
+  if (traffic.peersOnly && t.with_human) return false;
+  const q = traffic.q.trim().toLowerCase();
+  if (!q) return true;
+  return (t.peers || []).some((p) => p.toLowerCase().includes(q))
+    || (t.messages || []).some((m) => (m.body || "").toLowerCase().includes(q));
+}
+
+function renderThread(t) {
+  let last = "";
+  let day = "";
+  const lines = (t.messages || []).map((m) => {
+    const same = m.frm === last;          // 连着说的不重复标名字，读起来才像对话
+    last = m.frm;
+    // 日期只在**变了**的时候插一行。一段对话通常在同一天，
+    // 每行都重复年月日是纯噪音；但跨天的对话不标日期就会读错先后。
+    const d = fmtDay(m.ts);
+    const sep = d && d !== day ? `<div class="day">${esc(d)}</div>` : "";
+    if (d) day = d;
+    return `${sep}
+      <div class="turn ${same && !sep ? "cont" : ""}">
+        <span class="who">${same && !sep ? "" : esc(shortName(m.frm))}</span>
+        <span class="text">${esc(m.body) || `<i class="meta">（空）</i>`}</span>
+        <span class="when meta">${esc(fmtTime(m.ts))}</span>
+      </div>`;
+  }).join("");
+  return `
+    <div class="convo">
+      <div class="head">
+        <span class="peers">${esc((t.peers || []).map(shortName).join(" ↔ "))}</span>
+        <span class="pill">${t.count} 条</span>
+        ${t.receipts ? `<span class="meta">另有 ${t.receipts} 条回执</span>` : ""}
+        <span class="grow"></span>
+        <span class="meta">最后 ${esc(fmtStamp(t.last))} · ${esc(t.short)}</span>
+      </div>
+      ${lines}
+    </div>`;
+}
+
+function fmtDay(ts) {
+  const d = ts ? new Date(ts) : null;
+  return d && !isNaN(d) ? d.toLocaleDateString("zh-CN") : "";
+}
+
+function fmtStamp(ts) {
+  const d = ts ? new Date(ts) : null;
+  return d && !isNaN(d)
+    ? `${d.toLocaleDateString("zh-CN")} ${d.toLocaleTimeString("zh-CN", { hour12: false })}`
+    : "";
+}
+
+function shortName(addr) {
+  return String(addr || "").split(":").pop();
+}
+
+async function loadTraffic() {
+  try {
+    renderTraffic(await api(u(scoped("api/traffic"))));
+  } catch (err) {
+    paint($("traffic-body"), `<div class="empty">读不到往来记录：${esc(String(err.message || err))}</div>`);
+  }
+}
+
+// 两个筛选都只作用在**已经拿到手**的数据上，不重新请求 —— 打字和勾选立刻见效
+$("traffic-q").addEventListener("input", (event) => {
+  traffic.q = event.target.value;
+  renderTraffic(traffic.data);
+});
+
+$("traffic-peers").addEventListener("change", (event) => {
+  traffic.peersOnly = event.target.checked;
+  renderTraffic(traffic.data);
+});
 
 async function loadBridge() {
   syncBridgePicker();
@@ -1455,7 +1588,10 @@ $("ws-clear-stale").addEventListener("click", () => clearWorkspaces(true, false)
 $("ws-clear-all").addEventListener("click", () => clearWorkspaces(false, false));
 $("ws-purge-all").addEventListener("click", () => clearWorkspaces(false, true));
 
-const PANES = ["runs", "chat", "events", "bridge", "models", "setup", "config"];
+// 这个列表必须和上面的 .tab[data-pane] 一一对应 —— 漏一个的后果很隐蔽：
+// 那一页的数据照常加载、照常渲染，只是**永远不显示**（showPane 把别人藏了，
+// 却没把它放出来）。panel_check.mjs 里有一条检查专门盯这个。
+const PANES = ["runs", "chat", "traffic", "events", "bridge", "models", "setup", "config"];
 
 function showPane(name) {
   for (const pane of PANES) {
@@ -1467,6 +1603,7 @@ function showPane(name) {
   }
   if (name === "chat") { syncAgentPicker(); loadChat(); }
   if (name === "bridge") loadBridge();
+  if (name === "traffic") loadTraffic();
   if (name === "models") loadModels();
   if (name === "setup") refreshSetup();
   if (name === "config") loadConfig();
@@ -1588,6 +1725,10 @@ function switchNode(node) {
   if (picker) picker.value = node;
   poll();
   refreshSetup();
+  // 切工作区之后当前这一页得立刻换成新节点的内容 —— 等下一次定时轮询
+  // 意味着有几秒钟你看的是**上一个工作区**的数据，还以为是这个的
+  if (!$("pane-traffic").hidden) loadTraffic();
+  if (!$("pane-bridge").hidden) loadBridge();
 }
 
 // 「接管」= 让这个 serve 现在就开始照看它，不用重启。
@@ -1843,6 +1984,8 @@ poll();
 setInterval(poll, CLUSTER_REFRESH);
 setInterval(() => { if (!$("pane-chat").hidden) loadChat(); }, 2000);
 setInterval(() => { if (!$("pane-bridge").hidden) loadBridge(); }, 3000);
+// 归档是只增不减的，没必要跟对话页一样勤 —— 5 秒够了
+setInterval(() => { if (!$("pane-traffic").hidden) loadTraffic(); }, 5000);
 connect();
 enableActions();
 </script>

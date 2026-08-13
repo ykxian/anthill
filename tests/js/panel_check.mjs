@@ -10,7 +10,21 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const script = readFileSync(process.argv[2], "utf8").match(/<script>([\s\S]*?)<\/script>/)[1];
+const html = readFileSync(process.argv[2], "utf8");
+const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+
+// ---- 标签页、PANES、<section> 三者必须一一对应 ----
+//
+// 漏掉其中一处的后果特别隐蔽：那一页的数据照常拉、照常渲染，**只是永远不显示**
+// —— showPane 把别的 pane 藏起来了，却没把这个放出来。页面上看就是「点了没反应」，
+// 而控制台干干净净。加「Agent 往来」那次就这么栽过一次。
+const tabs = [...html.matchAll(/<button class="tab[^"]*" type="button" data-pane="([a-z]+)"/g)]
+  .map((m) => m[1]);
+const panes = JSON.parse(script.match(/const PANES = (\[[^\]]*\]);/)[1].replace(/'/g, '"'));
+assert.deepEqual([...tabs].sort(), [...panes].sort(), "标签页与 PANES 对不上");
+for (const pane of tabs) {
+  assert.ok(html.includes(`id="pane-${pane}"`), `有标签页 ${pane} 但没有 #pane-${pane}`);
+}
 
 // ---- 最小 DOM 桩：面板只用到这几样 ----
 

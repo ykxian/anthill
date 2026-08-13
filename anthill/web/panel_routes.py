@@ -25,6 +25,7 @@ from anthill.core.errors import AntHillError, PeerError
 from anthill.core.ids import is_valid_id
 from anthill.core.logging import EventLog
 from anthill.core.paths import NodeLayout
+from anthill.core.traffic import conversations
 from anthill.core.workspace import ensure_mailboxes
 from anthill.security import secrets
 from anthill.security.pair_client import join as pair_join
@@ -170,6 +171,20 @@ def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog, token: str 
             return bridge_inbox(ctx.layout, ctx.config, agent)
         except AntHillError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(f"{PANEL_PATH}/api/traffic")
+    async def panel_traffic(request: Request, node: str = "") -> dict[str, Any]:
+        """Agent 之间聊了什么 —— 消息流有元数据没正文，这一页补上正文。
+
+        只读，所以不要求写权限：看见发生过什么本来就不是危险动作。
+        """
+        authorize(request, token, what="往来记录")
+        ctx = _pick(nodes, node)
+        # 「谁是人的代理」由 role 判断，不是硬编码 "cli" —— 那个名字是可以改的
+        humans = frozenset(
+            name for name, agent in ctx.config.agents.items() if agent.role == "user"
+        )
+        return conversations(ctx.layout, humans=humans)
 
     @app.get(f"{PANEL_PATH}/api/state")
     async def panel_state(request: Request, node: str = "") -> dict[str, Any]:
