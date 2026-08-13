@@ -306,6 +306,21 @@ button.danger:hover { color: var(--bad); border-color: color-mix(in srgb, var(--
 .waiting .from { font-weight: 600; }
 .waiting .said { margin: 8px 0 10px; white-space: pre-wrap; word-break: break-word; }
 .waiting textarea { width: 100%; min-height: 76px; font-family: var(--sans); font-size: 13.5px; }
+/* 往来记录：已经聊完的也要看得见 —— 不然接上 Claude Code 之后页面永远是空的，
+   会话几秒就回完了。左边一道竖线把「谁说的」和「回了什么」串成一条对话。 */
+.xchg {
+  border-left: 2px solid var(--line); padding: 2px 0 2px 12px;
+  margin: 0 0 14px 4px;
+}
+.xchg.out { border-left-color: var(--accent); }
+.xchg.unanswered { border-left-color: var(--warn); }
+.xchg .head { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
+.xchg .who { font-weight: 600; }
+.xchg .line { margin: 5px 0 0; white-space: pre-wrap; word-break: break-word; font-size: 13px; }
+.xchg .line.said { color: var(--text); }
+.xchg .line.back { color: var(--muted); }
+.xchg .line.back::before { content: "↳ "; color: var(--accent); }
+
 .copy-line {
   display: flex; gap: 8px; align-items: flex-start;
   background: var(--surface-2); border: 1px solid var(--line-soft);
@@ -454,7 +469,7 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
         <span class="count" id="bridge-count"></span>
       </div>
       <details id="bridge-connect" style="margin-bottom:14px">
-        <summary>把一个终端会话接进来（三选一）</summary>
+        <summary>把一个终端会话接进来（三选一，都不占着会话）</summary>
         <div id="bridge-recipes"></div>
       </details>
       <form class="actions" id="bridge-say" style="margin-bottom:16px">
@@ -463,6 +478,10 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
         <button type="submit">发出去</button>
       </form>
       <div id="bridge-body"></div>
+      <div class="eyebrow" style="margin-top:18px">
+        往来记录 <span class="count" id="bridge-log-count"></span>
+      </div>
+      <div id="bridge-log"></div>
       <div class="hint" id="bridge-hint" hidden></div>
     </section>
 
@@ -1066,19 +1085,22 @@ function renderConnect(info) {
   const claims = info.claims || [];
   paint($("bridge-recipes"), `
     <div class="recipe">
-      <h4>1 · 粘一句给会话：一个真的监控循环</h4>
+      <h4>1 · 粘一句给会话：后台等，不占着会话</h4>
       <p class="why">
-        什么都不用装。给的是一条<b>会阻塞</b>的命令 —— 会话循环跑它，
-        没人找就一直等着，有人找立刻醒。这才叫「一直盯着」。
+        什么都不用装。命令<b>放后台</b>跑，退出时 Claude Code 会自动唤起会话 ——
+        所以「有人找你」依然是推过来的，而<b>等待期间会话照常归你用</b>。
+        （前台 <code>--wait</code> 会把会话占住十分钟，连让它停下来都做不到。）
       </p>
       <pre id="rcp-prompt">${esc(info.prompt || "")}</pre>
       <div class="row"><button class="ghost" type="button" data-copy="rcp-prompt">复制</button></div>
     </div>
     <div class="recipe">
-      <h4>2 · MCP：配一次，之后每个会话自己认领</h4>
+      <h4>2 · MCP：装在这个目录，之后每个会话自己认领</h4>
       <p class="why">
-        先 <code>uv sync --extra mcp</code>，然后<b>只跑这一次</b>（<code>--scope user</code>，
-        全局；命令里<b>不写 Agent 名</b>）：
+        先 <code>uv sync --extra mcp</code>，然后跑这一条 ——
+        <b>只对这个目录生效</b>（<code>--scope local</code> 是默认值，所以要先 cd 过去；
+        别用 <code>--scope user</code>，那会让你开的<b>每一个</b> Claude Code 都挂上）。
+        命令里<b>不写 Agent 名</b>：
       </p>
       <pre id="rcp-mcp">${esc(c.mcp || "")}</pre>
       <div class="row"><button class="ghost" type="button" data-copy="rcp-mcp">复制</button></div>
@@ -1103,7 +1125,8 @@ function renderConnect(info) {
     <div class="recipe">
       <h4>一个会话同时挂几个工作区</h4>
       <p class="why">
-        再加一台 MCP server 就行，<b>名字不同</b>即可（下面这条给的是当前这个工作区）。
+        <b>在同一个目录里</b>再加一台 MCP server 就行，<b>名字不同</b>即可
+        （下面这条给的是当前这个工作区）。
         客户端按 server 名给工具分命名空间，两套 <code>anthill_*</code> 不会撞；
         每台 server 的自我介绍里都写着自己是哪个节点、哪个工作区，会话分得清。
       </p>
@@ -1113,8 +1136,10 @@ function renderConnect(info) {
     <div class="recipe">
       <h4>3 · 加一个 hook（可选，配合 2 用）</h4>
       <p class="why">
-        每轮开始前替它查一次收件箱，省得它忘了调。写进 <code>${esc(c.hook_path || "")}</code>；
-        命令里同样不写 Agent 名，跟着认领走。
+        每轮开始前替它查一次收件箱，省得它忘了调 —— <b>不阻塞，也不占会话</b>，
+        代价是只在你说话时才查。写进 <code>${esc(c.hook_path || "")}</code>
+        （<b>项目目录里的</b>，只对这个目录生效；写进 <code>~/.claude/settings.json</code>
+        就是每个会话都查了）。命令里同样不写 Agent 名，跟着认领走。
       </p>
       <pre id="rcp-hook">${esc(c.hook || "")}</pre>
       <div class="row"><button class="ghost" type="button" data-copy="rcp-hook">复制</button></div>
@@ -1146,11 +1171,47 @@ function renderConnect(info) {
     </div>`);
 }
 
+// 已经聊完的往来。**这一块是必须的** —— 只显示「在等你回」的话，接上 Claude Code
+// 之后页面永远是空的：会话几秒就回完了，消息立刻从 inbox/ 挪进 done/。
+// 干得越好越看不出它在干活，那就等于没有证据说明这套东西通了。
+function renderLog(history) {
+  const log = history || [];
+  $("bridge-log-count").textContent = log.length ? `最近 ${log.length} 条` : "";
+  paint($("bridge-log"), log.length
+    ? log.map((x) => {
+        const cls = x.direction === "out" ? "out" : (x.answered ? "" : "unanswered");
+        const who = x.direction === "out"
+          ? `发给 ${esc(x.peer || "?")}`
+          : `${esc(x.peer || "?")} 找它`;
+        return `
+      <div class="xchg ${cls}">
+        <div class="head">
+          <span class="who">${who}</span>
+          <span class="pill">${esc(x.kind || "chat")}</span>
+          ${x.failed ? `<span class="pill bad">发送失败</span>` : ""}
+          ${x.direction === "in" && !x.answered ? `<span class="pill">没回</span>` : ""}
+          <span class="grow"></span>
+          <span class="meta">${esc(fmtTime(x.ts))} ${esc(x.short || "")}</span>
+        </div>
+        ${x.incoming ? `<div class="line said">${esc(x.incoming)}</div>` : ""}
+        ${x.reply ? `<div class="line back">${esc(x.reply)}</div>` : ""}
+      </div>`;
+      }).join("")
+    : `<div class="empty">还没有往来记录 —— 聊过的消息会归档到这里</div>`);
+}
+
+function fmtTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  return isNaN(d) ? "" : d.toLocaleTimeString("zh-CN", { hour12: false });
+}
+
 function renderBridge(info) {
   $("bridge-count").textContent = info.waiting.length
     ? `${info.waiting.length} 条在等你`
     : "没有在等你的消息";
   renderConnect(info);
+  renderLog(info.history);
   paint($("bridge-body"), info.waiting.length
     ? info.waiting.map((w) => `
       <div class="waiting">

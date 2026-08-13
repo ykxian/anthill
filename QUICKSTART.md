@@ -90,11 +90,17 @@ uv run anthill serve -w . --host 0.0.0.0 --panel-write --panel-token
 uv sync --extra mcp
 ```
 
-**只配这一次**（全局，命令里**不写 Agent 名**）：
+**装在要接进来的那个目录里**（`--scope local` 是默认值，所以先 cd 过去；
+命令里**不写 Agent 名**）：
 
 ```bash
-claude mcp add --scope user anthill -- /路径/.venv/bin/anthill mcp serve -w /你的工作区
+cd /你的工作区
+claude mcp add anthill -- /路径/.venv/bin/anthill mcp serve -w /你的工作区
 ```
+
+> 别用 `--scope user`：那是全局的，你开的**每一个** Claude Code 都会挂上这台
+> server，而通常只有一两个需要接进来。同理，hook 也写进项目的
+> `.claude/settings.local.json`，不要写 `~/.claude/settings.json`。
 
 之后每开一个 Claude Code，它都会**自动认领一个还没人占的桥接 Agent**。
 在面板上建三个 bridge Agent，开三个会话，就是一一对应 —— 包括**同一个目录下
@@ -114,11 +120,12 @@ ANTHILL_AGENT=cc2 claude
 
 ### 一个会话同时挂几个工作区
 
-再加一台 MCP server 就行，**名字不同**即可：
+**在同一个目录里**再加一台 MCP server 就行，**名字不同**即可：
 
 ```bash
-claude mcp add --scope user anthill-projA -- /路径/anthill mcp serve -w /工作区A
-claude mcp add --scope user anthill-projB -- /路径/anthill mcp serve -w /工作区B
+cd /会话所在的目录
+claude mcp add anthill-projA -- /路径/anthill mcp serve -w /工作区A
+claude mcp add anthill-projB -- /路径/anthill mcp serve -w /工作区B
 ```
 
 客户端按 server 名给工具分命名空间，两套 `anthill_*` 不会撞；
@@ -149,10 +156,22 @@ MCP 工具和 hook 都是**拉取式**的 —— 会话闲着的时候没有任�
 所以有一个会阻塞的调用：
 
 - 会话里让它调 **`anthill_wait`**（阻塞到有人找为止，超时再调一次）；
-- 不想装 MCP 的话，粘桥接页上那句话就行 —— 那是条循环跑
-  `anthill bridge --wait 300` 的指令，一个道理。
+- 不想装 MCP 的话，粘桥接页上那句话就行 —— 那是条跑
+  `anthill bridge --wait 600` 的指令，一个道理。
+
+**但别在前台等。** 阻塞十分钟意味着这段时间会话整个被占住，你连让它停下来都
+做不到 —— 为了收消息把会话废掉，代价太大。桥接页给的那句话是让它**放后台**跑
+（Bash 工具的 `run_in_background`）：命令退出时 Claude Code 会自动唤起会话，
+所以「有人找你」依然是推过来的，而等待期间会话照常归你用。
 
 `anthill_inbox` / `anthill_reply` / `anthill_send` 是收发。
+
+### 网页上看得见发生过什么
+
+桥接页上半截是**还在等你回**的，下半截「往来记录」是**已经聊完**的。
+
+后者是必须的：接上 Claude Code 之后会话几秒就回完了，消息立刻从 `inbox/`
+挪进 `done/`。只显示前者的话，页面永远是空的 —— 干得越好越看不出它在干活。
 
 ## 7. 存一件常做的事 / 定时跑 / 跑完通知
 

@@ -23,6 +23,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from anthill.adapters.bridge import BRIDGE_DIR, BridgeHandler, parse_note
+from anthill.adapters.bridge_history import recent
 from anthill.adapters.bridge_session import last_claim, read_claim
 from anthill.core.config import Config
 from anthill.core.errors import AntHillError
@@ -76,6 +77,9 @@ def inbox(layout: NodeLayout, config: Config, agent: str) -> dict[str, Any]:
     return {
         "agent": agent,
         "waiting": waiting,
+        # **已经聊完的也要看得见。** 只显示「在等你回」的话，接上 Claude Code 之后
+        # 页面永远是空的 —— 会话几秒就回完了。干得越好越看不出它在干活。
+        "history": recent(handler.root),
         "dir": str(handler.root),
         "prompt": watch_prompt(layout, agent),
         "connect": connect_recipes(layout, agent),
@@ -130,40 +134,56 @@ def connect_recipes(layout: NodeLayout, agent: str) -> dict[str, Any]:
         "exe": exe,
         "workspace": workspace,
         "agent": agent,
-        "hook_path": "~/.claude/settings.json",
+        # **不是 `~/.claude/settings.json`。** 那是全局的：开的每个会话都会去查收件箱，
+        # 而通常只有一两个要接进来。写进项目目录才配得上「只对这个目录生效」。
+        "hook_path": f"{workspace}/.claude/settings.local.json",
         "hook": json.dumps(hook, ensure_ascii=False, indent=2),
-        # **一次性的全局配置** —— 命令里不写 Agent 名，让每个会话自己认领。
-        # 写死名字的话，同一份配置下开几个会话就有几个抢同一个 Agent。
-        "mcp": f"claude mcp add --scope user anthill -- {exe} mcp serve -w {workspace}",
+        # **装在当前目录，不装全局。** `--scope local` 是每个项目目录一份，
+        # 所以要先 cd 过去。全局装法（`--scope user`）会让你开的**每一个**
+        # Claude Code 都挂上这台 server，而通常只有一两个需要接进来。
+        #
+        # 命令里**不写 Agent 名** —— 让每个会话自己认领。写死名字的话，
+        # 同一份配置下开几个会话就有几个抢同一个 Agent。
+        "mcp": f"cd {workspace} && claude mcp add anthill -- {exe} mcp serve -w {workspace}",
         "pin": f"ANTHILL_AGENT={agent} claude",
         # 一个会话挂多个工作区：**再加一台 server 就行**，名字不同即可。
         # MCP 客户端按 server 名给工具分命名空间，两套 anthill_* 不会撞；
         # 而每台 server 的自我介绍里都写着自己是哪个节点、哪个工作区。
         "multi": (
-            f"claude mcp add --scope user anthill-{Path(workspace).name} "
-            f"-- {exe} mcp serve -w {workspace}"
+            f"claude mcp add anthill-{Path(workspace).name} -- {exe} mcp serve -w {workspace}"
         ),
     }
 
 
 def watch_prompt(layout: NodeLayout, agent: str) -> str:
-    """给常驻会话粘的那句话 —— 一个**真的监控循环**。
+    """给常驻会话粘的那句话 —— 一个**不占着会话**的监控循环。
 
-    以前这句是「盯着这个目录，出现新的 .md 就读」。那不是监控，是「你想起来了
-    看一眼」：会话没有任何理由主动去看那个目录，它在等你说话。
-    现在给的是一条**会阻塞**的命令（`--wait`），循环跑它才叫一直盯着。
+    走过两版，两版都不好：
+
+    1. 「盯着这个目录，出现新 .md 就读」—— 那不是监控，是「你想起来了看一眼」。
+       会话没有任何理由主动去看那个目录，它在等你说话。
+    2. 前台跑 `--wait 300` —— 是真的在等了，但**整个会话被占住五分钟**，
+       期间你连让它停下来都做不到。为了收消息把会话废掉，代价太大。
+
+    第三版的关键是**把等待放到后台**：命令退出时 Claude Code 会重新唤起会话，
+    所以「有人找你」依然是被推过来的，而等待期间会话照常归你用。
+    阻塞换来了推送，后台换回了会话 —— 两样都要。
     """
     exe = anthill_exe()
     workspace = str(layout.workspace)
     root = layout.agent_dir(agent) / BRIDGE_DIR
+    wait = f"{exe} bridge {agent} --wait 600 --json -w {workspace}"
     return (
-        f"你现在是 AntHill 协作网络里的 Agent「{agent}」。请循环做这件事：\n"
-        f"1. 运行 `{exe} bridge {agent} --wait 300 --json -w {workspace}`。"
-        "它会阻塞到有人找你为止（最多 5 分钟），超时就返回空。\n"
-        f"2. 有消息就读懂它，然后回复："
-        f'`{exe} bridge {agent} --reply <消息id> --text "你的回复" -w {workspace}`。\n'
-        "3. 不管有没有消息，回到第 1 步再跑一次。\n"
-        f'想主动找别人说话：`{exe} bridge {agent} --to <对方> --text "..." -w {workspace}`。\n'
+        f"你现在是 AntHill 协作网络里的 Agent「{agent}」。\n"
+        f"请**在后台**运行这条命令（Bash 工具的 run_in_background，不要在前台等）：\n"
+        f"  {wait}\n"
+        "它会一直挂着直到有人找你（最多 10 分钟），退出时你会被自动唤起。\n"
+        "\n"
+        "被唤起后：读那条消息 → 回复 → **再往后台放一条同样的命令**，如此循环：\n"
+        f'  {exe} bridge {agent} --reply <消息id> --text "你的回复" -w {workspace}\n'
+        "\n"
+        "这样等消息的时候我照常可以让你干别的活，你不用一直卡在等待里。\n"
+        f'想主动找别人说话：{exe} bridge {agent} --to <对方> --text "..." -w {workspace}\n'
         f"（这些命令读写的就是 {root} 下的文件，你也可以直接编辑。）"
     )
 
