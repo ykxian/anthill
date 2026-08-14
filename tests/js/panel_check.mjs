@@ -84,7 +84,7 @@ const panel = new Function(
   "setTimeout",
   // setWrite：写权限开着时拓扑会多画启停/删除按钮和「加 Agent」表单，
   // 那几处也把外部数据拼进了 HTML，必须一起验
-  `${script}\nreturn { state, applyCluster, applyLocal, renderWorkspaces, setWrite: (v) => { canWrite = v; } };`,
+  `${script}\nreturn { state, local, topoOpen, draw, applyCluster, applyLocal, renderWorkspaces, setWrite: (v) => { canWrite = v; } };`,
 )(document, window, localStorage, history, URL, location, fetch, WebSocket, noop, noop);
 
 // ---- 数据 ----
@@ -209,6 +209,53 @@ panel.applyCluster({
   ],
 });
 assert.ok($("topo-body").innerHTML.includes("陌生的"), "见过但没配对的节点没显示出来");
+panel.applyCluster(CLUSTER);
+
+// ---- 选中的工作区展开，其余一律折叠成一行 ----
+//
+// 本机的、远端的都一样：不折叠的话，照看两个工作区再连几台机器，
+// 一屏全是别处的 Agent 卡片，正在操作的那个反而要翻着找。
+const FOLD_CLUSTER = {
+  node: "laptop",
+  nodes: [
+    { node: "laptop", local: true, reachable: true, agents: [agent("cli")], runs: [], events: [] },
+    { node: "desk", local: true, reachable: true, agents: [agent("deskbot")], runs: [], events: [] },
+    { node: "lab", local: false, reachable: true, agents: [agent("labbot")], runs: [], events: [] },
+    {
+      node: "server",
+      local: false,
+      reachable: false,
+      reason: "ConnectError: nobody home",
+      agents: [],
+      runs: [],
+      events: [],
+    },
+  ],
+};
+panel.topoOpen.clear();
+panel.local.node = "";
+panel.applyCluster(FOLD_CLUSTER);
+let fold = $("topo-body").innerHTML;
+assert.ok(fold.includes("cli"), "正在操作的工作区没展开");
+assert.ok(!fold.includes("deskbot"), "没在操作的本机工作区应当折叠");
+assert.ok(!fold.includes("labbot"), "远端节点默认应当折叠");
+assert.ok(fold.includes("nobody home"), "折叠的节点连不上时，原因至少要在悬停提示里");
+
+// 点远端节点的头部 = 扒开看一眼，跨重画要记住
+panel.topoOpen.add("lab");
+panel.draw();
+fold = $("topo-body").innerHTML;
+assert.ok(fold.includes("labbot"), "手动扒开的远端节点没展开");
+
+// 切到另一个工作区：它展开，原来那个折叠
+panel.topoOpen.clear();
+panel.local.node = "desk";
+panel.draw();
+fold = $("topo-body").innerHTML;
+assert.ok(fold.includes("deskbot"), "切过去的工作区没展开");
+assert.ok(!fold.includes(">cli<"), "切走之后原来的工作区应当折叠");
+panel.topoOpen.clear();
+panel.local.node = "";
 panel.applyCluster(CLUSTER);
 
 // 跨零点：事件按完整时间戳排，不能按显示用的 HH:MM:SS

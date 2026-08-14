@@ -398,6 +398,8 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
 .node-group.focus > .node-head .name { font-weight: 600; }
 .node-group.focus { border-left: 2px solid var(--accent); padding-left: 6px; }
 .node-head .tag.on { color: var(--accent); font-weight: 600; }
+.node-head .fold { flex: none; width: 11px; color: var(--accent); font-size: 10px; }
+.node-group.down .node-head .fold { color: var(--dim); }
 
 /* ---- 工作区 ---- */
 .ws {
@@ -760,20 +762,31 @@ function renderTopo(nodes) {
   const focus = focusedNode();
   const locals = nodes.filter((n) => n.local).length;
   paint($("topo-body"), nodes.map(node => {
-    // 多个本机节点时，只展开你正在操作的那个；别的收起来，省得一屏全是 Agent 卡片
-    const folded = node.local && locals > 1 && node.node !== focus;
+    // 正在操作的工作区展开，**其余一律折叠成一行** —— 本机的、远端的都一样。
+    // 以前只折叠本机的兄弟工作区，远端节点全摊着：连几台机器之后一屏都是
+    // 别处的 Agent 卡片，正在操作的那个反而要翻着找。
+    // 点头部：本机的切过去（顺带展开），远端的原地扒开看一眼。
+    const isFocus = node.local && (locals < 2 || node.node === focus);
+    const folded = !isFocus && !topoOpen.has(node.node);
     const count = (node.agents || []).length;
+    // 本机头部一律可点（点正在操作的那个等于原地刷新，无害）；远端头部点了原地扒开
+    const pick = node.local
+      ? (locals > 1 ? `data-focus-node="${esc(node.node)}"` : "")
+      : `data-toggle-node="${esc(node.node)}"`;
     return `
-    <div class="node-group ${node.reachable ? "" : "down"} ${node.local && node.node === focus ? "focus" : ""}">
-      <div class="node-head ${node.local && locals > 1 ? "pickable" : ""}"
-           ${node.local && locals > 1 ? `data-focus-node="${esc(node.node)}"` : ""}>
+    <div class="node-group ${node.reachable ? "" : "down"} ${isFocus ? "focus" : ""}">
+      <div class="node-head ${pick ? "pickable" : ""}" ${pick}
+           ${folded && node.reason ? `title="${esc(node.reason)}"` : ""}>
+        <span class="fold">${folded ? "▸" : "▾"}</span>
         <span class="dot ${node.reachable ? "on" : ""}"></span>
         <span class="name grow truncate">${esc(node.node)}</span>
-        ${node.local && locals > 1
-          ? (node.node === focus
-              ? `<span class="tag on">正在操作</span>`
-              : `<span class="tag">${count} 个 Agent</span>`)
-          : `<span class="tag">${node.local ? "本机" : node.reachable ? "已连上" : "连不上"}</span>`}
+        ${isFocus
+          ? (locals > 1 ? `<span class="tag on">正在操作</span>` : `<span class="tag">本机</span>`)
+          : node.local
+            ? `<span class="tag">${count} 个 Agent</span>`
+            : node.reachable
+              ? `<span class="tag">${folded ? `${count} 个 Agent` : "已连上"}</span>`
+              : `<span class="tag">连不上</span>`}
         ${node.pairable && canWrite
           ? `<button class="ghost" type="button" data-pair="${esc(node.node)}">配对</button>`
           : ""}
@@ -782,10 +795,14 @@ function renderTopo(nodes) {
         ? (node.agents || []).map((a) => agentCard(a, node)).join("") ||
           `<div class="node-note">这个节点没有配置 Agent</div>`
         : `<div class="node-note">${esc(node.reason || "")}</div>`}
-      ${!folded && node.local && node.node === focus && canWrite ? addAgentForm() : ""}
+      ${isFocus && canWrite ? addAgentForm() : ""}
     </div>`;
   }).join("") || `<div class="empty">还没有配置 Agent</div>`);
 }
+
+// 手动扒开看过的节点组。挂在重画外面 —— 拓扑每 2~5 秒整块重写一次，
+// 状态放里面就等于每次刷新都替人把它合上。
+const topoOpen = new Set();
 
 // 已完成任务留几条。以前是 3 —— 第 4 条起在界面上永久消失，
 // 而 CLI 侧连列出历史任务的命令都没有（现在有 `anthill runs`）。
@@ -1819,11 +1836,9 @@ async function browseTo(path) {
   }
 }
 
-$("node-pick").addEventListener("change", (event) => {
-  local.node = event.target.value;
-  poll();
-  loadChat();
-});
+// 顶栏下拉和侧栏头部是同一件事，必须走同一条路 —— 各写各的迟早漏掉一半
+// （下拉那条就漏过 topoOpen.clear()，头部那条漏过 loadChat()）
+$("node-pick").addEventListener("change", (event) => switchNode(event.target.value));
 
 $("setup-toggle").addEventListener("click", () => {
   const hidden = $("picker").hidden;
@@ -1837,8 +1852,19 @@ $("crumb-up").addEventListener("click", (event) => browseTo(event.target.dataset
 document.addEventListener("click", (event) => {
   const dir = event.target.closest?.("[data-dir]");
   if (dir) { browseTo(dir.dataset.dir); return; }
+  // 「配对」按钮长在节点头部**里面** —— 头部自己也可点（切换/展开），
+  // 所以必须先认按钮再认头部，否则点配对就成了点头部
+  const pair = event.target.closest?.("[data-pair]");
+  if (pair) { startPairing(pair.dataset.pair); return; }
   const groupHead = event.target.closest?.("[data-focus-node]");
   if (groupHead) { switchNode(groupHead.dataset.focusNode); return; }
+  const peek = event.target.closest?.("[data-toggle-node]");
+  if (peek) {
+    const name = peek.dataset.toggleNode;
+    if (topoOpen.has(name)) topoOpen.delete(name); else topoOpen.add(name);
+    draw();
+    return;
+  }
   const switchTo = event.target.closest?.("[data-ws-node]");
   if (switchTo) { switchNode(switchTo.dataset.wsNode); return; }
   const ws = event.target.closest?.("[data-ws]");
@@ -1847,8 +1873,6 @@ document.addEventListener("click", (event) => {
     removeWorkspace(ws.dataset.ws, ws.dataset.wsOp === "purge");
     return;
   }
-  const pair = event.target.closest?.("[data-pair]");
-  if (pair) { startPairing(pair.dataset.pair); return; }
   const op = event.target.closest?.("[data-agent]");
   if (op) { runAgentOp(op.dataset.agent, op.dataset.op, op.dataset.node, op); return; }
   const answer = event.target.closest?.("[data-send-reply]");
@@ -1860,12 +1884,15 @@ document.addEventListener("click", (event) => {
 function switchNode(node) {
   if (!node) return;
   local.node = node;
+  // 换了工作区，别处扒开看过的也一并收起 —— 「选中谁就只看谁」
+  topoOpen.clear();
   const picker = $("node-pick");
   if (picker) picker.value = node;
   poll();
   refreshSetup();
   // 切工作区之后当前这一页得立刻换成新节点的内容 —— 等下一次定时轮询
   // 意味着有几秒钟你看的是**上一个工作区**的数据，还以为是这个的
+  loadChat();
   if (!$("pane-bridge").hidden) loadBridge();
 }
 
