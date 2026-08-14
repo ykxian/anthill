@@ -199,3 +199,39 @@ def test_archived_copy_wins_over_the_local_note(tmp_path: Path) -> None:
 
     # Assert
     assert [m["body"] for m in result["threads"][0]["messages"]] == ["只说一次"]
+
+
+def test_replies_to_an_agent_nobody_runs_are_still_visible(tmp_path: Path) -> None:
+    """`cli` 按设计就没有处理者 —— 别人回给你的话永远停在 new/。
+
+    只读 done/ 的话，「它回了」和「页面上什么都没有」会同时成立。
+    """
+    # Arrange：一条已送达但没人处理的回信
+    layout = _layout(tmp_path)
+    env = _chat("tst1", "cli", "我回你了", thread=new_id(), at=now())
+    inbox = layout.mailbox_dir("cli") / "inbox" / "new"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / f"{env.id}.json").write_bytes(env.to_json_bytes())
+
+    # Act
+    result = conversations(layout)
+
+    # Assert
+    assert [m["body"] for m in result["threads"][0]["messages"]] == ["我回你了"]
+
+
+def test_a_message_being_processed_is_not_counted_twice(tmp_path: Path) -> None:
+    """cur/ 里是「正在处理」的，处理完会挪进 done/ —— 交叠的瞬间别出现两遍。"""
+    # Arrange
+    layout = _layout(tmp_path)
+    env = _chat("tst1", "cli", "只算一次", thread=new_id(), at=now())
+    _deliver(layout, env)
+    cur = layout.mailbox_dir("cli") / "inbox" / "cur"
+    cur.mkdir(parents=True, exist_ok=True)
+    (cur / f"{env.id}.json").write_bytes(env.to_json_bytes())
+
+    # Act
+    result = conversations(layout)
+
+    # Assert
+    assert [m["body"] for m in result["threads"][0]["messages"]] == ["只算一次"]

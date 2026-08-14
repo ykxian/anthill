@@ -1090,7 +1090,7 @@ function renderThread(t) {
         <span class="pill">${t.count} 条</span>
         ${t.receipts ? `<span class="meta">另有 ${t.receipts} 条回执</span>` : ""}
         <span class="grow"></span>
-        ${here ? `<span class="pill ok">接着这段说</span>` : ""}
+        ${here ? `<span class="pill ok">接着这段说 → ${esc(chat.to || "?")}</span>` : ""}
         <span class="meta">最后 ${esc(fmtStamp(t.last))} · ${esc(t.short)}</span>
       </div>
       ${lines}
@@ -1113,6 +1113,11 @@ function shortName(addr) {
   return String(addr || "").split(":").pop();
 }
 
+function candidates(thread) {
+  const convo = (chat.data.threads || []).find((t) => t.thread === thread);
+  return (convo?.peers || []).map(shortName);
+}
+
 async function loadChat() {
   try {
     chat.data = await api(u(scoped("api/traffic")));
@@ -1131,14 +1136,18 @@ $("chat-body").addEventListener("click", (event) => {
   const picked = card.dataset.thread;
   if (chat.thread === picked) { chat.thread = ""; renderChat(); return; }
   chat.thread = picked;
-  const convo = (chat.data.threads || []).find((t) => t.thread === picked);
-  const other = (convo?.peers || []).map(shortName).find((n) => n !== chat.mine);
   const picker = $("chat-to");
-  // 只在下拉框里真有这个人的时候才改收件人 —— 对方在别的机器上时选项值是
-  // `节点:名字`，硬填裸名会得到一个发不出去的收件人
-  if (other && [...picker.options].some((o) => o.value === other)) {
-    chat.to = other;
-    picker.value = other;
+  const has = (n) => n && [...picker.options].some((o) => o.value === n);
+  // **一段 Agent↔Agent 的对话里「对方」有两个**（tst1 和 tst2），说不清是谁。
+  // 原来这里取第一个 —— 于是你在下拉框里选了 tst2，一点对话又被拽回 tst1，
+  // 看起来就是「只能发给 tst1」和「下拉框不生效」。其实是同一个 bug。
+  //
+  // 所以：**你已经选的人只要在这段对话里，就不动它**；只有当前收件人跟这段
+  // 对话无关时才替你挑一个（这时候多半是你刚点了另一段对话）。
+  const others = candidates(picked).filter((n) => n !== chat.mine && has(n));
+  if (others.length && !others.includes(chat.to)) {
+    chat.to = others[0];
+    picker.value = others[0];
   }
   renderChat();
 });
@@ -1156,7 +1165,9 @@ $("chat-peers").addEventListener("change", (event) => {
 
 $("chat-to").addEventListener("change", (event) => {
   chat.to = event.target.value;
-  chat.thread = "";   // 换了人就是开一段新的；想接着老的就去上面点那一段
+  // 换成**这段对话里的另一位**，意思是「还在这段里，改成跟他说」（tst1↔tst2 里
+  // 转头对 tst2 说一句）；换成一个跟这段无关的人，才是开一段新的。
+  if (chat.thread && !candidates(chat.thread).includes(chat.to)) chat.thread = "";
   renderChat();
 });
 

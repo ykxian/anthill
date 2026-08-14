@@ -155,8 +155,16 @@ def _bare(address: str) -> str:
 def _newest(layout: NodeLayout, *, limit: int) -> list[Message]:
     candidates: list[tuple[float, Path]] = []
     for agent in layout.known_agents():
-        for path in _archive_files(layout.mailbox_dir(agent) / "inbox" / "done"):
+        inbox = layout.mailbox_dir(agent) / "inbox"
+        # **不能只读 done/。** 归档是「处理完」才发生的，而有些 Agent 根本没有
+        # 处理者 —— `cli` 就是：它只是 `anthill send` 用来收回执和结果的信箱，
+        # 从来没有 agentd 跑它。于是别人回给你的话永远停在 new/，
+        # 只读 done/ 的话「它回了」和「页面上什么都没有」会同时成立。
+        # 收件箱里躺着的消息一样是**已经送到**的消息，就该看得见。
+        for path in _archive_files(inbox / "done"):
             candidates.append((_mtime(path), path))
+        for stage in ("new", "cur"):
+            candidates.extend((_mtime(p), p) for p in _loose(inbox / stage))
     candidates.sort(key=lambda item: item[0], reverse=True)
 
     out: list[Message] = []
@@ -185,6 +193,14 @@ def _archive_files(done: Path) -> list[Path]:
         except OSError:
             continue
     return out
+
+
+def _loose(stage: Path) -> list[Path]:
+    """`new/` 或 `cur/` 里还没被处理的信封 —— 没有按天分的子目录。"""
+    try:
+        return [p for p in stage.iterdir() if p.suffix == ".json"]
+    except OSError:
+        return []
 
 
 def _mtime(path: Path) -> float:
