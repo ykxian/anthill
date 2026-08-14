@@ -241,11 +241,25 @@ assert.ok(!fold.includes("deskbot"), "没在操作的本机工作区应当折叠
 assert.ok(!fold.includes("labbot"), "远端节点默认应当折叠");
 assert.ok(fold.includes("nobody home"), "折叠的节点连不上时，原因至少要在悬停提示里");
 
+// 可点的头部得让键盘也够得着：能 Tab 到、读屏认得出是按钮、报告开合状态
+assert.ok(
+  /data-toggle-node="lab"[^>]*tabindex="0"/.test(fold) ||
+    /tabindex="0"[^>]*data-toggle-node="lab"/.test(fold),
+  "可点的头部 Tab 不到",
+);
+assert.ok(fold.includes('role="button"'), "可点的头部读屏认不出是按钮");
+assert.ok(fold.includes('aria-expanded="false"'), "折叠状态没报告给辅助技术");
+assert.ok(
+  /class="fold"[^>]*aria-hidden="true"|aria-hidden="true"[^>]*class="fold"/.test(fold),
+  "▸/▾ 箭头对读屏是纯噪音，得藏起来",
+);
+
 // 点远端节点的头部 = 扒开看一眼，跨重画要记住
 panel.topoOpen.add("lab");
 panel.draw();
 fold = $("topo-body").innerHTML;
 assert.ok(fold.includes("labbot"), "手动扒开的远端节点没展开");
+assert.ok(fold.includes('aria-expanded="true"'), "展开状态没报告给辅助技术");
 
 // 切到另一个工作区：它展开，原来那个折叠
 panel.topoOpen.clear();
