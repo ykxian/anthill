@@ -1100,12 +1100,14 @@ function renderChat() {
     : "";
   const body = $("chat-body");
   const pinned = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
-  paint(body, shown.length
+  const changed = paint(body, shown.length
     ? shown.map(renderThread).join("")
     : `<div class="empty">${all.length
         ? "没有匹配的对话"
         : "还没有对话 —— 下面选一个 Agent，说点什么"}</div>`);
-  if (pinned) body.scrollTop = body.scrollHeight;
+  // 消息流那边同款守卫：没变就别动 scrollTop —— 人停在离底不到 60px 的地方
+  // 看东西时，每 2 秒被拽到底一次
+  if (changed && pinned) body.scrollTop = body.scrollHeight;
 }
 
 function matchesChat(t) {
@@ -1200,7 +1202,10 @@ function ask(title, lines, choices) {
       if (box.open) box.close();
       resolve(value);
     };
-    const onClose = () => done(null);                      // Esc、点外面
+    // close 事件是**排队派发**的：上一问 done() 里的 close()，其事件会晚到 ——
+    // 连着问两问（清工作区的「名单→最后确认」）时，它落在第二问已经 showModal
+    // 之后，不挡就把第二问当场关掉。迟到的那颗此刻 open 是 true，真取消是 false。
+    const onClose = () => { if (!box.open) done(null); };  // Esc、点外面
     const onClick = (event) => {
       const hit = event.target.closest?.("[data-pick]");
       if (!hit) return;
@@ -1214,6 +1219,12 @@ function ask(title, lines, choices) {
     box.querySelector('[data-pick="cancel"]').focus();
   });
 }
+
+// 点背景 = 取消。<dialog> 原生只认 Esc；点到 dialog 元素自身（而不是里面的内容）
+// 说明点的是空白处，走 close → ask() 的 onClose → resolve(null)。
+$("ask").addEventListener("click", (event) => {
+  if (event.target === $("ask") && $("ask").open) $("ask").close();
+});
 
 // 删记录。**先问服务端要删几条，把这个数报给人、再原样回传** ——
 // 批量删除该有的闸不是「你确定吗」，而是「你确定要删这几条吗」：
@@ -1651,7 +1662,13 @@ $("provider-form").addEventListener("submit", async (event) => {
 $("models-body").addEventListener("click", async (event) => {
   const name = event.target.dataset?.dropProvider;
   if (!name) return;
-  if (!window.confirm(`删掉 provider ${name}？`)) return;
+  // 标题走 textContent，不用转义
+  const go = await ask(
+    `删掉 provider ${name}？`,
+    ["只从配置里删；存过的密钥留在原处不动。"],
+    [{ label: "删掉", value: true, danger: true }],
+  );
+  if (go === null) return;
   try {
     await api(u(scoped(`api/providers/${encodeURIComponent(name)}`)), { method: "DELETE" });
     loadModels();
@@ -1714,16 +1731,28 @@ async function clearWorkspaces(staleOnly, purge) {
     return;
   }
 
-  const listed = doomed.paths.slice(0, 12).join("\n");
-  const more = doomed.count > 12 ? `\n…（共 ${doomed.count} 个）` : "";
-  const head = purge
-    ? `删掉这 ${doomed.count} 个工作区的 .anthill/ 目录？\n\n` +
-      "这会带走它们的邮箱、黑板、密钥，不可撤销。\n" +
-      "（你放在那些目录里的别的东西不动）\n\n"
-    : `从清单里移除这 ${doomed.count} 个？磁盘上的文件不会被删。\n\n`;
-  if (!window.confirm(head + listed + more)) return;
+  // window.confirm 里的名单是一坨 \n 拼的纯文本，长路径挤成一团没法看 ——
+  // 名单本来就是这道闸的主角，用 ask() 一行一条摆清楚
+  const listed = doomed.paths.slice(0, 12).map((p) => `<code>${esc(p)}</code>`);
+  if (doomed.count > 12) listed.push(`…（共 ${doomed.count} 个）`);
+  const lines = purge
+    ? [`会带走它们的邮箱、黑板、密钥，<b>不可撤销</b>。（你放在那些目录里的别的东西不动）`, ...listed]
+    : ["磁盘上的文件不会被删。", ...listed];
+  const go = await ask(
+    purge ? `删掉这 ${doomed.count} 个工作区的 .anthill/ 目录？` : `从清单里移除这 ${doomed.count} 个？`,
+    lines,
+    [{ label: purge ? `删掉这 ${doomed.count} 个` : `移除这 ${doomed.count} 条`, value: true, danger: purge }],
+  );
+  if (go === null) return;
   // 真删文件的那一下再问一次 —— 一次误点没有 undo
-  if (purge && !window.confirm(`最后确认：真的删掉这 ${doomed.count} 个目录里的 .anthill/？`)) return;
+  if (purge) {
+    const sure = await ask(
+      "最后确认",
+      [`真的删掉这 ${doomed.count} 个目录里的 <code>.anthill/</code>？`],
+      [{ label: "真的删", value: true, danger: true }],
+    );
+    if (sure === null) return;
+  }
 
   try {
     const r = await api(
@@ -1949,16 +1978,20 @@ async function sendBridgeReply(msgId, button) {
 }
 
 async function removeWorkspace(path, purge) {
-  const what = purge
-    ? `连同 .anthill/ 一起删掉？\n\n${path}\n\n里面的密钥、邮箱、黑板都会没有。`
-    : `把 ${path} 移出清单？（文件不动）`;
-  if (!window.confirm(what)) return;
+  const go = await ask(
+    purge ? "连同 .anthill/ 一起删掉？" : "移出清单？",
+    purge
+      ? [`<code>${esc(path)}</code>`, "里面的密钥、邮箱、黑板都会没有，<b>不可撤销</b>。"]
+      : [`把 <code>${esc(path)}</code> 移出清单，磁盘上的文件不动。`],
+    [{ label: purge ? "删掉" : "移出清单", value: true, danger: purge }],
+  );
+  if (go === null) return;
   try {
     await api(u(`api/setup/workspace?path=${encodeURIComponent(path)}&purge=${purge}`),
               { method: "DELETE" });
     refreshSetup();
   } catch (err) {
-    window.alert(String(err.message || err));
+    say("ws-clear-hint", String(err.message || err), "bad");
   }
 }
 
@@ -2108,7 +2141,14 @@ async function startPairing(target) {
 }
 
 async function runAgentOp(name, op, node, button) {
-  if (op === "remove" && !window.confirm(`把 ${name} 从 node.toml 里删掉？`)) return;
+  if (op === "remove") {
+    const go = await ask(
+      `把 ${name} 从 node.toml 里删掉？`,
+      ["只改这个节点的配置；要再用得重新加。"],
+      [{ label: "删掉", value: true, danger: true }],
+    );
+    if (go === null) return;
+  }
   button.disabled = true;
   const at = node && node !== state.node ? `?node=${encodeURIComponent(node)}` : "";
   try {

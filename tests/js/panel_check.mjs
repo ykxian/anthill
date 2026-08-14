@@ -26,6 +26,10 @@ for (const pane of tabs) {
   assert.ok(html.includes(`id="pane-${pane}"`), `有标签页 ${pane} 但没有 #pane-${pane}`);
 }
 
+// 破坏性操作一律走三选一的 ask() <dialog> —— window.confirm 装不下三种意图，
+// 而且「取消」在它手里被迫变过「删得少一点」。别再回去。
+assert.ok(!script.includes("window.confirm("), "又用回 window.confirm 了 —— 破坏性确认走 ask()");
+
 // ---- 最小 DOM 桩：面板只用到这几样 ----
 
 const elements = new Map();

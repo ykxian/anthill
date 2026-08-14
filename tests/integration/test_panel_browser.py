@@ -425,11 +425,14 @@ def test_clearing_the_workspace_list_from_the_page(
 
     page, errors = open_panel(browser, panel)
     page.wait_for_selector("#topo-body .card", timeout=15000)
-    page.on("dialog", lambda d: d.accept())
 
     page.click('.tab[data-pane="setup"]')
     page.wait_for_selector("#ws-clear-all", timeout=15000)
     page.click("#ws-clear-all")
+    # 确认走的是页面自己的 ask() 对话框，名单摆在里面
+    page.wait_for_selector("#ask[open]", timeout=15000)
+    assert "junk" in page.text_content("#ask-body"), "确认框里该有要删的名单"
+    page.click('#ask-choices [data-pick="0"]')
     page.wait_for_selector("#ws-clear-hint.ok", timeout=15000)
 
     assert "移除" in page.text_content("#ws-clear-hint")
@@ -462,11 +465,18 @@ def test_purging_workspaces_from_the_page_spares_the_current_one(
 
     page, errors = open_panel(browser, panel)
     page.wait_for_selector("#topo-body .card", timeout=15000)
-    page.on("dialog", lambda d: d.accept())  # 两道确认都点是
-
     page.click('.tab[data-pane="setup"]')
     page.wait_for_selector("#ws-purge-all", timeout=15000)
     page.click("#ws-purge-all")
+    # 两道确认都在页面自己的 ask() 里：先是带名单的那道，再是「最后确认」
+    page.wait_for_selector("#ask[open]", timeout=15000)
+    assert "junk" in page.text_content("#ask-body"), "确认框里该有要删的名单"
+    page.click('#ask-choices [data-pick="0"]')
+    page.wait_for_function(
+        "() => document.getElementById('ask-title').textContent.includes('最后确认')",
+        timeout=15000,
+    )
+    page.click('#ask-choices [data-pick="0"]')
     page.wait_for_selector("#ws-clear-hint.ok", timeout=15000)
 
     assert not (junk / ".anthill").exists(), "该删的没删掉"
