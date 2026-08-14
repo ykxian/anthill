@@ -26,6 +26,8 @@ from anthill.core.ids import is_valid_id
 from anthill.core.logging import EventLog
 from anthill.core.paths import NodeLayout
 from anthill.core.traffic import conversations
+from anthill.core.traffic_purge import doomed as doomed_traffic
+from anthill.core.traffic_purge import purge as purge_traffic
 from anthill.core.workspace import ensure_mailboxes
 from anthill.security import secrets
 from anthill.security.pair_client import join as pair_join
@@ -386,6 +388,44 @@ def mount_panel_actions(
             return delete_workspace(path, purge=purge)
         except AntHillError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(f"{PANEL_PATH}/api/traffic/doomed")
+    async def panel_traffic_doomed(
+        request: Request, node: str = "", thread: str = ""
+    ) -> dict[str, Any]:
+        """清对话记录会碰到哪些 —— **先给人看，再动手**。`thread` 留空 = 全部。"""
+        authorize(request, token, what="对话记录")
+        return doomed_traffic(_pick(nodes, node).layout, thread=thread).as_dict()
+
+    @app.delete(f"{PANEL_PATH}/api/traffic")
+    async def panel_traffic_purge(
+        request: Request,
+        node: str = "",
+        thread: str = "",
+        drop_pending: bool = False,
+        expect: int = -1,
+    ) -> dict[str, Any]:
+        """删对话记录。
+
+        默认**只删归档**（处理完的那些）。`inbox/new/` 里还没被处理的是**实信**，
+        删了就是丢件 —— 要一起删得显式 `drop_pending=true`。
+        正在被处理的（`cur/`）任何情况下都不碰。
+
+        `expect` 必须等于刚才 `/doomed` 给出的条数：中间新到了一条消息这一次就作废，
+        不会顺手把它带走。**网页上的一次误点没有 undo。**
+        """
+        _guard(request)
+        try:
+            result = purge_traffic(
+                _pick(nodes, node).layout,
+                thread=thread,
+                drop_pending=drop_pending,
+                expect=None if expect < 0 else expect,
+            )
+        except AntHillError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        log.info("panel.traffic_purged", thread=thread or "*", removed=result["removed"])
+        return result
 
     @app.get(f"{PANEL_PATH}/api/setup/workspaces/doomed")
     async def panel_workspaces_doomed(request: Request, stale_only: bool = False) -> dict[str, Any]:

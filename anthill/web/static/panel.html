@@ -203,6 +203,10 @@ button.ghost {
 }
 button.ghost:hover { color: var(--ink); border-color: var(--muted); background: var(--surface); }
 button.danger:hover { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
+button.tiny { padding: 2px 8px; font-size: 11px; }
+/* 删除按钮平时压低存在感 —— 它旁边就是「接着这段说」，误点的代价不对称 */
+.convo button.tiny { opacity: .35; }
+.convo:hover button.tiny, .convo button.tiny:focus-visible { opacity: 1; }
 
 .actions { display: flex; gap: 8px; align-items: center; }
 .actions input, .actions select { flex: 1; min-width: 0; }
@@ -470,6 +474,7 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
         <label class="meta" style="display:flex;gap:6px;align-items:center;white-space:nowrap">
           <input type="checkbox" id="chat-peers" /> 只看 Agent 之间的
         </label>
+        <button class="ghost danger" id="chat-wipe" type="button" hidden>清空全部记录</button>
       </div>
       <div id="chat-body"></div>
       <div class="chat-bar">
@@ -923,9 +928,17 @@ function focusedNodeData(nodes) {
 }
 
 // 按当前选中的本机节点给面板接口带上 ?node=
-function scoped(path) {
-  if (!local.node) return path;
-  return path + (path.includes("?") ? "&" : "?") + `node=${encodeURIComponent(local.node)}`;
+function scoped(path, params) {
+  const query = new URLSearchParams();
+  if (local.node) query.set("node", local.node);
+  // 空串/false/undefined 一律不上车 —— 服务端把「没给」和「给了空的」当同一件事，
+  // 但把它们塞进 URL 只会让请求难读
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value !== "" && value !== false && value != null) query.set(key, String(value));
+  }
+  const tail = query.toString();
+  if (!tail) return path;
+  return path + (path.includes("?") ? "&" : "?") + tail;
 }
 
 function draw() {
@@ -1092,6 +1105,8 @@ function renderThread(t) {
         <span class="grow"></span>
         ${here ? `<span class="pill ok">接着这段说 → ${esc(chat.to || "?")}</span>` : ""}
         <span class="meta">最后 ${esc(fmtStamp(t.last))} · ${esc(t.short)}</span>
+        ${canWrite ? `<button class="ghost danger tiny" type="button"
+                data-wipe="${esc(t.thread)}" title="删掉这段的记录">删除</button>` : ""}
       </div>
       ${lines}
     </div>`;
@@ -1128,9 +1143,53 @@ async function loadChat() {
   }
 }
 
+// 删记录。**先问服务端要删几条，把这个数报给人、再原样回传** ——
+// 批量删除该有的闸不是「你确定吗」，而是「你确定要删这几条吗」：
+// 中间新到了一条消息，服务端会因为数目对不上整个作废，不会顺手把它带走。
+//
+// 还有一条线要跟人讲清楚：`inbox/new/` 里是**还没被处理的实信**，删了就是丢件。
+// 默认留着，只在这里报数；真要一起删得再点一次头。
+async function wipeRecords(thread) {
+  const what = thread ? `这段对话（${thread.slice(-6)}）` : "这个节点上的全部对话记录";
+  let plan;
+  try {
+    plan = await api(u(scoped("api/traffic/doomed", thread ? { thread } : {})));
+  } catch (err) { say("chat-hint", String(err.message || err), "bad"); return; }
+  if (!plan.count && !plan.pending) { say("chat-hint", "没有可删的记录"); return; }
+
+  let dropPending = false;
+  if (plan.pending) {
+    const answer = window.confirm(
+      `${what}：会删掉 ${plan.count} 条记录。\n\n` +
+      `另有 ${plan.pending} 条**还没被处理**的消息（送到了但收件的 Agent 还没读）。\n` +
+      `删了就是丢件 —— 那个 Agent 醒来后就看不到它们了。\n\n` +
+      `确定 = 连这 ${plan.pending} 条一起删\n取消 = 只删记录，把它们留着`);
+    dropPending = answer;
+  } else if (!window.confirm(`${what}：会删掉 ${plan.count} 条记录。不可撤销，确定吗？`)) {
+    return;
+  }
+  try {
+    const done = await api(
+      u(scoped("api/traffic", { thread, drop_pending: dropPending, expect: plan.count })),
+      { method: "DELETE" });
+    if (chat.thread === thread) chat.thread = "";
+    say("chat-hint",
+      `删了 ${done.removed} 条` +
+      (done.dropped ? `，丢弃 ${done.dropped} 条未处理的` : "") +
+      (done.kept_pending ? `；还有 ${done.kept_pending} 条未处理的留着没动` : ""));
+    await loadChat();
+  } catch (err) {
+    say("chat-hint", String(err.message || err), "bad");
+  }
+}
+
+$("chat-wipe").addEventListener("click", () => wipeRecords(""));
+
 // 点一段就接着它说 —— thread 带上，对方的 thread 记忆才连得上。
 // 再点一次取消，回到「开一段新的」。
 $("chat-body").addEventListener("click", (event) => {
+  const kill = event.target.closest?.("[data-wipe]");
+  if (kill) { wipeRecords(kill.dataset.wipe); return; }   // 删除按钮不该顺带选中这段
   const card = event.target.closest?.("[data-thread]");
   if (!card) return;
   const picked = card.dataset.thread;
@@ -1850,6 +1909,7 @@ async function enableActions() {
   canWrite = true;
   $("run-form").hidden = false;
   $("chat-form").hidden = false;
+  $("chat-wipe").hidden = false;
   for (const name of ["models", "setup", "config"]) {
     const tab = document.querySelector(`.tab[data-pane="${name}"]`);
     if (tab) tab.hidden = false;
