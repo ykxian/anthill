@@ -206,6 +206,42 @@ def test_adding_starting_and_stopping_an_agent_from_the_page(browser: object, pa
     page.close()
 
 
+def test_a_repaint_does_not_eat_what_you_are_typing(browser: object, panel: str) -> None:
+    """拓扑每 2~5 秒整块重画 —— 「加一个 Agent」的表单就住在里面。
+
+    以前只要任何节点状态一变（启停、队列数、事件），重画就把表单连人
+    打了一半的字一起换掉：值没了，焦点掉回 body。人打字比轮询慢多了，
+    这等于表单在忙的机器上根本填不完。
+    """
+    card = '#topo-body .card:has-text("echo")'
+    page, errors = open_panel(browser, panel)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+
+    # 填到一半
+    page.fill("#agent-name", "打了一半的名字")
+    page.select_option("#agent-brain", "command")
+
+    # 制造一次真实的状态变化：启动 echo。poll 追上来之后拓扑必然重画
+    page.hover(card)
+    page.click(f'{card} [data-op="start"]')
+    page.focus("#agent-name")  # 焦点放回正在填的输入框，重画正落在打字中间
+    page.wait_for_selector(f'{card} [data-op="stop"]', timeout=20000)
+
+    # 字还在、选的大脑还在、焦点也还在输入框里
+    assert page.input_value("#agent-name") == "打了一半的名字", "重画把打了一半的字吃了"
+    assert page.input_value("#agent-brain") == "command", "重画把选好的大脑重置了"
+    assert page.evaluate("document.activeElement && document.activeElement.id") == "agent-name", (
+        "重画把焦点从输入框里偷走了"
+    )
+
+    # 收拾干净，别影响别的测试
+    page.hover(card)
+    page.click(f'{card} [data-op="stop"]')
+    page.wait_for_selector(f'{card} [data-op="start"]', timeout=20000)
+    assert errors == []
+    page.close()
+
+
 def test_talking_to_an_agent_from_the_page(browser: object, panel: str) -> None:
     page, errors = open_panel(browser, panel)
     page.wait_for_selector("#topo-body .card", timeout=15000)

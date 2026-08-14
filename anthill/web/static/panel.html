@@ -686,10 +686,46 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => (
 
 // 每 2~5 秒就整块重写 innerHTML 的代价：鼠标悬停状态没了，正要点的按钮
 // 会从指针底下被换掉，点击直接落空。内容没变就别动 DOM。
+//
+// 内容变了也不能把人正在填的东西一起换掉 —— 表单就住在这些容器里
+// （拓扑里的「加 Agent」、桥接页的回复框），而人打字比轮询慢多了。
+// 重写前把每个输入控件的值按 id / data-reply 记下来，重写后找回同名
+// 控件放回去；焦点在其中的话，焦点和光标一并还原。
+// 这些控件没有一个是服务端渲染值的，放回用户的值不会盖掉新数据。
+// 已知天花板：IME 组合中段撞上重画，组合中的那串保不住（已上屏的没事）——
+// 不做 DOM diff 就到这儿了。
 function paint(el, html) {
   if (el.dataset.sig === html) return false;
+  const saved = [];
+  for (const box of el.querySelectorAll?.("input, textarea, select") || []) {
+    const key = box.id
+      ? `#${CSS.escape(box.id)}`
+      : box.dataset.reply != null ? `[data-reply="${CSS.escape(box.dataset.reply)}"]` : "";
+    if (!key) continue;
+    let start = null;
+    let end = null;
+    try { start = box.selectionStart; end = box.selectionEnd; } catch (err) { /* 非文本控件 */ }
+    saved.push({
+      key, start, end,
+      value: box.value,
+      checked: box.checked,
+      focused: box === document.activeElement,
+    });
+  }
   el.dataset.sig = html;
   el.innerHTML = html;
+  for (const s of saved) {
+    const again = el.querySelector(s.key);
+    if (!again) continue;   // 那一行没了（比如消息已被别处回掉），值跟着走
+    again.value = s.value;
+    if (again.type === "checkbox" || again.type === "radio") again.checked = s.checked;
+    if (s.focused) {
+      again.focus();
+      if (s.start != null) {
+        try { again.setSelectionRange(s.start, s.end); } catch (err) { /* select 没有光标 */ }
+      }
+    }
+  }
   return true;
 }
 
