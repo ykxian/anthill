@@ -482,6 +482,8 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
     <dialog id="ask">
       <h3 id="ask-title"></h3>
       <div id="ask-body"></div>
+      <input id="ask-input" autocomplete="off" hidden />
+      <div class="hint" id="ask-hint" hidden></div>
       <div class="actions" id="ask-choices"></div>
     </dialog>
 
@@ -1224,16 +1226,27 @@ async function loadChat() {
 //
 // **取消永远是「什么都不做」。** 用 window.confirm 塞三种意图时「取消」被迫
 // 变成了「删得少一点」—— 在一个不可撤销的操作里，那是最不该犯的错。
-function ask(title, lines, choices) {
+//
+// 第四参可选：{ input: { placeholder }, cancelLabel }。带 input 时是**输入型**
+// 问法（配对这类流程），返回 { pick, text }；选项可标 requireInput —— 空着点它
+// 不提交也不取消，留在框里提示。值只从 input.value 里读，不进 HTML 属性。
+function ask(title, lines, choices, opts) {
+  const wantInput = Boolean(opts?.input);
   return new Promise((resolve) => {
     const box = $("ask");
+    const field = $("ask-input");
     $("ask-title").textContent = title;
     $("ask-body").innerHTML = lines.map((l) => `<p style="margin:0 0 8px">${l}</p>`).join("");
+    field.hidden = !wantInput;
+    field.value = "";
+    field.placeholder = opts?.input?.placeholder || "";
+    say("ask-hint", "");
     paint($("ask-choices"), choices.map((c, i) =>
       `<button type="button" class="${c.danger ? "ghost danger" : "ghost"}" data-pick="${i}">${esc(c.label)}</button>`
-    ).join("") + `<button type="button" data-pick="cancel">取消</button>`);
+    ).join("") + `<button type="button" data-pick="cancel">${esc(opts?.cancelLabel || "取消")}</button>`);
     const done = (value) => {
       box.removeEventListener("close", onClose);
+      field.removeEventListener("keydown", onEnter);
       box.querySelector("#ask-choices").removeEventListener("click", onClick);
       if (box.open) box.close();
       resolve(value);
@@ -1242,18 +1255,42 @@ function ask(title, lines, choices) {
     // 连着问两问（清工作区的「名单→最后确认」）时，它落在第二问已经 showModal
     // 之后，不挡就把第二问当场关掉。迟到的那颗此刻 open 是 true，真取消是 false。
     const onClose = () => { if (!box.open) done(null); };  // Esc、点外面
+    const pickAt = (i) => {
+      const c = choices[i];
+      if (c.requireInput && !field.value.trim()) {
+        say("ask-hint", c.emptyHint || "先填上", "bad");
+        field.focus();
+        return;
+      }
+      done(wantInput ? { pick: c.value, text: field.value } : c.value);
+    };
     const onClick = (event) => {
       const hit = event.target.closest?.("[data-pick]");
       if (!hit) return;
-      const pick = hit.dataset.pick;
-      done(pick === "cancel" ? null : choices[Number(pick)].value);
+      if (hit.dataset.pick === "cancel") { done(null); return; }
+      pickAt(Number(hit.dataset.pick));
+    };
+    const onEnter = (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      pickAt(0);
     };
     box.addEventListener("close", onClose);
     box.querySelector("#ask-choices").addEventListener("click", onClick);
+    if (wantInput) field.addEventListener("keydown", onEnter);
     box.showModal();
-    // 焦点落在「取消」上：回车这个下意识动作不该删掉东西
-    box.querySelector('[data-pick="cancel"]').focus();
+    // 焦点与回车分两套约定：**无输入**（破坏性确认）焦点落「取消」，回车这个
+    // 下意识动作不删东西；**有输入**（流程型问法）焦点落输入框，回车 = 第一个
+    // 选项 —— 填完一按就走。
+    if (wantInput) field.focus();
+    else box.querySelector('[data-pick="cancel"]').focus();
   });
+}
+
+// 单按钮的信息框。配对结果（PIN、指纹）要人盯着抄到另一台机器：模态摆在
+// 视线正中，也不会随轮询重画消失 —— 这两点页内小字提示都做不到。
+function tell(title, lines) {
+  return ask(title, lines, [], { cancelLabel: "知道了" });
 }
 
 // 点背景 = 取消。<dialog> 原生只认 Esc；点到 dialog 元素自身（而不是里面的内容）
@@ -2148,31 +2185,39 @@ $("config-save").addEventListener("click", async () => {
 });
 
 // ---- 配对：见过但还不能通信的节点，在这里换密钥 ----
+// window.prompt 把「填 PIN 连过去」和「留空生成 PIN」塞进同一个空串重载里 ——
+// 两个显式选项说得更清楚，空着点「连过去」也有地方提示而不是当成另一种意图。
 async function startPairing(target) {
-  const pin = window.prompt(
-    `和 ${target} 配对。\n\n` +
-    "· 对方屏幕上有 PIN 的话，填在这里；\n" +
-    "· 想让对方来连你，直接留空确定，本机会生成一个 PIN。",
-    "",
+  const got = await ask(
+    `和 ${target} 配对`,
+    ["对方屏幕上有 PIN 就填进来连过去；想让对方来连你，就生成一个本机 PIN。"],
+    [
+      { label: "用这个 PIN 连过去", value: "join", requireInput: true, emptyHint: "先把对方的 PIN 填上" },
+      { label: "生成本机 PIN", value: "open" },
+    ],
+    { input: { placeholder: "对方屏幕上的 PIN" } },
   );
-  if (pin === null) return;
+  if (got === null) return;
   try {
-    if (pin.trim()) {
+    if (got.pick === "join") {
       const done = await api(u(scoped("api/pair/join")), {
         method: "POST",
-        body: JSON.stringify({ target, pin: pin.trim() }),
+        body: JSON.stringify({ target, pin: got.text.trim() }),
       });
-      window.alert(`已和 ${done.node} 配对\n指纹 ${done.fingerprint}\n和对方屏幕上的核对一致`);
+      await tell(`已和 ${done.node} 配对`, [
+        `指纹 <code>${esc(done.fingerprint)}</code>`,
+        "和对方屏幕上的核对一致。",
+      ]);
     } else {
       const open = await api(u(scoped("api/pair/open")), { method: "POST" });
-      window.alert(
-        `本机 PIN：${open.pin}\n\n${open.seconds} 秒内有效，只能用一次。\n` +
+      await tell(`本机 PIN：${open.pin}`, [
+        `<b>${esc(open.seconds)}</b> 秒内有效，只能用一次。`,
         "让对方在他的面板上点「配对」并输入这串数字。",
-      );
+      ]);
     }
     poll();
   } catch (err) {
-    window.alert(String(err.message || err));
+    await tell("配对没成", [esc(String(err.message || err))]);
   }
 }
 
@@ -2193,7 +2238,7 @@ async function runAgentOp(name, op, node, button) {
     // 启停要几百毫秒才在 runtime.json 上体现出来，等一拍再刷
     setTimeout(poll, 700);
   } catch (err) {
-    window.alert(String(err.message || err));
+    await tell(`${name} 的操作没成`, [esc(String(err.message || err))]);
   } finally {
     button.disabled = false;
   }
@@ -2215,7 +2260,7 @@ document.addEventListener("submit", async (event) => {
     await api(u(scoped("api/agents")), { method: "POST", body: JSON.stringify(body) });
     poll();
   } catch (err) {
-    window.alert(String(err.message || err));
+    await tell("没加上", [esc(String(err.message || err))]);
   }
 });
 

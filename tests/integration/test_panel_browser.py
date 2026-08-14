@@ -242,6 +242,49 @@ def test_a_repaint_does_not_eat_what_you_are_typing(browser: object, panel: str)
     page.close()
 
 
+def test_pairing_asks_in_the_page_dialog_not_a_native_prompt(
+    browser: object, panel: str
+) -> None:
+    """配对的问答走页面自己的对话框 —— window.prompt 样式、焦点、回车语义都
+    不归页面管，在自动化/无头环境里还会被静默吞掉。
+
+    顺带钉住输入变体的两条约定：空输入点「连过去」要留在框里提示
+    （既不是当空串提交、也不是取消）；「生成本机 PIN」不需要输入，
+    结果 PIN 显示在对话框里，人盯着它抄到另一台机器。
+    """
+    page, errors = open_panel(browser, panel)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+
+    # 拓扑里造一台「见过还没配对」的机器 —— 配对按钮只在这种节点上出现
+    page.evaluate(
+        "applyCluster({ node: state.node, nodes: [...state.nodes,"
+        " { node: '陌生机', local: false, reachable: false, pairable: true,"
+        "   reason: '见过，还没配对', agents: [] }] })"
+    )
+    page.click("[data-pair]")
+    page.wait_for_selector("#ask[open]", timeout=5000)
+
+    # 带输入的问法：焦点直接落在输入框里（无输入的才落「取消」）
+    assert page.evaluate(
+        "document.activeElement === document.getElementById('ask-input')"
+    ), "输入型对话框的焦点该落在输入框里"
+
+    # 空着点「连过去」：留在框里提示，不提交也不取消
+    page.click('#ask-choices [data-pick="0"]')
+    assert page.evaluate("document.getElementById('ask').open"), "空输入不该把框关了"
+    assert (page.text_content("#ask-hint") or "").strip(), "空输入该在框里提示"
+
+    # 「生成本机 PIN」不需要输入：真的调 api/pair/open，PIN 摆在对话框里
+    page.click('#ask-choices [data-pick="1"]')
+    page.wait_for_function(
+        "() => document.getElementById('ask-title').textContent.includes('本机 PIN')",
+        timeout=15000,
+    )
+    page.click('#ask-choices [data-pick="cancel"]')
+    assert errors == []
+    page.close()
+
+
 def test_talking_to_an_agent_from_the_page(browser: object, panel: str) -> None:
     page, errors = open_panel(browser, panel)
     page.wait_for_selector("#topo-body .card", timeout=15000)
