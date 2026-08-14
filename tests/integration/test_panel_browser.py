@@ -215,8 +215,26 @@ def test_talking_to_an_agent_from_the_page(browser: object, panel: str) -> None:
     page.fill("#chat-input", "从浏览器发的一条")
     page.click('#chat-form button[type="submit"]')
 
-    page.wait_for_selector("#chat-body .msg.mine", timeout=15000)
+    # 对话页现在显示的是**所有**会话（含 Agent 之间的），一段一张卡；
+    # 刚发的那条要立刻出现 —— 哪怕对方还没归档它（靠本机记的发件兜底）
+    page.wait_for_selector("#chat-body .convo .turn", timeout=15000)
     assert "从浏览器发的一条" in page.text_content("#chat-body")
+    assert errors == []
+    page.close()
+
+
+def test_the_page_shows_what_two_agents_said_to_each_other(browser: object, panel: str) -> None:
+    """**这一页存在的理由。** 只显示「你参与的」的话，Agent 之间聊了什么就没处看。"""
+    page, errors = open_panel(browser, panel)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+    page.click('.tab[data-pane="chat"]')
+    page.wait_for_timeout(600)
+
+    # 勾上之后剩下的每一段都不该有「人的代理」参与
+    page.check("#chat-peers")
+    page.wait_for_timeout(400)
+    for card in page.query_selector_all("#chat-body .convo .peers"):
+        assert "cli" not in card.inner_text()
     assert errors == []
     page.close()
 

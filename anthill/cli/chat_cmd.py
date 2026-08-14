@@ -21,6 +21,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from anthill.adapters.bridge import BridgeHandler, parse_note
+from anthill.adapters.bridge_connect import watch_prompt
 from anthill.adapters.bridge_session import pick_agent, wait_for_message
 from anthill.agent.sender import Sender
 from anthill.cli.common import console, fail, load
@@ -237,7 +238,12 @@ def bridge_command(
     kind: str = typer.Option("chat", "--kind", help="主动发一条时：chat 或 task"),
     as_json: bool = typer.Option(False, "--json", help="输出 JSON，给 hook / 脚本用"),
     wait: float = typer.Option(
-        0.0, "--wait", help="阻塞到有新消息为止（秒）—— 常驻会话循环跑这条就是「一直盯着」"
+        0.0,
+        "--wait",
+        help="阻塞到有新消息为止（秒）。-1 = 一直等，永不超时；0 = 看一眼就走",
+    ),
+    show_prompt: bool = typer.Option(
+        False, "--prompt", help="只打印「你是谁、怎么值守」那段话，给启动时喂给会话用"
     ),
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
 ) -> None:
@@ -254,14 +260,21 @@ def bridge_command(
     except AntHillError as exc:
         fail(str(exc))
     # 自动挑的时候一定要说一声挑到了谁 —— 不然人不知道这个终端对应哪个 Agent
-    if not agent and not as_json:
+    if not agent and not as_json and not show_prompt:
         console.print(f"[dim]这个会话 = [b]{picked}[/b][/dim]")
     agent = picked
     if not config.agent(agent).bridge:
         fail(f"Agent {agent!r} 不是桥接 Agent；node.toml 里给它加 bridge = true")
+
+    if show_prompt:
+        # **原样打印，不经 rich** —— 这段话要被 `claude "$(...)"` 整段吃进去，
+        # rich 会给它换行、截断、还把 `[b]` 当标记吃掉
+        print(watch_prompt(layout, agent))
+        return
+
     handler = BridgeHandler(root=layout.agent_dir(agent), agent_name=agent)
 
-    if wait > 0 and not (to or reply):
+    if wait != 0 and not (to or reply):
         # 阻塞到有东西为止。**这就是「一直盯着」缺的那块** ——
         # MCP 与 hook 都是拉取式的，会话闲着时没有任何东西会把它叫醒。
         wait_for_message(handler.dir("inbox"), timeout=wait)

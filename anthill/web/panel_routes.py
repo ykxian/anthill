@@ -49,6 +49,7 @@ from anthill.web.bridge_panel import inbox as bridge_inbox
 from anthill.web.bridge_panel import reply as bridge_reply
 from anthill.web.bridge_panel import speak as bridge_speak
 from anthill.web.chat import messages as chat_messages
+from anthill.web.chat import recorded as chat_recorded
 from anthill.web.chat import threads as chat_threads
 from anthill.web.cluster import build_cluster
 from anthill.web.context import NodeRegistry
@@ -184,7 +185,14 @@ def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog, token: str 
         humans = frozenset(
             name for name, agent in ctx.config.agents.items() if agent.role == "user"
         )
-        return conversations(ctx.layout, humans=humans)
+        # 本机记的发件兜住「刚发出去、对方还没归档」那个空档 —— 对方没启动时
+        # 那个空档是**永远的**，不补的话页面上看着就像消息丢了
+        return {
+            **conversations(ctx.layout, humans=humans, extra=chat_recorded(ctx.layout)),
+            # 页面靠它认出「哪一头是我」，好把发送框的收件人填成另一头。
+            # 别让前端硬编码 "cli" —— 那个名字是可以改的
+            "humans": sorted(humans),
+        }
 
     @app.get(f"{PANEL_PATH}/api/state")
     async def panel_state(request: Request, node: str = "") -> dict[str, Any]:

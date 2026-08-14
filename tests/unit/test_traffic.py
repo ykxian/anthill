@@ -154,3 +154,48 @@ def test_threads_with_a_human_agent_are_flagged(tmp_path: Path) -> None:
     # Assert
     flags = {t["messages"][0]["body"]: t["with_human"] for t in result["threads"]}
     assert flags == {"帮我看下": True, "你那边呢": False}
+
+
+def test_just_sent_shows_before_the_other_side_archives_it(tmp_path: Path) -> None:
+    """对方没启动时，归档里永远不会有这条 —— 不补就看着像消息丢了。"""
+    # Arrange：只有本机记的发件，收件方那边什么都没有
+    layout = _layout(tmp_path)
+    thread = new_id()
+    mine = {
+        "id": new_id(),
+        "ts": now().isoformat(),
+        "frm": "n:cli",
+        "to": "n:sleepy",
+        "kind": "chat",
+        "thread": thread,
+        "body": "在吗",
+    }
+
+    # Act
+    result = conversations(layout, extra=[mine])
+
+    # Assert
+    assert [m["body"] for m in result["threads"][0]["messages"]] == ["在吗"]
+
+
+def test_archived_copy_wins_over_the_local_note(tmp_path: Path) -> None:
+    """同一条别出现两遍 —— 归档那份带真正的投递时刻，更权威。"""
+    # Arrange
+    layout = _layout(tmp_path)
+    env = _chat("cli", "tst1", "只说一次", thread=new_id(), at=now())
+    _deliver(layout, env)
+    same = {
+        "id": env.id,
+        "ts": env.ts.isoformat(),
+        "frm": "n:cli",
+        "to": "n:tst1",
+        "kind": "chat",
+        "thread": env.thread,
+        "body": "只说一次",
+    }
+
+    # Act
+    result = conversations(layout, extra=[same])
+
+    # Assert
+    assert [m["body"] for m in result["threads"][0]["messages"]] == ["只说一次"]

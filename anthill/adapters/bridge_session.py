@@ -226,6 +226,11 @@ def wait_for_message(
 ) -> list[Path]:
     """阻塞到收件箱里有东西为止。返回那些 `.md`；超时返回空。
 
+    **`timeout < 0` = 永不超时。** 一个「值守」的会话本来就该一直挂着，
+    有限超时只是逼它每隔几分钟醒一次、发现没事、再睡回去 —— 每次醒都要烧掉
+    一轮对话。真想让它一直听着，就别给它设终点。（`timeout == 0` 仍是
+    「看一眼就走」，hook 那条路靠的就是这个语义，不能动。）
+
     **这就是「一直盯着」缺的那一块。** MCP 工具和 hook 都是拉取式的：
     模型自己决定什么时候调，会话闲着的时候没有任何东西会把它叫醒。
     有了这个阻塞调用，粘给会话的那句话才是个真正的监控循环
@@ -236,7 +241,7 @@ def wait_for_message(
     半秒一次的 `iterdir` 换来「哪儿都能用」，值。
     """
     seen = known if known is not None else set()
-    deadline = time.monotonic() + max(0.0, timeout)
+    deadline = None if timeout < 0 else time.monotonic() + timeout
     while True:
         try:
             fresh = [p for p in sorted(inbox.glob("*.md")) if p.name not in seen]
@@ -244,6 +249,6 @@ def wait_for_message(
             fresh = []
         if fresh:
             return fresh
-        if time.monotonic() >= deadline:
+        if deadline is not None and time.monotonic() >= deadline:
             return []
         time.sleep(POLL_INTERVAL)

@@ -81,6 +81,36 @@ def threads(layout: NodeLayout, *, agent: str = "cli") -> list[dict[str, Any]]:
     return sorted(out, key=lambda t: str(t["ts"]), reverse=True)
 
 
+def recorded(layout: NodeLayout, *, limit: int = MAX_THREADS) -> list[dict[str, Any]]:
+    """**刚发出去、还没被对方归档**的那些，补给「往来」那一页。
+
+    往来读的是收件方的归档，所以一条消息要等对方处理完才看得见 —— 通常不到一秒，
+    但对方**没启动**的时候就是永远看不见。于是页面上「我明明发了」和「什么都没有」
+    同时成立，看起来就像消息丢了。
+
+    本机在发的时候自己记过一条（`record_outgoing`），拿它兜住这个空档。
+    重复的由调用方按信封 id 去掉 —— 归档里那份更权威（它带真正的投递时刻）。
+    """
+    out: list[dict[str, Any]] = []
+    for path in sorted(_dir(layout).glob("*.jsonl"), reverse=True)[:limit]:
+        for entry in _sent(layout, path.stem):
+            body = str(entry.get("body", "")).strip()
+            if not body:
+                continue
+            out.append(
+                {
+                    "id": str(entry.get("id", "")),
+                    "ts": str(entry.get("ts", "")),
+                    "frm": str(entry.get("frm", "")),
+                    "to": str(entry.get("to", "")),
+                    "kind": "chat",
+                    "thread": path.stem,
+                    "body": body,
+                }
+            )
+    return out
+
+
 def _counterpart(history: list[dict[str, Any]]) -> str:
     """这个会话是在跟谁说话 —— 取第一条发件的收件人，没有就取第一条来信的发件人。"""
     for message in history:

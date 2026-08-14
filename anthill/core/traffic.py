@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,7 @@ def conversations(
     layout: NodeLayout,
     *,
     humans: frozenset[str] = frozenset(),
+    extra: Iterable[dict[str, Any]] = (),
     messages: int = DEFAULT_MESSAGES,
     threads: int = DEFAULT_THREADS,
 ) -> dict[str, Any]:
@@ -85,6 +87,21 @@ def conversations(
     「另有 N 条回执」。回执本身的成败在消息流那一页看得到。
     """
     collected = _newest(layout, limit=messages)
+    # 归档里已经有的以归档为准 —— 那份带真正的投递时刻，本机记的只是「我发了」
+    known = {record.id for record in collected}
+    collected += [
+        Message(
+            id=str(item.get("id", "")),
+            ts=str(item.get("ts", "")),
+            frm=str(item.get("frm", "")),
+            to=str(item.get("to", "")),
+            kind=str(item.get("kind", "chat")),
+            thread=str(item.get("thread", "")),
+            body=_clip(str(item.get("body", ""))),
+        )
+        for item in extra
+        if str(item.get("id", "")) not in known
+    ]
     grouped: dict[str, list[Message]] = {}
     receipts: dict[str, int] = {}
     for record in collected:
@@ -201,4 +218,8 @@ def _text(env: Envelope) -> str:
         text = body or title
     else:
         text = f"{title}\n\n{body}"
+    return _clip(text)
+
+
+def _clip(text: str) -> str:
     return " ".join(text.split())[:BODY_PREVIEW]
