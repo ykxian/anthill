@@ -56,6 +56,18 @@ def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(home))
 
 
+@pytest.fixture(autouse=True)
+def isolate_agent_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """跑测试的终端自己往往就是一个桥接会话（`ANTHILL_AGENT` 已经设了）。
+
+    不清掉的话，`pick_agent` 会带着开发者会话的名字去测试工作区里认领 ——
+    那个名字在那儿多半不存在，于是报「不是桥接 Agent」，而且只在
+    桥接会话里跑测试才复现。要钉死的测试自己 `setenv`；
+    autouse，跟上面家目录那条一个道理：新写的测试不用记得这件事。
+    """
+    monkeypatch.delenv("ANTHILL_AGENT", raising=False)
+
+
 @pytest.fixture
 def layout(tmp_path: Path) -> NodeLayout:
     node = NodeLayout(tmp_path).ensure_base()
