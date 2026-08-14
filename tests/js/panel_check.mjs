@@ -351,5 +351,9 @@ panel.renderWorkspaces({
   workspaces: [{ name: EVIL, path: EVIL, node: EVIL, exists: true, current: false }],
 });
 assert.ok(!$("ws-list").innerHTML.includes("<img"), "工作区清单里有没转义的数据");
+assert.ok(
+  $("ws-list").innerHTML.includes("data-ws-row="),
+  "工作区行少了 data-ws-row 身份 —— 行内报错要靠它找到出错的那一行",
+);
 
 console.log("ok");

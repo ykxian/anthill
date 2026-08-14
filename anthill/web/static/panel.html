@@ -407,8 +407,10 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
   display: flex; align-items: center; gap: 10px; padding: 10px 12px;
   border: 1px solid var(--line-soft); border-radius: var(--r);
   background: var(--surface); margin-bottom: 7px;
+  flex-wrap: wrap;   /* 行内报错换到本行下方，而不是把按钮挤出去 */
   transition: box-shadow var(--fast), border-color var(--fast);
 }
+.ws .hint { flex-basis: 100%; margin: 2px 0 0; }
 .ws:hover { box-shadow: var(--shadow); }
 .ws.now { border-color: color-mix(in srgb, var(--accent) 32%, transparent); background: var(--accent-soft); }
 .ws .name { font-weight: 600; }
@@ -1893,7 +1895,7 @@ function renderWorkspaces(info) {
     ? info.workspaces.map((w) => {
         const here = Boolean(w.node) && w.node === focus;
         return `
-      <div class="ws ${here ? "now" : ""}">
+      <div class="ws ${here ? "now" : ""}" data-ws-row="${esc(w.path)}">
         <span class="dot ${here ? "on" : ""}"></span>
         <span class="name">${esc(w.name)}</span>
         <span class="pill">${esc(w.node || "未命名")}</span>
@@ -2027,7 +2029,7 @@ async function adoptWorkspace(path) {
     poll();
     refreshSetup();
   } catch (err) {
-    say("ws-clear-hint", String(err.message || err), "bad");
+    wsRowComplain(path, String(err.message || err));
   }
 }
 
@@ -2050,6 +2052,22 @@ async function sendBridgeReply(msgId, button) {
   }
 }
 
+// 某一行的操作出了错，话就说在那一行下面 —— 行多的时候，页顶或按钮区的
+// 一句提示和出事的行对不上号。行内 hint 是渲染后加进去的，不在 paint 的
+// 签名里，所以能活过数据没变的重画；数据一变（比如那行没了）就随行走。
+function wsRowComplain(path, msg) {
+  const row = $("ws-list").querySelector?.(`[data-ws-row="${CSS.escape(path)}"]`);
+  if (!row) { say("ws-clear-hint", msg, "bad"); return; }
+  let hint = row.querySelector(".hint");
+  if (!hint) {
+    hint = document.createElement("div");
+    hint.className = "hint bad";
+    row.appendChild(hint);
+  }
+  hint.textContent = msg;
+  hint.hidden = false;
+}
+
 async function removeWorkspace(path, purge) {
   const go = await ask(
     purge ? "连同 .anthill/ 一起删掉？" : "移出清单？",
@@ -2064,7 +2082,7 @@ async function removeWorkspace(path, purge) {
               { method: "DELETE" });
     refreshSetup();
   } catch (err) {
-    say("ws-clear-hint", String(err.message || err), "bad");
+    wsRowComplain(path, String(err.message || err));
   }
 }
 
@@ -2230,7 +2248,16 @@ async function runAgentOp(name, op, node, button) {
     );
     if (go === null) return;
   }
-  button.disabled = true;
+  // 拿着传进来的 button 引用穿过 await 不可靠 —— 中途一次重画它就成了
+  // 脱离 DOM 的旧节点，disabled 落在没人看的元素上。每次都按 data 属性
+  // 重新找活着的那颗；找不到（操作成功后按钮换了脸）就落回旧引用，无害。
+  const setBusy = (busy) => {
+    const live = $("topo-body").querySelector(
+      `[data-agent="${CSS.escape(name)}"][data-node="${CSS.escape(node || "")}"][data-op="${CSS.escape(op)}"]`,
+    ) || button;
+    live.disabled = busy;
+  };
+  setBusy(true);
   const at = node && node !== state.node ? `?node=${encodeURIComponent(node)}` : "";
   try {
     if (op === "remove") await api(u(`api/agents/${encodeURIComponent(name)}`), { method: "DELETE" });
@@ -2240,7 +2267,7 @@ async function runAgentOp(name, op, node, button) {
   } catch (err) {
     await tell(`${name} 的操作没成`, [esc(String(err.message || err))]);
   } finally {
-    button.disabled = false;
+    setBusy(false);
   }
 }
 
