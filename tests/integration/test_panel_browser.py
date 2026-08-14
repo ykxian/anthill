@@ -574,3 +574,36 @@ def test_the_bridge_tab_follows_the_focused_workspace(
     assert "ANTHILL_AGENT=cc" in page.text_content("#rcp-pin")
     assert errors == []
     page.close()
+
+
+def test_cancelling_a_wipe_really_does_nothing(browser: object, panel: str) -> None:
+    """**取消必须是「什么都不做」。**
+
+    这里曾经用 `window.confirm` 塞三种意图（删记录／连未读一起删／不删），
+    于是「取消」被迫变成了「删得少一点」—— 在一个不可撤销的操作里，
+    那是最不该犯的错。现在是三选一的 <dialog>，取消和 Esc 都不碰任何文件。
+    """
+    page, errors = open_panel(browser, panel)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+    page.click('.tab[data-pane="chat"]')
+    # 得先有东西可删，否则根本不弹框
+    page.select_option("#chat-to", "echo")
+    page.fill("#chat-input", "留着给删除测试用")
+    page.click('#chat-form button[type="submit"]')
+    page.wait_for_selector("#chat-body .convo .turn", timeout=15000)
+    before = page.text_content("#chat-body")
+
+    for dismiss in (
+        lambda: page.click('#ask-choices [data-pick="cancel"]'),
+        lambda: page.keyboard.press("Escape"),
+    ):
+        page.click("#chat-wipe")
+        page.wait_for_selector("#ask[open]", timeout=5000)
+        # 回车这个下意识动作不该删掉东西 —— 焦点得落在「取消」上
+        assert page.evaluate("document.activeElement.dataset.pick") == "cancel"
+        dismiss()
+        page.wait_for_timeout(800)
+        assert page.text_content("#chat-body") == before, "取消之后内容变了"
+
+    assert errors == []
+    page.close()

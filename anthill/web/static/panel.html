@@ -204,6 +204,19 @@ button.ghost {
 button.ghost:hover { color: var(--ink); border-color: var(--muted); background: var(--surface); }
 button.danger:hover { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
 button.tiny { padding: 2px 8px; font-size: 11px; }
+
+/* 三选一的确认框。**`window.confirm` 只有两个按钮，装不下三种意图** ——
+   删记录 / 连未读一起删 / 什么都不做。硬塞的结果是「取消」变成了「删得少一点」，
+   而在一个不可撤销的操作里，取消必须意味着什么都不做。 */
+#ask {
+  border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface);
+  color: var(--text); padding: 20px 22px; max-width: 520px; box-shadow: var(--shadow-lg, var(--shadow));
+}
+#ask::backdrop { background: color-mix(in srgb, var(--ink, #000) 45%, transparent); }
+#ask h3 { margin: 0 0 10px; font-size: 15px; }
+#ask #ask-body { font-size: 13px; line-height: 1.7; color: var(--muted); }
+#ask #ask-body b { color: var(--text); }
+#ask .actions { margin-top: 18px; justify-content: flex-end; flex-wrap: wrap; }
 /* 删除按钮平时压低存在感 —— 它旁边就是「接着这段说」，误点的代价不对称 */
 .convo button.tiny { opacity: .35; }
 .convo:hover button.tiny, .convo button.tiny:focus-visible { opacity: 1; }
@@ -462,6 +475,12 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
       <div class="hint" id="run-hint" hidden></div>
       <div id="runs-body"></div>
     </section>
+
+    <dialog id="ask">
+      <h3 id="ask-title"></h3>
+      <div id="ask-body"></div>
+      <div class="actions" id="ask-choices"></div>
+    </dialog>
 
     <section class="pane" id="pane-chat" hidden>
       <div class="eyebrow">对话 <span class="count" id="chat-count"></span></div>
@@ -1143,6 +1162,39 @@ async function loadChat() {
   }
 }
 
+// 三选一的确认框。返回被选中那一项的 value；关掉/取消/Esc 一律返回 null。
+//
+// **取消永远是「什么都不做」。** 用 window.confirm 塞三种意图时「取消」被迫
+// 变成了「删得少一点」—— 在一个不可撤销的操作里，那是最不该犯的错。
+function ask(title, lines, choices) {
+  return new Promise((resolve) => {
+    const box = $("ask");
+    $("ask-title").textContent = title;
+    $("ask-body").innerHTML = lines.map((l) => `<p style="margin:0 0 8px">${l}</p>`).join("");
+    paint($("ask-choices"), choices.map((c, i) =>
+      `<button type="button" class="${c.danger ? "ghost danger" : "ghost"}" data-pick="${i}">${esc(c.label)}</button>`
+    ).join("") + `<button type="button" data-pick="cancel">取消</button>`);
+    const done = (value) => {
+      box.removeEventListener("close", onClose);
+      box.querySelector("#ask-choices").removeEventListener("click", onClick);
+      if (box.open) box.close();
+      resolve(value);
+    };
+    const onClose = () => done(null);                      // Esc、点外面
+    const onClick = (event) => {
+      const hit = event.target.closest?.("[data-pick]");
+      if (!hit) return;
+      const pick = hit.dataset.pick;
+      done(pick === "cancel" ? null : choices[Number(pick)].value);
+    };
+    box.addEventListener("close", onClose);
+    box.querySelector("#ask-choices").addEventListener("click", onClick);
+    box.showModal();
+    // 焦点落在「取消」上：回车这个下意识动作不该删掉东西
+    box.querySelector('[data-pick="cancel"]').focus();
+  });
+}
+
 // 删记录。**先问服务端要删几条，把这个数报给人、再原样回传** ——
 // 批量删除该有的闸不是「你确定吗」，而是「你确定要删这几条吗」：
 // 中间新到了一条消息，服务端会因为数目对不上整个作废，不会顺手把它带走。
@@ -1157,17 +1209,31 @@ async function wipeRecords(thread) {
   } catch (err) { say("chat-hint", String(err.message || err), "bad"); return; }
   if (!plan.count && !plan.pending) { say("chat-hint", "没有可删的记录"); return; }
 
-  let dropPending = false;
-  if (plan.pending) {
-    const answer = window.confirm(
-      `${what}：会删掉 ${plan.count} 条记录。\n\n` +
-      `另有 ${plan.pending} 条**还没被处理**的消息（送到了但收件的 Agent 还没读）。\n` +
-      `删了就是丢件 —— 那个 Agent 醒来后就看不到它们了。\n\n` +
-      `确定 = 连这 ${plan.pending} 条一起删\n取消 = 只删记录，把它们留着`);
-    dropPending = answer;
-  } else if (!window.confirm(`${what}：会删掉 ${plan.count} 条记录。不可撤销，确定吗？`)) {
-    return;
+  // 按**实际有什么**给选项 —— 记录为 0 时还摆一个「只删记录」是个空操作，
+  // 让人以为点了会发生什么
+  const lines = [];
+  const choices = [];
+  if (plan.count) {
+    lines.push(`会删掉 <b>${plan.count}</b> 条记录。<b>不可撤销。</b>`);
+    choices.push({
+      label: plan.pending ? `只删记录，留着那 ${plan.pending} 条` : `删掉这 ${plan.count} 条`,
+      value: false,
+      danger: true,
+    });
   }
+  if (plan.pending) {
+    lines.push(
+      `${plan.count ? "另有" : "有"} <b>${plan.pending} 条还没被处理</b>的消息` +
+      `（送到了，但收件的 Agent 还没读）。`,
+      `删了就是<b>丢件</b> —— 那个 Agent 醒来后再也看不到它们。`);
+    choices.push({
+      label: plan.count ? `连那 ${plan.pending} 条一起删` : `删掉那 ${plan.pending} 条未读的`,
+      value: true,
+      danger: true,
+    });
+  }
+  const dropPending = await ask(what, lines, choices);
+  if (dropPending === null) return;   // 取消 = 什么都不做
   try {
     const done = await api(
       u(scoped("api/traffic", { thread, drop_pending: dropPending, expect: plan.count })),
