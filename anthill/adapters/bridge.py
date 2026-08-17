@@ -36,6 +36,7 @@ from anthill.agent.conversation import chat_payload, plan_reply
 from anthill.agent.handlers import HandlerContext
 from anthill.agent.memory import ThreadMemory
 from anthill.core.envelope import Envelope
+from anthill.core.chat_log import record_outgoing
 from anthill.core.errors import AntHillError, HopLimitExceeded
 from anthill.core.ids import is_valid_id, now
 from anthill.core.payloads import ChatPayload, MessageType, TaskResultPayload
@@ -201,6 +202,16 @@ class BridgeHandler:
             self._settle(source.id)
             return
         await ctx.sender.send(reply)
+        # 记进本机发件记录 —— 收件方在**另一台机器**时，对话页上没有任何
+        # 别的地方能看到这半句（收件方的归档在对面）。本机投递的靠 id 去重。
+        # 补记失败（OSError）只记日志：它排在 send 成功之后、归档之前，
+        # 放它抛出去会逃过 tick 的 except AntHillError —— 草稿留在 outbox
+        # 下一轮重发，磁盘抖一下变成对方收到重复消息。显示侧的记录
+        # 没资格打断投递语义。
+        try:
+            record_outgoing(ctx.layout, reply, body)
+        except OSError as exc:
+            ctx.log.warn("chat.record_failed", msg=reply.id, error=str(exc))
         self._remember(ctx, source, body)
         ctx.log.info("bridge.replied", msg=reply.id, to=str(recipient), thread=reply.thread)
         self._settle(source.id)
@@ -227,6 +238,10 @@ class BridgeHandler:
             ),
             thread=note.headers.get("thread") or None,
         )
+        try:
+            record_outgoing(ctx.layout, env, body)
+        except OSError as exc:  # 同上：显示侧失败不打断投递
+            ctx.log.warn("chat.record_failed", msg=env.id, error=str(exc))
         ctx.log.info("bridge.sent", msg=env.id, to=target, kind=kind, thread=env.thread)
 
     # ---------- 归档 ----------

@@ -21,7 +21,7 @@ from anthill.core.ids import new_thread_id, now
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
-from anthill.web.chat import record_outgoing
+from anthill.core.chat_log import record_outgoing
 from anthill.core.payloads import ChatPayload, MessageType, Payload, TaskRequestPayload
 from anthill.core.router import Router, extract_mentions
 from anthill.core.states import DeliveryTracker

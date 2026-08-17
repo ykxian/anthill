@@ -427,3 +427,70 @@ def test_the_bridge_directories_exist_as_soon_as_the_agent_starts(
     bridge = layout.agent_dir("cc") / "bridge"
     assert (bridge / "inbox").is_dir()
     assert (bridge / "outbox").is_dir()
+
+
+async def test_a_bridge_reply_is_recorded_for_the_chat_page(
+    node: tuple[NodeLayout, Config],
+) -> None:
+    """桥接 Agent 发出去的话要进本机的发件记录 —— 对话页「只读收件方归档」的
+    假设在**跨机**方向塌了半边：收件方的归档在对面机器上，本机不补记的话，
+    这半句在面板上就不存在。cli 实机复现：wtst↔tst1 的线程里唯独看不见
+    tst1 自己的回复。
+    """
+    layout, config = node
+    handler = handler_for(layout)
+    env = chat_to_cc()
+
+    async with running(layout, config, handler):
+        Mailbox(layout.mailbox_dir("cc")).deposit(env)
+        await wait_until(lambda: (handler.dir("inbox") / f"{env.id}.md").is_file())
+        write_draft(handler, f"{env.id}.md", "回你的这句要能在对话页看见")
+        await wait_until(lambda: (layout.root / "chats" / f"{env.thread}.jsonl").is_file())
+
+    record = (layout.root / "chats" / f"{env.thread}.jsonl").read_text(encoding="utf-8")
+    assert "回你的这句要能在对话页看见" in record
+    assert '"mine": true' in record
+
+
+async def test_a_bridge_initiated_message_is_recorded_too(
+    node: tuple[NodeLayout, Config],
+) -> None:
+    layout, config = node
+    handler = handler_for(layout)
+
+    async with running(layout, config, handler):
+        write_draft(handler, "cli-abc123.md", "---\nto: coder\n---\n\n主动说的也要看得见\n")
+        await wait_until(lambda: bool(list((layout.root / "chats").glob("*.jsonl"))))
+
+    texts = [p.read_text(encoding="utf-8") for p in (layout.root / "chats").glob("*.jsonl")]
+    assert any("主动说的也要看得见" in t for t in texts)
+
+
+async def test_a_failing_chat_record_does_not_resend_the_reply(
+    node: tuple[NodeLayout, Config], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """补记是显示侧的锦上添花，**没资格打断投递语义**：它排在 send 成功之后、
+    归档之前，抛 OSError 的话会逃过 tick 的 except AntHillError —— 草稿留在
+    outbox，下一轮重发，跨机方向对方收到重复消息。磁盘抖一下不该变成重发。"""
+    import anthill.adapters.bridge as bridge_mod
+
+    def boom(*_args: object) -> None:
+        raise OSError("磁盘抖了一下")
+
+    monkeypatch.setattr(bridge_mod, "record_outgoing", boom)
+
+    layout, config = node
+    handler = handler_for(layout)
+    env = chat_to_cc()
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+
+    async with running(layout, config, handler):
+        Mailbox(layout.mailbox_dir("cc")).deposit(env)
+        await wait_until(lambda: (handler.dir("inbox") / f"{env.id}.md").is_file())
+        write_draft(handler, f"{env.id}.md", "只该发一次")
+        await wait_until(lambda: any(e.type is MessageType.CHAT for e in envelopes(cli_box)))
+        # 草稿必须已归档 —— 留在 outbox 就等于排队重发
+        await wait_until(lambda: not list(handler.dir("outbox").glob("*.md")))
+
+    sent = [e for e in envelopes(cli_box) if e.type is MessageType.CHAT]
+    assert len(sent) == 1, f"补记失败被放大成重发：收到 {len(sent)} 条"

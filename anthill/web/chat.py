@@ -16,39 +16,19 @@ from typing import Any
 
 from anthill.core.envelope import Envelope
 from anthill.core.errors import AntHillError
-from anthill.core.ids import now
 from anthill.core.mailbox import Mailbox
+from anthill.core.chat_log import BODY_LIMIT, CHAT_DIR, chats_dir, record_outgoing
 from anthill.core.paths import NodeLayout
 from anthill.core.payloads import MessageType
 
-CHAT_DIR = "chats"
+__all__ = ["CHAT_DIR", "BODY_LIMIT", "record_outgoing"]
+
 MAX_MESSAGES = 200
 MAX_THREADS = 40
-BODY_LIMIT = 4000
 
 
-def _dir(layout: NodeLayout) -> Path:
-    path = layout.root / CHAT_DIR
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def record_outgoing(layout: NodeLayout, env: Envelope, body: str) -> None:
-    """把刚发出去的那条记下来。追加写，一个 thread 一个文件。"""
-    line = json.dumps(
-        {
-            "id": env.id,
-            "ts": now().isoformat(),
-            "frm": str(env.from_),
-            "to": str(env.to),
-            "body": body[:BODY_LIMIT],
-            "mine": True,
-        },
-        ensure_ascii=False,
-    )
-    path = _dir(layout) / f"{env.thread}.jsonl"
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(line + "\n")
+# 写入端在 core/chat_log.py（面板、CLI、桥接三条发件路共用）；这里只读
+_dir = chats_dir
 
 
 def messages(layout: NodeLayout, thread: str, *, agent: str = "cli") -> list[dict[str, Any]]:
