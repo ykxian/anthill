@@ -24,17 +24,24 @@ def anthill_exe() -> str:
     **不能直接写 `anthill`** —— 它在不在 PATH 上取决于装法（`uv run` 装出来的
     只在 venv 里）。页面上给的命令要能原样粘出去就跑得通，所以这里给绝对路径。
     """
-    candidate = Path(sys.executable).with_name("anthill")
+    # Windows 上控制台脚本叫 anthill.exe —— 按 POSIX 裸名找必然落空，
+    # 配方就退化成裸 `anthill`，粘出去 exit 127（值守会话为此白烧过好几轮）
+    name = "anthill.exe" if sys.platform == "win32" else "anthill"
+    candidate = Path(sys.executable).with_name(name)
     if candidate.is_file():
         return str(candidate)
     return shutil.which("anthill") or "anthill"
 
 
 def _q(text: str) -> str:
-    """路径进命令行前的引号 —— Windows 用户目录带空格是常态（My Documents），
-    不引的话粘贴命令断在空格上。两个 shell 各说各话。"""
+    """路径进命令行前的引号。
+
+    Windows 上**有没有空格都引**：粘贴目标不止 PowerShell —— Claude Code 的
+    Bash 工具是 Git Bash，反斜杠路径（C 盘用户目录那种）不带引号会被 bash
+    把反斜杠吃掉。双引号在 PowerShell / cmd / Git Bash 三个壳里都保平安。
+    POSIX 交给 shlex：只在需要时引。"""
     if sys.platform == "win32":
-        return f'"{text}"' if (" " in text or "(" in text) else text
+        return f'"{text}"'
     return shlex.quote(text)
 
 
@@ -64,6 +71,8 @@ def watch_prompt(layout: NodeLayout, agent: str) -> str:
         "\n"
         "被唤起后：读那条消息 → 回复 → **再往后台放一条同样的命令**，如此循环：\n"
         f'  {exe} bridge {agent} --reply <消息id> --text "你的回复" -w {workspace}\n'
+        "回复正文含代码/反引号/$ 时**别用 --text**（shell 会吃转义且不报错），"
+        "直接在 outbox/<消息id>.md 写正文。\n"
         "纯回执（「收到」「无需回复」这类）**别回** —— 回了对方还得再回执，没有终点；\n"
         f"用 --ack 清掉它再重新挂监听：{exe} bridge {agent} --ack <消息id> -w {workspace}\n"
         "\n"
@@ -87,8 +96,10 @@ def launch_command(layout: NodeLayout, agent: str) -> str:
     workspace = _q(str(layout.workspace))
     inner = f"{exe} bridge {agent} --prompt -w {workspace}"
     if sys.platform == "win32":
-        # PowerShell 没有 VAR=x cmd 前缀语法；$(...) 子表达式两边都有
-        return f'$env:ANTHILL_AGENT="{agent}"; claude "$({inner})"'
+        # PowerShell 没有 VAR=x cmd 前缀语法；$(...) 子表达式两边都有。
+        # 子表达式里带引号的 exe 路径落在**命令位置**，PS 要求调用操作符 & ——
+        # 不加的话整条粘进去反而是解析错误（Unexpected token）。
+        return f'$env:ANTHILL_AGENT="{agent}"; claude "$(& {inner})"'
     return f'ANTHILL_AGENT={agent} claude "$({inner})"'
 
 
