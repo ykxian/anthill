@@ -575,7 +575,9 @@ def mount_panel_actions(
         try:
             # 删除和启停一样不许与别的操作交错
             with agent_op(ctx.name, name):
-                return _agent_edit(ctx.layout, log, lambda fresh: remove_agent(ctx.layout, fresh, name))
+                return _agent_edit(
+                    ctx.layout, log, lambda fresh: remove_agent(ctx.layout, fresh, name)
+                )
         except AntHillError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
