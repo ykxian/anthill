@@ -510,3 +510,41 @@ async def test_a_broken_config_still_shows_its_text(
 
     assert "这不是 toml" in body["text"]
     assert body["parsed"] is None
+
+
+# ---------- 保存配置的并发防护 ----------
+
+
+async def test_a_stale_base_turns_the_save_into_a_409(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    """diff 是对着某一版磁盘看的 —— 点保存前磁盘又变了的话，静默覆盖等于
+    把别人刚写的改动扔掉（.bak 只留最后一版）。带上基准文本，不匹配就 409。"""
+    layout, _, _ = node
+    async with client_for(node) as client:
+        current = (await client.get("/panel/api/config")).json()["text"]
+        response = await client.put(
+            "/panel/api/config",
+            json={
+                "text": current + "\n# 我的改动\n",
+                "base_text": current + "\n# 别人抢先写进去的\n",
+            },
+        )
+
+    assert response.status_code == 409
+    assert layout.node_toml.read_text(encoding="utf-8") == current, "409 时磁盘一个字都不能动"
+
+
+async def test_a_matching_base_saves_normally(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    layout, _, _ = node
+    async with client_for(node) as client:
+        current = (await client.get("/panel/api/config")).json()["text"]
+        response = await client.put(
+            "/panel/api/config",
+            json={"text": current + "\n# 合法的追加\n", "base_text": current},
+        )
+
+    assert response.status_code == 200
+    assert "# 合法的追加" in layout.node_toml.read_text(encoding="utf-8")

@@ -60,10 +60,16 @@ class SendRequest(BaseModel):
     """接着已有会话往下说；留空则新开一个。对方的 thread 记忆靠这个接上。"""
 
 
+class StaleConfigBase(AntHillError):
+    """保存者看 diff 的那版磁盘已经被别人改了 —— 覆盖等于扔掉别人的改动。"""
+
+
 class ConfigRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(min_length=1, max_length=200_000)
+    base_text: str = Field(default="", max_length=200_000)
+    """保存者对着看 diff 的那一版磁盘原文。留空 = 不校验（老客户端）。"""
 
 
 def is_local_client(host: str | None, server_host: str | None = None) -> bool:
@@ -201,6 +207,12 @@ def write_config(layout: NodeLayout, request: ConfigRequest) -> dict[str, Any]:
     面板上改坏配置的代价是所有 agentd 都起不来，所以这里**先用同一套 pydantic
     模型校验一遍**（和启动期一模一样的规则），不合法就原样退回，磁盘一个字都不改。
     """
+    if request.base_text and layout.node_toml.is_file():
+        current = layout.node_toml.read_text(encoding="utf-8")
+        if current != request.base_text:
+            raise StaleConfigBase(
+                "磁盘上的配置在你看 diff 之后又变了 —— 再点一次保存，会以最新版重新对比"
+            )
     try:
         raw = tomllib.loads(request.text)
     except tomllib.TOMLDecodeError as exc:

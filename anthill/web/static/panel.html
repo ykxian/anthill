@@ -626,7 +626,8 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
           <label>endpoint（跨机通告地址，留空 = 自动识别）
             <input id="cfg-endpoint" placeholder="http://10.0.0.5:45778" autocomplete="off" style="width:240px" /></label>
           <label>poll_interval（秒）
-            <input id="cfg-poll" type="number" step="0.05" min="0.05" style="width:100px" /></label>
+            <input id="cfg-poll" type="number" step="0.05" min="0.05" style="width:100px"
+                   title="留空不生效 —— 这个字段没有「删掉」语义；endpoint 留空才是删行" /></label>
           <label>watch_mode
             <select id="cfg-watch"><option value="inotify">inotify</option><option value="poll">poll</option></select></label>
         </div>
@@ -2533,7 +2534,12 @@ $("config-save").addEventListener("click", async () => {
     );
     if (go === null) { say("config-hint", "没保存，磁盘没动"); return; }
     say("config-hint", "校验并保存中…");
-    await api(u("api/config"), { method: "PUT", body: JSON.stringify({ text: mine, node }) });
+    // base_text = 刚才 diff 的基准 —— 点保存前磁盘又变了的话服务端 409，
+    // 静默覆盖等于把别人刚写的改动扔掉；再点一次会以最新版重新对比
+    await api(u("api/config"), {
+      method: "PUT",
+      body: JSON.stringify({ text: mine, node, base_text: fresh.text }),
+    });
     await loadConfig({ discard: true });   // 概览与基准一起刷新
     // 提示放在 loadConfig **之后** —— 它开头会把提示清掉，先说后刷等于没说
     say("config-hint", `已保存到 ${node}（上一版存为 node.toml.bak）；重启 agentd 后生效`, "ok");

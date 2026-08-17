@@ -38,6 +38,7 @@ from anthill.web.actions import (
     ConfigRequest,
     RunRequest,
     SendRequest,
+    StaleConfigBase,
     is_local_client,
     is_same_origin,
     read_config,
@@ -668,7 +669,11 @@ def mount_panel_actions(
             )
         ctx = _pick(nodes, body.node)
         try:
-            result = write_config(ctx.layout, ConfigRequest(text=body.text))
+            result = write_config(
+                ctx.layout, ConfigRequest(text=body.text, base_text=body.base_text)
+            )
+        except StaleConfigBase as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except AntHillError as exc:
             # 配置不合法就原样退回，磁盘一个字都不改
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -693,6 +698,8 @@ class RemoteConfigWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(min_length=1, max_length=200_000)
+    base_text: str = Field(default="", max_length=200_000)
+    """保存者对着看 diff 的那版磁盘原文；不匹配 409。远端写入不带这道闸。"""
     node: str = Field(default="", max_length=64)
     """改哪台机器的配置。留空 = 本机。"""
 

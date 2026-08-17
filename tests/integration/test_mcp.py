@@ -248,3 +248,18 @@ async def test_an_external_server_really_gets_mounted(tmp_path: Path) -> None:
 
     assert result.ok
     assert "42" in result.content
+
+
+def test_wait_does_not_wake_for_a_message_you_already_replied_to(
+    node: tuple[NodeLayout, Config],
+) -> None:
+    """reply 完立刻 wait 不该假醒。MCP 这条路靠 known 预填 + drafted 双保险
+    （CLI --wait 只有 drafted）—— 机制可以不同，语义必须一致。"""
+    layout, _ = node
+    msg_id = waiting_note(layout)
+    server = build_server(*node, "cc")
+    call(server, "anthill_reply", {"message_id": msg_id[-6:], "text": "回过了"})
+
+    result = call(server, "anthill_wait", {"seconds": 1.0})
+
+    assert "timed_out" in str(result), "已回复的待办不该把 wait 叫醒"

@@ -125,8 +125,13 @@ def build_server(layout: NodeLayout, config: Config, agent: str) -> Any:
         超时了就再调一次。
         """
         known = {p.name for p in handler.dir("inbox").glob("*.md")}
+        # drafted 与 CLI --wait 同一语义：已写回复草稿的待办不算新消息。
+        # known 预填其实已经免疫「reply 完立刻 wait」——两道保险，机制统一。
         fresh = wait_for_message(
-            handler.dir("inbox"), timeout=max(1.0, min(seconds, MAX_WAIT)), known=known
+            handler.dir("inbox"),
+            timeout=max(1.0, min(seconds, MAX_WAIT)),
+            known=known,
+            drafted=handler.dir("outbox"),
         )
         if not fresh:
             return {"agent": agent, "count": 0, "waiting": [], "timed_out": True}
