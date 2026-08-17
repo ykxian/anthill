@@ -395,3 +395,64 @@ async def test_the_lan_is_still_refused_even_with_a_convincing_origin(
         )
 
     assert response.status_code == 403
+
+
+# ---------- 移除对端 ----------
+#
+# 侧栏里那排「连不上 · 配对」的节点多半是早前测试留下的发现记录，
+# 以前只能去终端 `anthill peers forget` 一个个清 —— 面板上看得见的垃圾，
+# 面板上就该能扫。但**已信任的对端不在此列**：删它等于拒收它今后的一切
+# 消息，这种级别的动作留在 CLI。
+
+
+def see_ghost(peers: PeerRegistry, name: str = "ghost") -> None:
+    peers.observe(node=name, endpoint="http://10.0.0.9:1", agents=("echo",))
+
+
+async def test_a_discovered_peer_can_be_forgotten_from_the_page(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    layout, _, peers = node
+    see_ghost(peers)
+
+    async with client_for(node) as client:
+        response = await client.delete("/panel/api/peers/ghost")
+
+    assert response.status_code == 200
+    assert response.json()["removed"] == ["laptop"]
+    assert all(p.node != "ghost" for p in PeerRegistry(layout.root).all()), "对端没被移除"
+
+
+async def test_forgetting_an_unknown_peer_says_so(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    async with client_for(node) as client:
+        response = await client.delete("/panel/api/peers/nobody")
+
+    assert response.status_code == 404
+
+
+async def test_a_trusted_peer_cannot_be_forgotten_from_the_page(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    """删已信任的对端 = 拒收它今后的一切消息 —— 这一刀留在 CLI。"""
+    from anthill.security.keys import PairingToken, new_key
+
+    layout, _, peers = node
+    peers.trust(PairingToken(node="friend", endpoint="http://10.0.0.8:1", key=new_key()))
+
+    async with client_for(node) as client:
+        response = await client.delete("/panel/api/peers/friend")
+
+    assert response.status_code == 409
+    assert any(p.node == "friend" for p in PeerRegistry(layout.root).all()), "已信任的对端被误删"
+
+
+async def test_forgetting_a_peer_requires_write_access(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    _, _, peers = node
+    see_ghost(peers)
+
+    async with client_for(node, writable=False) as client:
+        assert (await client.delete("/panel/api/peers/ghost")).status_code in (403, 404, 405)

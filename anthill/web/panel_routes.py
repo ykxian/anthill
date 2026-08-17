@@ -567,6 +567,30 @@ def mount_panel_actions(
         ctx = _pick(nodes, node)
         return _agent_edit(ctx.layout, log, lambda fresh: remove_agent(ctx.layout, fresh, name))
 
+    @app.delete(f"{PANEL_PATH}/api/peers/{{name}}")
+    async def panel_peer_forget(request: Request, name: str) -> dict[str, Any]:
+        """把一个「见过还没配对」的对端从清单里移掉 —— 侧栏里那排连不上的
+        发现残留，面板上看得见就该在面板上能扫。
+
+        不带 `?node=`：同一个幽灵会被本机**每个**工作区各记一笔（组播是
+        广播，谁都听见了），只清一家、侧栏合并视图里它还在。所以一次全清。
+
+        **已信任的对端不让删**：那等于丢掉密钥、拒收它今后的一切消息 ——
+        这一刀和审批一样留在 CLI（`anthill peers forget`）。
+        """
+        _guard(request)
+        found = [c for c in nodes.all() for p in c.peers.all() if p.node == name]
+        if not found:
+            raise HTTPException(status_code=404, detail=f"清单里没有对端 {name}")
+        if any(p.trusted for c in nodes.all() for p in c.peers.all() if p.node == name):
+            raise HTTPException(
+                status_code=409,
+                detail=f"{name} 是已信任的对端 —— 删它要在终端里：anthill peers forget {name}",
+            )
+        removed = [c.name for c in nodes.all() if c.peers.forget(name)]
+        log.info("panel.peer_forgot", peer=name, nodes=",".join(removed))
+        return {"removed": removed}
+
     @app.post(f"{PANEL_PATH}/api/agents/{{name}}/{{action}}", status_code=202)
     async def panel_agent_control(
         request: Request, name: str, action: str, node: str = ""

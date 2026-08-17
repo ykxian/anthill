@@ -636,6 +636,31 @@ def bridge_in_second(tmp_path: Path) -> Iterator[str]:
     yield from serve(first, home=home)
 
 
+def test_a_stale_peer_can_be_swept_from_the_sidebar(
+    browser: object, panel: str, tmp_path: Path
+) -> None:
+    """侧栏那排「连不上 · 配对」多半是早前测试留下的发现残留 ——
+    以前只能去终端 `anthill peers forget` 一个个清，现在面板上点「移出」就行。
+    """
+    from anthill.discovery.registry import PeerRegistry
+
+    PeerRegistry(NodeLayout(tmp_path / "ws").root).observe(
+        node="幽灵箱", endpoint="http://10.9.9.9:1", agents=()
+    )
+
+    page, errors = open_panel(browser, panel)
+    page.wait_for_selector('[data-forget-peer="幽灵箱"]', timeout=15000)
+    page.click('[data-forget-peer="幽灵箱"]')
+    page.wait_for_selector("#ask[open]", timeout=5000)
+    page.click('#ask-choices [data-pick="0"]')
+    page.wait_for_function(
+        "() => !document.querySelector('[data-forget-peer=\"幽灵箱\"]')", timeout=15000
+    )
+    assert "幽灵箱" not in page.text_content("#topo-body")
+    assert errors == []
+    page.close()
+
+
 def test_chat_groups_conversations_by_workspace(
     browser: object, two_workspaces: str
 ) -> None:

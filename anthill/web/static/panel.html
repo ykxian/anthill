@@ -844,7 +844,8 @@ function renderTopo(nodes) {
               ? `<span class="tag">${folded ? `${count} 个 Agent` : "已连上"}</span>`
               : `<span class="tag">连不上</span>`}
         ${node.pairable && canWrite
-          ? `<button class="ghost" type="button" data-pair="${esc(node.node)}">配对</button>`
+          ? `<button class="ghost" type="button" data-pair="${esc(node.node)}">配对</button>
+             <button class="ghost danger" type="button" data-forget-peer="${esc(node.node)}">移出</button>`
           : ""}
       </div>
       ${folded ? "" : node.reachable
@@ -2051,10 +2052,12 @@ $("crumb-up").addEventListener("click", (event) => browseTo(event.target.dataset
 document.addEventListener("click", (event) => {
   const dir = event.target.closest?.("[data-dir]");
   if (dir) { browseTo(dir.dataset.dir); return; }
-  // 「配对」按钮长在节点头部**里面** —— 头部自己也可点（切换/展开），
-  // 所以必须先认按钮再认头部，否则点配对就成了点头部
+  // 「配对」「移出」按钮长在节点头部**里面** —— 头部自己也可点（切换/展开），
+  // 所以必须先认按钮再认头部，否则点按钮就成了点头部
   const pair = event.target.closest?.("[data-pair]");
   if (pair) { startPairing(pair.dataset.pair); return; }
+  const drop = event.target.closest?.("[data-forget-peer]");
+  if (drop) { forgetPeer(drop.dataset.forgetPeer); return; }
   const groupHead = event.target.closest?.("[data-focus-node]");
   if (groupHead) { switchNode(groupHead.dataset.focusNode); return; }
   const peek = event.target.closest?.("[data-toggle-node]");
@@ -2294,6 +2297,24 @@ $("config-save").addEventListener("click", async () => {
     button.disabled = false;
   }
 });
+
+// 侧栏那排「连不上 · 配对」多半是早前测试留下的发现残留 —— 面板上看得见，
+// 面板上就该能扫。已信任的对端服务端会拒绝（那等于拒收它今后的一切消息，
+// 这一刀和审批一样留在 CLI），错误会原样摆出来。
+async function forgetPeer(name) {
+  const go = await ask(
+    `把 ${name} 移出清单？`,
+    ["只删「见过」的记录，本机每个工作区里的都一起清；它再广播一次还会回来。"],
+    [{ label: "移出", value: true, danger: true }],
+  );
+  if (go === null) return;
+  try {
+    await api(u(`api/peers/${encodeURIComponent(name)}`), { method: "DELETE" });
+    poll();
+  } catch (err) {
+    await tell(`${name} 没移掉`, [esc(String(err.message || err))]);
+  }
+}
 
 // ---- 配对：见过但还不能通信的节点，在这里换密钥 ----
 // window.prompt 把「填 PIN 连过去」和「留空生成 PIN」塞进同一个空串重载里 ——
