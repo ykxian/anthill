@@ -165,6 +165,18 @@ def start_agent(layout: NodeLayout, config: Config, name: str) -> dict[str, Any]
         "--quiet",  # 没有终端可回显；它自己写 jsonl 日志
         "--unattended",  # 没人在这个进程前面，需要确认的高危操作一律拒绝
     ]
+    # 「脱离本进程独活」两个平台写法不同：POSIX 靠 start_new_session（setsid），
+    # Windows 上那个参数被静默忽略 —— agentd 会和 serve 共用控制台，
+    # 任何控制台 Ctrl+C（包括曾经的 os.kill(pid, 0) 探测广播）都会连坐。
+    # DETACHED_PROCESS 彻底不挂控制台，CREATE_NEW_PROCESS_GROUP 自成一组。
+    detach: dict[str, Any] = (
+        {
+            "creationflags": subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+            | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        }
+        if sys.platform == "win32"
+        else {"start_new_session": True}
+    )
     try:
         # 参数全是本机配置里的名字（已过 AGENT_NAME_RE），不拼接外部输入
         process = subprocess.Popen(
@@ -172,7 +184,7 @@ def start_agent(layout: NodeLayout, config: Config, name: str) -> dict[str, Any]
             cwd=str(layout.workspace),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **detach,
         )
     except OSError as exc:
         raise AntHillError(f"起不来：{exc}") from exc

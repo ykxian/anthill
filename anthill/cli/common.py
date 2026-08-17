@@ -13,6 +13,7 @@ from rich.console import Console
 from anthill.core.config import Config
 from anthill.core.errors import AntHillError
 from anthill.core.paths import NodeLayout
+from anthill.core.procs import process_alive
 
 console = Console()
 err_console = Console(stderr=True)
@@ -41,14 +42,12 @@ def ok(message: str) -> None:
 
 
 def is_running(pid: int) -> bool:
-    """runtime.json 可能是上次崩溃留下的，得真去确认进程还在。"""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    """runtime.json 可能是上次崩溃留下的，得真去确认进程还在。
+
+    必须走 process_alive —— 裸的 os.kill(pid, 0) 在 Windows 上是
+    Ctrl+C 广播，会把共用控制台的 serve 一起打断（见 core/procs.py）。
+    """
+    return process_alive(pid)
 
 
 STDIN_MARKER = "-"

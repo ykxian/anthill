@@ -41,6 +41,7 @@ from anthill.core.config import Config
 from anthill.core.errors import AntHillError
 from anthill.core.ids import now
 from anthill.core.paths import NodeLayout
+from anthill.core.procs import process_alive
 
 CLAIM_FILE = "claim.json"
 AGENT_ENV = "ANTHILL_AGENT"
@@ -74,15 +75,9 @@ class Claim:
 
 
 def is_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # 别人的进程，但确实在
-    return True
+    # 必须走 process_alive —— 裸的 os.kill(pid, 0) 在 Windows 上是
+    # Ctrl+C 广播，会把共用控制台的 serve 一起打断（见 core/procs.py）
+    return process_alive(pid)
 
 
 def claim_path(layout: NodeLayout, agent: str) -> Path:
