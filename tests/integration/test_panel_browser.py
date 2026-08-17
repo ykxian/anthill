@@ -245,12 +245,12 @@ def test_a_repaint_does_not_eat_what_you_are_typing(browser: object, panel: str)
 def test_pairing_asks_in_the_page_dialog_not_a_native_prompt(
     browser: object, panel: str
 ) -> None:
-    """配对的问答走页面自己的对话框 —— window.prompt 样式、焦点、回车语义都
-    不归页面管，在自动化/无头环境里还会被静默吞掉。
+    """配对的两个方向拆成两个按钮，各自把「哪个节点」写在脸上。
 
-    顺带钉住输入变体的两条约定：空输入点「连过去」要留在框里提示
-    （既不是当空串提交、也不是取消）；「生成本机 PIN」不需要输入，
-    结果 PIN 显示在对话框里，人盯着它抄到另一台机器。
+    以前一个「配对」按钮里塞二选一，生成的 PIN 悄悄开在「当前焦点」的
+    工作区上 —— 多工作区时对方连错节点只会看到「没有开着的配对窗口」
+    （cli 实机踩过）。现在：远端节点的「配对」只做拿 PIN 连过去；
+    本机节点的「配对码」给**这个**节点开窗口，结果里写明节点名。
     """
     page, errors = open_panel(browser, panel)
     page.wait_for_selector("#topo-body .card", timeout=15000)
@@ -268,18 +268,24 @@ def test_pairing_asks_in_the_page_dialog_not_a_native_prompt(
     assert page.evaluate(
         "document.activeElement === document.getElementById('ask-input')"
     ), "输入型对话框的焦点该落在输入框里"
+    # 对话框里写明「以谁的身份、连谁」
+    body_text = page.text_content("#ask-body") or ""
+    assert "陌生机" in body_text, "连谁得写在对话框里"
 
     # 空着点「连过去」：留在框里提示，不提交也不取消
     page.click('#ask-choices [data-pick="0"]')
     assert page.evaluate("document.getElementById('ask').open"), "空输入不该把框关了"
     assert (page.text_content("#ask-hint") or "").strip(), "空输入该在框里提示"
+    page.keyboard.press("Escape")
 
-    # 「生成本机 PIN」不需要输入：真的调 api/pair/open，PIN 摆在对话框里
-    page.click('#ask-choices [data-pick="1"]')
+    # 本机节点的「配对码」：真的调 api/pair/open，码和**节点名**一起摆在对话框里
+    page.click("[data-pair-open]")
     page.wait_for_function(
-        "() => document.getElementById('ask-title').textContent.includes('本机 PIN')",
+        "() => document.getElementById('ask-title').textContent.includes('配对码')",
         timeout=15000,
     )
+    title = page.text_content("#ask-title") or ""
+    assert "browserbox" in title, "配对码开在哪个节点必须写在脸上"
     page.click('#ask-choices [data-pick="cancel"]')
     assert errors == []
     page.close()

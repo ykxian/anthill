@@ -550,7 +550,8 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
         <div id="bridge-recipes"></div>
       </details>
       <form class="actions" id="bridge-say" style="margin-bottom:16px">
-        <input id="bridge-to" placeholder="主动说一句：发给谁（如 coder 或 lab:coder）" autocomplete="off" style="flex:0 0 260px" />
+        <input id="bridge-to" list="known-agents" placeholder="发给谁：本机写名字，跨机器写 节点:Agent" autocomplete="off" style="flex:0 0 260px" />
+        <datalist id="known-agents"></datalist>
         <input id="bridge-text" placeholder="说点什么…" autocomplete="off" />
         <button type="submit">发出去</button>
       </form>
@@ -843,6 +844,9 @@ function renderTopo(nodes) {
             : node.reachable
               ? `<span class="tag">${folded ? `${count} 个 Agent` : "已连上"}</span>`
               : `<span class="tag">连不上</span>`}
+        ${node.local && canWrite
+          ? `<button class="ghost" type="button" data-pair-open="${esc(node.node)}">配对码</button>`
+          : ""}
         ${node.pairable && canWrite
           ? `<button class="ghost" type="button" data-pair="${esc(node.node)}">配对</button>
              <button class="ghost danger" type="button" data-forget-peer="${esc(node.node)}">移出</button>`
@@ -1160,6 +1164,15 @@ function syncAgentPicker() {
     .join("");
   if (chat.to && options.some((o) => o.value === chat.to)) picker.value = chat.to;
   else chat.to = picker.value || "";
+  // 桥接页「发给谁」的补全：全部给**完整地址**（节点:Agent）——
+  // 裸名字会被默认补成本机节点，跨机器的人最容易在这儿栽
+  const list = $("known-agents");
+  if (list) {
+    list.innerHTML = state.nodes
+      .flatMap((n) => (n.agents || []).map((a) => `${n.node}:${a.name}`))
+      .map((v) => `<option value="${esc(v)}"></option>`)
+      .join("");
+  }
 }
 
 // **一个页面，所有对话。** 以前这里只显示「你参与的那些」，Agent 之间说了什么
@@ -1229,7 +1242,7 @@ function renderThread(t) {
     return `${sep}
       <div class="turn ${same && !sep ? "cont" : ""}">
         <span class="who">${same && !sep ? "" : esc(wsName(m.frm))}</span>
-        <span class="text">${esc(m.body) || `<i class="meta">（空）</i>`}</span>
+        <span class="text">${esc(m.body) || `<i class="meta">（空）</i>`}${m.clipped ? `<span class="meta">（截断，原文更长）</span>` : ""}</span>
         <span class="when meta">${esc(fmtTime(m.ts))}</span>
       </div>`;
   }).join("");
@@ -1634,7 +1647,7 @@ function renderConnect(info) {
                 : "还没有人用过"}</span>
             <span class="pill ${k.pid ? "ok" : ""}">${k.pid ? "已绑定" : "空闲"}</span>
             <button class="ghost" type="button"
-                    data-copy-text="ANTHILL_AGENT=${esc(k.agent)} claude">复制启动命令</button>
+                    data-copy-text="${esc(k.pin || `ANTHILL_AGENT=${k.agent} claude`)}">复制启动命令</button>
           </div>`).join("")
         : `<div class="meta">这个工作区里还没有桥接 Agent</div>`}
       <p class="why" style="margin-top:8px">
@@ -2063,6 +2076,8 @@ document.addEventListener("click", (event) => {
   // 所以必须先认按钮再认头部，否则点按钮就成了点头部
   const pair = event.target.closest?.("[data-pair]");
   if (pair) { startPairing(pair.dataset.pair); return; }
+  const opener = event.target.closest?.("[data-pair-open]");
+  if (opener) { openPairWindow(opener.dataset.pairOpen); return; }
   const drop = event.target.closest?.("[data-forget-peer]");
   if (drop) { forgetPeer(drop.dataset.forgetPeer); return; }
   const groupHead = event.target.closest?.("[data-focus-node]");
@@ -2323,40 +2338,47 @@ async function forgetPeer(name) {
   }
 }
 
-// ---- 配对：见过但还不能通信的节点，在这里换密钥 ----
-// window.prompt 把「填 PIN 连过去」和「留空生成 PIN」塞进同一个空串重载里 ——
-// 两个显式选项说得更清楚，空着点「连过去」也有地方提示而不是当成另一种意图。
+// ---- 配对：换密钥的两个方向拆成两个按钮，各自把「哪个节点」写在脸上 ----
+// 以前一个「配对」按钮里塞二选一，而生成的 PIN 悄悄开在「当前正在操作」的
+// 工作区上 —— 一台机器好几个工作区时，对方连错节点只会看到「没有开着的
+// 配对窗口」。现在：本机节点头部的「配对码」= 给**这个**节点开窗口；
+// 远端节点头部的「配对」= 拿对方屏幕上的 PIN 连过去。
 async function startPairing(target) {
+  const me = focusedNode() || state.node;
   const got = await ask(
     `和 ${target} 配对`,
-    ["对方屏幕上有 PIN 就填进来连过去；想让对方来连你，就生成一个本机 PIN。"],
-    [
-      { label: "用这个 PIN 连过去", value: "join", requireInput: true, emptyHint: "先把对方的 PIN 填上" },
-      { label: "生成本机 PIN", value: "open" },
-    ],
-    { input: { placeholder: "对方屏幕上的 PIN" } },
+    [`以 <b>${esc(me)}</b> 的身份与 <b>${esc(target)}</b> 换密钥。`,
+     "把对方屏幕上的六位配对码填进来（两分钟内有效）。"],
+    [{ label: "连过去", value: "join", requireInput: true, emptyHint: "先把对方的配对码填上" }],
+    { input: { placeholder: "对方屏幕上的六位数字" } },
   );
   if (got === null) return;
   try {
-    if (got.pick === "join") {
-      const done = await api(u(scoped("api/pair/join")), {
-        method: "POST",
-        body: JSON.stringify({ target, pin: got.text.trim() }),
-      });
-      await tell(`已和 ${done.node} 配对`, [
-        `指纹 <code>${esc(done.fingerprint)}</code>`,
-        "和对方屏幕上的核对一致。",
-      ]);
-    } else {
-      const open = await api(u(scoped("api/pair/open")), { method: "POST" });
-      await tell(`本机 PIN：${open.pin}`, [
-        `<b>${esc(open.seconds)}</b> 秒内有效，只能用一次。`,
-        "让对方在他的面板上点「配对」并输入这串数字。",
-      ]);
-    }
+    const done = await api(u(scoped("api/pair/join")), {
+      method: "POST",
+      body: JSON.stringify({ target, pin: got.text.trim() }),
+    });
+    await tell(`已和 ${done.node} 配对`, [
+      `指纹 <code>${esc(done.fingerprint)}</code>`,
+      "和对方屏幕上的核对一致。",
+    ]);
     poll();
   } catch (err) {
     await tell("配对没成", [esc(String(err.message || err))]);
+  }
+}
+
+// 给某个**本机节点**开配对窗口 —— 节点名是按钮上带来的，不是「当前焦点」：
+// 生成的码只对这个节点有效，对方也必须对着它连
+async function openPairWindow(node) {
+  try {
+    const open = await api(u(`api/pair/open?node=${encodeURIComponent(node)}`), { method: "POST" });
+    await tell(`${open.node} 的配对码：${open.pin}`, [
+      `<b>${esc(open.seconds)}</b> 秒内有效，只能用一次。`,
+      `让对方在他的面板上，对着「<b>${esc(open.node)}</b>」这个节点点「配对」并输入这串数字。`,
+    ]);
+  } catch (err) {
+    await tell("配对码没生成", [esc(String(err.message || err))]);
   }
 }
 

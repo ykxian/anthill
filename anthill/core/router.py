@@ -96,9 +96,12 @@ class Router:
                 )
             return [min(candidates, key=lambda name: (self._queue_depth(name), name))]
         if target.agent not in self._config.agents:
+            # 裸名字默认补成本节点 —— 想发到别的机器/工作区的人最容易在这儿栽：
+            # 报错里把正确写法给出来，别让人以为是链路断了
             raise UnknownRecipient(
                 f"本节点没有名为 {target.agent!r} 的 Agent；已配置："
                 + (", ".join(sorted(self._config.agents)) or "无")
+                + f"。要发给别的节点上的 Agent，写完整地址：<节点名>:{target.agent}"
             )
         return [target.agent]
 

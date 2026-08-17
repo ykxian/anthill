@@ -168,10 +168,13 @@ def start_agent(layout: NodeLayout, config: Config, name: str) -> dict[str, Any]
     # 「脱离本进程独活」两个平台写法不同：POSIX 靠 start_new_session（setsid），
     # Windows 上那个参数被静默忽略 —— agentd 会和 serve 共用控制台，
     # 任何控制台 Ctrl+C（包括曾经的 os.kill(pid, 0) 探测广播）都会连坐。
-    # DETACHED_PROCESS 彻底不挂控制台，CREATE_NEW_PROCESS_GROUP 自成一组。
+    # 用 CREATE_NO_WINDOW 而不是 DETACHED_PROCESS：uv 装的 venv 里 python.exe
+    # 是个蹦床启动器，DETACHED 下它拉起真 Python 时会分配一个**可见**控制台
+    # （实机上就是「点启动弹小黑框」）；NO_WINDOW 给的是隐藏控制台，后代继承、
+    # 不闪窗，同样和 serve 的控制台隔离。CREATE_NEW_PROCESS_GROUP 自成一组。
     detach: dict[str, Any] = (
         {
-            "creationflags": subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+            "creationflags": subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
             | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
         }
         if sys.platform == "win32"

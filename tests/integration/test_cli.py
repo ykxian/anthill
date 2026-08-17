@@ -228,3 +228,15 @@ def test_bridge_ack_with_an_unknown_id_fails(tmp_path: Path):
     result = runner.invoke(app, ["bridge", "cc", "--ack", "ZZZZZZ", "-w", str(workspace)])
 
     assert result.exit_code != 0
+
+
+def test_cli_send_shows_up_in_the_chat_records(workspace: Path):
+    """`anthill send` 发的消息也得进对话记录 —— 以前只有面板发的才记，
+    于是对话页上只见对方的回音、不见你发出去的那半句，
+    跨机器联调时看着就像「消息没显示」。"""
+    result = runner.invoke(app, ["send", "echo", "CLI 发的这句要看得见", "-w", str(workspace)])
+
+    assert result.exit_code == 0, result.output
+    chats = list((workspace / ".anthill" / "chats").glob("*.jsonl"))
+    assert chats, "CLI 发件没有进 chats 记录"
+    assert any("CLI 发的这句要看得见" in p.read_text(encoding="utf-8") for p in chats)

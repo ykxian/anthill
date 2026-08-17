@@ -21,6 +21,7 @@ from anthill.core.ids import new_thread_id, now
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
+from anthill.web.chat import record_outgoing
 from anthill.core.payloads import ChatPayload, MessageType, Payload, TaskRequestPayload
 from anthill.core.router import Router, extract_mentions
 from anthill.core.states import DeliveryTracker
@@ -103,6 +104,10 @@ async def _send(
     )
     results = await sender.send(env)
     log.close()
+    if any(result.ok for result in results):
+        # 面板发件会记进 chats（record_outgoing），CLI 不记的话，对话页上
+        # 只见对方的回音、不见你发出去的那半句 —— 跨机联调时看着像消息丢了
+        record_outgoing(layout, env, text)
 
     for result in results:
         if result.ok:

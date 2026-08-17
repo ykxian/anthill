@@ -41,8 +41,12 @@ DEFAULT_MESSAGES = 400
 """一次最多读几个归档文件。**回执也算在里面** —— 见 `conversations`。"""
 
 DEFAULT_THREADS = 30
-BODY_PREVIEW = 800
 RECEIPT_PREFIX = "receipt."
+
+# 正文上限，对齐 chat.py 的 BODY_LIMIT。以前是 800 字还把换行压平 ——
+# 审查意见这类消息动辄上千字、靠换行分点，截完只剩开头残句。
+# 真截了就在消息上带 clipped 说一声，页面照实标出来。
+BODY_LIMIT = 4000
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +58,7 @@ class Message:
     kind: str
     thread: str
     body: str
+    clipped: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -64,6 +69,7 @@ class Message:
             "to": self.to,
             "kind": self.kind,
             "body": self.body,
+            "clipped": self.clipped,
         }
 
 
@@ -89,19 +95,22 @@ def conversations(
     collected = _newest(layout, limit=messages)
     # 归档里已经有的以归档为准 —— 那份带真正的投递时刻，本机记的只是「我发了」
     known = {record.id for record in collected}
-    collected += [
-        Message(
-            id=str(item.get("id", "")),
-            ts=str(item.get("ts", "")),
-            frm=str(item.get("frm", "")),
-            to=str(item.get("to", "")),
-            kind=str(item.get("kind", "chat")),
-            thread=str(item.get("thread", "")),
-            body=_clip(str(item.get("body", ""))),
+    for item in extra:
+        if str(item.get("id", "")) in known:
+            continue
+        body, clipped = _clip(str(item.get("body", "")))
+        collected.append(
+            Message(
+                id=str(item.get("id", "")),
+                ts=str(item.get("ts", "")),
+                frm=str(item.get("frm", "")),
+                to=str(item.get("to", "")),
+                kind=str(item.get("kind", "chat")),
+                thread=str(item.get("thread", "")),
+                body=body,
+                clipped=clipped,
+            )
         )
-        for item in extra
-        if str(item.get("id", "")) not in known
-    ]
     grouped: dict[str, list[Message]] = {}
     receipts: dict[str, int] = {}
     for record in collected:
@@ -215,6 +224,7 @@ def _read(path: Path) -> Message | None:
         env = Envelope.from_json_bytes(path.read_bytes())
     except (OSError, AntHillError):
         return None
+    body, clipped = _text(env)
     return Message(
         id=env.id,
         ts=env.ts.isoformat(),
@@ -222,11 +232,12 @@ def _read(path: Path) -> Message | None:
         to=str(env.to),
         kind=str(env.type),
         thread=env.thread,
-        body=_text(env),
+        body=body,
+        clipped=clipped,
     )
 
 
-def _text(env: Envelope) -> str:
+def _text(env: Envelope) -> tuple[str, bool]:
     payload: Any = env.payload
     title = str(getattr(payload, "title", "") or "").strip()
     body = str(getattr(payload, "body", "") or getattr(payload, "summary", "") or "").strip()
@@ -234,8 +245,10 @@ def _text(env: Envelope) -> str:
         text = body or title
     else:
         text = f"{title}\n\n{body}"
-    return _clip(text)
+    return _clip(text)  # (正文, 是否被截)
 
 
-def _clip(text: str) -> str:
-    return " ".join(text.split())[:BODY_PREVIEW]
+def _clip(text: str) -> tuple[str, bool]:
+    """截到上限，**换行原样保留** —— 这是对话正文，不是一行摘要。"""
+    tidy = text.strip()
+    return tidy[:BODY_LIMIT], len(tidy) > BODY_LIMIT

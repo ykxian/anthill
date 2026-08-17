@@ -30,6 +30,14 @@ def anthill_exe() -> str:
     return shutil.which("anthill") or "anthill"
 
 
+def _q(text: str) -> str:
+    """路径进命令行前的引号 —— Windows 用户目录带空格是常态（My Documents），
+    不引的话粘贴命令断在空格上。两个 shell 各说各话。"""
+    if sys.platform == "win32":
+        return f'"{text}"' if (" " in text or "(" in text) else text
+    return shlex.quote(text)
+
+
 def watch_prompt(layout: NodeLayout, agent: str) -> str:
     """给值守会话的那段话 —— 一个**不占着会话、也不会自己醒**的监控循环。
 
@@ -44,8 +52,8 @@ def watch_prompt(layout: NodeLayout, agent: str) -> str:
     现在是 `--wait -1`：**永不超时**。值守本来就该一直挂着，
     有消息才醒。没有终点，也就没有白醒。
     """
-    exe = anthill_exe()
-    workspace = str(layout.workspace)
+    exe = _q(anthill_exe())
+    workspace = _q(str(layout.workspace))
     root = layout.agent_dir(agent) / BRIDGE_DIR
     wait = f"{exe} bridge {agent} --wait -1 --json -w {workspace}"
     return (
@@ -75,10 +83,20 @@ def launch_command(layout: NodeLayout, agent: str) -> str:
     提示词不内联而是 `$(... --prompt)` 现取：内联的话，这段话每改一次，
     先前粘出去的命令就旧一次；而且它有换行有引号，塞进命令行迟早出事。
     """
-    exe = anthill_exe()
-    workspace = str(layout.workspace)
+    exe = _q(anthill_exe())
+    workspace = _q(str(layout.workspace))
     inner = f"{exe} bridge {agent} --prompt -w {workspace}"
+    if sys.platform == "win32":
+        # PowerShell 没有 VAR=x cmd 前缀语法；$(...) 子表达式两边都有
+        return f'$env:ANTHILL_AGENT="{agent}"; claude "$({inner})"'
     return f'ANTHILL_AGENT={agent} claude "$({inner})"'
+
+
+def pin_command(agent: str) -> str:
+    """钉死某个 Agent 的启动命令 —— 按 serve 所在平台说话。"""
+    if sys.platform == "win32":
+        return f'$env:ANTHILL_AGENT="{agent}"; claude'
+    return f"ANTHILL_AGENT={agent} claude"
 
 
 def connect_recipes(layout: NodeLayout, agent: str) -> dict[str, Any]:
@@ -89,11 +107,12 @@ def connect_recipes(layout: NodeLayout, agent: str) -> dict[str, Any]:
     """
     exe = anthill_exe()
     workspace = str(layout.workspace)
+    qexe, qws = _q(exe), _q(workspace)
     hook = {
         "hooks": {
             "UserPromptSubmit": [
                 {
-                    "command": f"{exe} bridge --json -w {workspace}",
+                    "command": f"{qexe} bridge --json -w {qws}",
                     "description": "每轮开始前看看 AntHill 那边有没有消息在等这个会话",
                 }
             ]
@@ -115,13 +134,18 @@ def connect_recipes(layout: NodeLayout, agent: str) -> dict[str, Any]:
         #
         # 命令里**不写 Agent 名** —— 让每个会话自己认领。写死名字的话，
         # 同一份配置下开几个会话就有几个抢同一个 Agent。
-        "mcp": f"cd {workspace} && claude mcp add anthill -- {exe} mcp serve -w {workspace}",
-        "pin": f"ANTHILL_AGENT={agent} claude",
+        # Windows PowerShell 5.1 不认 && —— 分号两边都通
+        "mcp": (
+            f"cd {qws}; claude mcp add anthill -- {qexe} mcp serve -w {qws}"
+            if sys.platform == "win32"
+            else f"cd {qws} && claude mcp add anthill -- {qexe} mcp serve -w {qws}"
+        ),
+        "pin": pin_command(agent),
         # 一个会话挂多个工作区：**再加一台 server 就行**，名字不同即可。
         # MCP 客户端按 server 名给工具分命名空间，两套 anthill_* 不会撞；
         # 而每台 server 的自我介绍里都写着自己是哪个节点、哪个工作区。
         "multi": (
-            f"claude mcp add anthill-{Path(workspace).name} -- {exe} mcp serve -w {workspace}"
+            f"claude mcp add anthill-{Path(workspace).name} -- {qexe} mcp serve -w {qws}"
         ),
     }
 

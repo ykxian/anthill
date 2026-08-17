@@ -235,3 +235,30 @@ def test_a_message_being_processed_is_not_counted_twice(tmp_path: Path) -> None:
 
     # Assert
     assert [m["body"] for m in result["threads"][0]["messages"]] == ["只算一次"]
+
+
+def test_long_bodies_keep_line_breaks_and_say_they_were_clipped(tmp_path: Path) -> None:
+    """对话页的正文以前 800 字一刀还把换行压平 —— 审查意见这类消息
+    动辄上千字、靠换行分点，读到的只剩开头一段残句。上限对齐 4000、
+    换行原样保留，真截了在消息上带 clipped 说一声。"""
+    layout = _layout(tmp_path)
+    body = "第一行\n第二行\n" + "长" * 4100
+    env = _chat("tst1", "tst2", body, thread=new_id(), at=now())
+    _deliver(layout, env)
+
+    (thread,) = conversations(layout)["threads"]
+    (message,) = thread["messages"]
+    assert "第一行\n第二行" in message["body"], "换行被压平了"
+    assert len(message["body"]) >= 4000, "还没到上限就被截了"
+    assert message["clipped"] is True, "截了得说一声"
+
+
+def test_short_bodies_are_not_marked_clipped(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    env = _chat("tst1", "tst2", "短消息\n两行", thread=new_id(), at=now())
+    _deliver(layout, env)
+
+    (thread,) = conversations(layout)["threads"]
+    (message,) = thread["messages"]
+    assert message["body"] == "短消息\n两行"
+    assert message["clipped"] is False

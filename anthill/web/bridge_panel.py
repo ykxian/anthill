@@ -19,7 +19,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from anthill.adapters.bridge import BRIDGE_DIR, BridgeHandler, parse_note
-from anthill.adapters.bridge_connect import connect_recipes, watch_prompt
+from anthill.adapters.bridge_connect import connect_recipes, pin_command, watch_prompt
 from anthill.adapters.bridge_history import BODY_LIMIT, recent
 from anthill.adapters.bridge_session import last_claim, read_claim
 from anthill.core.config import Config
@@ -86,6 +86,8 @@ def inbox(layout: NodeLayout, config: Config, agent: str) -> dict[str, Any]:
         "claims": [
             {
                 "agent": name,
+                # 启动命令按 serve 所在平台说话 —— 前端别再自己拼 bash 前缀
+                "pin": pin_command(name),
                 **(c.as_dict() if (c := read_claim(layout, name)) else {"pid": 0}),
                 # 空闲的也要说「上次是谁」—— 认领有目录亲和性，
                 # 空闲不等于下一个会话随机拿到它
