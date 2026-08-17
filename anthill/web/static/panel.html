@@ -443,7 +443,26 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
 }
 .card-block h3 { margin: 0 0 4px; font-family: var(--serif); font-size: 15px; font-weight: 500; }
 .card-block .why { margin: 0 0 12px; font-size: 12.5px; color: var(--dim); }
-#config-text { width: 100%; min-height: 340px; resize: vertical; }
+#config-text { width: 100%; min-height: 280px; resize: vertical; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; }
+/* 配置页概览卡片 + 常用字段 + 保存前的 diff 确认 */
+.cfg-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin: 0 0 14px; }
+.cfg-card { border: 1px solid var(--line-soft); border-radius: var(--r); padding: 10px 12px; background: var(--surface-2); }
+.cfg-card h4 { margin: 0 0 6px; font-size: 12px; color: var(--muted); font-weight: 600; }
+.cfg-card .meta { line-height: 1.7; }
+.cfg-quick { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; margin: 0 0 14px; }
+.cfg-quick label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+#config-save.attn { outline: 2px solid var(--accent); outline-offset: 1px; }
+#ask:has(.diff) { max-width: min(860px, 92vw); }
+.diff {
+  margin: 4px 0 0; padding: 8px 10px; background: var(--surface-2);
+  border: 1px solid var(--line-soft); border-radius: var(--r-sm);
+  font-family: var(--mono); font-size: 12px; line-height: 1.55;
+  max-height: 46vh; overflow: auto;
+}
+.diff .dline { white-space: pre; }
+.diff .add { background: color-mix(in srgb, var(--ok) 16%, transparent); }
+.diff .del { background: color-mix(in srgb, var(--bad) 13%, transparent); }
+.diff .skip { color: var(--dim); }
 footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
 </style>
 </head>
@@ -649,8 +668,19 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
 
     <section class="pane hold" id="pane-config" hidden>
       <div class="card-block" id="config">
-        <h3>node.toml <select id="config-node" aria-label="改哪台机器" style="margin-left:8px"></select></h3>
-        <p class="why">改坏了所有 agentd 都起不来 —— 保存前会用启动期同一套规则校验，不合法磁盘一个字都不改，并留一份 node.toml.bak。</p>
+        <h3>node.toml <select id="config-node" aria-label="改哪台机器" style="margin-left:8px"></select>
+          <span class="pill warn" id="config-dirty" hidden>有未保存的改动</span></h3>
+        <p class="why">图形字段改的就是下面的原文（注释与未知节区原样保留）——一切改动保存前都会像
+          git diff 一样摆出来确认；校验不过磁盘一个字不改，并留一份 node.toml.bak。</p>
+        <div id="config-overview"></div>
+        <div class="cfg-quick" id="config-quick" hidden>
+          <label>endpoint（跨机通告地址，留空 = 自动识别）
+            <input id="cfg-endpoint" placeholder="http://10.0.0.5:45778" autocomplete="off" style="width:240px" /></label>
+          <label>poll_interval（秒）
+            <input id="cfg-poll" type="number" step="0.05" min="0.05" style="width:100px" /></label>
+          <label>watch_mode
+            <select id="cfg-watch"><option value="inotify">inotify</option><option value="poll">poll</option></select></label>
+        </div>
         <textarea id="config-text" spellcheck="false"></textarea>
         <div class="actions" style="margin-top:10px">
           <button id="config-save" type="button">保存</button>
@@ -1340,7 +1370,8 @@ function ask(title, lines, choices, opts) {
     const box = $("ask");
     const field = $("ask-input");
     $("ask-title").textContent = title;
-    $("ask-body").innerHTML = lines.map((l) => `<p style="margin:0 0 8px">${l}</p>`).join("");
+    // <div> 而不是 <p>：diff 那种块级内容嵌在 <p> 里会被浏览器拆散
+    $("ask-body").innerHTML = lines.map((l) => `<div style="margin:0 0 8px">${l}</div>`).join("");
     field.hidden = !wantInput;
     field.value = "";
     field.placeholder = opts?.input?.placeholder || "";
@@ -2286,31 +2317,202 @@ function syncConfigNodes() {
   picker.value = names.includes(keep) ? keep : state.node;
 }
 
-async function loadConfig() {
+// 编辑器里最后一次「与磁盘一致」的文本 —— 脏与否、diff 的基准都从它来
+const configView = { loaded: "", node: "" };
+
+function markConfigDirty() {
+  const dirty = $("config-text").value !== configView.loaded;
+  $("config-save").classList.toggle("attn", dirty);
+  $("config-dirty").hidden = !dirty;
+}
+
+// 对 node.toml 原文做一处**最小手术**：只动目标节区里的那一行，
+// 注释和没认识的节区原样保留 —— 文件才是唯一真相，图形字段只是它的笔。
+// value 传空串 = 删掉那一行（endpoint 留空回到自动识别就是这么表达的）。
+// 已知取舍：被替换那一行**行内**的注释会跟着旧值一起没 —— 值都换了，
+// 描述旧值的注释多半也过时了；其余所有注释分毫不动。
+function patchToml(text, section, key, value) {
+  const lines = text.split("\n");
+  const header = `[${section}]`;
+  const keyRe = new RegExp(`^\\s*${key}\\s*=`);
+  const start = lines.findIndex((l) => l.trim() === header);
+  if (start === -1) {
+    if (value === "") return text;
+    const tail = text === "" || text.endsWith("\n") ? "" : "\n";
+    return `${text}${tail}\n${header}\n${key} = ${value}\n`;
+  }
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (lines[i].trim().startsWith("[")) { end = i; break; }
+  }
+  for (let i = start + 1; i < end; i++) {
+    if (keyRe.test(lines[i])) {
+      if (value === "") lines.splice(i, 1);
+      else lines[i] = `${key} = ${value}`;
+      return lines.join("\n");
+    }
+  }
+  if (value !== "") lines.splice(start + 1, 0, `${key} = ${value}`);
+  return lines.join("\n");
+}
+
+// 经典 LCS 逐行 diff。配置文件就几十行，O(n²) 的表绰绰有余。
+function diffLines(before, after) {
+  const a = before.split("\n");
+  const b = after.split("\n");
+  const dp = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { out.push({ type: " ", line: a[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ type: "-", line: a[i] }); i++; }
+    else { out.push({ type: "+", line: b[j] }); j++; }
+  }
+  while (i < a.length) out.push({ type: "-", line: a[i++] });
+  while (j < b.length) out.push({ type: "+", line: b[j++] });
+  return out;
+}
+
+// 没变的长段折起来只留前后三行 —— 人要看的是改了什么，不是整个文件
+function renderDiff(entries) {
+  const rows = [];
+  let run = [];
+  const flush = (isTail) => {
+    const keepHead = rows.length ? 3 : 0;   // 文件开头的未变段只留尾部
+    const keepTail = isTail ? 0 : 3;
+    if (run.length > keepHead + keepTail + 1) {
+      run.slice(0, keepHead).forEach((l) => rows.push(`<div class="dline">  ${esc(l)}</div>`));
+      rows.push(`<div class="dline skip">  ⋯ ${run.length - keepHead - keepTail} 行未变 ⋯</div>`);
+      run.slice(run.length - keepTail).forEach((l) => rows.push(`<div class="dline">  ${esc(l)}</div>`));
+    } else {
+      run.forEach((l) => rows.push(`<div class="dline">  ${esc(l)}</div>`));
+    }
+    run = [];
+  };
+  for (const e of entries) {
+    if (e.type === " ") { run.push(e.line); continue; }
+    flush(false);
+    const cls = e.type === "+" ? "add" : "del";
+    rows.push(`<div class="dline ${cls}">${e.type} ${esc(e.line)}</div>`);
+  }
+  flush(true);
+  return `<pre class="diff">${rows.join("")}</pre>`;
+}
+
+function renderConfigOverview(parsed) {
+  const quick = $("config-quick");
+  const box = $("config-overview");
+  if (!parsed) {
+    quick.hidden = true;
+    paint(box, `<div class="hint bad" style="margin:0 0 12px">原文不是合法 TOML —— 图形视图不可用，直接改下面的文本再保存</div>`);
+    return;
+  }
+  quick.hidden = !canWrite;
+  $("cfg-endpoint").value = parsed.node?.endpoint || "";
+  $("cfg-poll").value = parsed.runtime?.poll_interval ?? "";
+  $("cfg-watch").value = parsed.runtime?.watch_mode || "inotify";
+  const agents = Object.entries(parsed.agents || {});
+  const providers = Object.entries(parsed.providers || {});
+  const mcp = Object.keys(parsed.mcp || {});
+  const brain = (a) =>
+    a.bridge ? "bridge" : a.command ? "command" : a.provider ? `provider · ${a.provider}` : "echo";
+  paint(box, `<div class="cfg-grid">
+    <div class="cfg-card"><h4>节点</h4>
+      <div><b>${esc(parsed.node?.name || "?")}</b></div>
+      <div class="meta">${esc(parsed.node?.endpoint || "endpoint 自动识别")}</div></div>
+    <div class="cfg-card"><h4>运行时</h4>
+      <div class="meta">poll_interval ${esc(String(parsed.runtime?.poll_interval ?? "默认"))}</div>
+      <div class="meta">watch_mode ${esc(parsed.runtime?.watch_mode || "默认")}</div></div>
+    <div class="cfg-card"><h4>Agent × ${agents.length}</h4>
+      ${agents.map(([n, a]) => `<div class="meta">${esc(n)} · ${esc(a.role || "worker")} · ${esc(brain(a))}</div>`).join("") || `<div class="meta">无</div>`}
+      <div class="meta" style="margin-top:4px">增删启停在拓扑页</div></div>
+    <div class="cfg-card"><h4>Provider × ${providers.length}</h4>
+      ${providers.map(([n, pr]) => `<div class="meta">${esc(n)} · ${esc(pr.model || "")}</div>`).join("") || `<div class="meta">无</div>`}
+      <div class="meta" style="margin-top:4px">增删与密钥在模型页</div></div>
+    ${mcp.length ? `<div class="cfg-card"><h4>MCP × ${mcp.length}</h4>${mcp.map((n) => `<div class="meta">${esc(n)}</div>`).join("")}</div>` : ""}
+  </div>`);
+}
+
+async function loadConfig({ discard = false } = {}) {
   const node = $("config-node").value || state.node;
+  if (!discard && configView.loaded && $("config-text").value !== configView.loaded) {
+    const go = await ask(
+      "丢弃未保存的改动？",
+      ["原文编辑器里有还没保存的改动，重新读取会丢掉它们。"],
+      [{ label: "丢弃并重新读取", value: true, danger: true }],
+    );
+    if (go === null) { $("config-node").value = configView.node || state.node; return; }
+  }
   say("config-hint", node === state.node ? "" : `正在看 ${node} 的配置`);
   try {
-    const { text } = await api(u(`api/config?node=${encodeURIComponent(node)}`));
+    const { text, parsed } = await api(u(`api/config?node=${encodeURIComponent(node)}`));
+    configView.loaded = text;
+    configView.node = node;
     $("config-text").value = text;
+    renderConfigOverview(parsed);
+    markConfigDirty();
   } catch (err) {
     $("config-text").value = "";
     say("config-hint", String(err.message || err), "bad");
   }
 }
 
-$("config-node").addEventListener("change", loadConfig);
-$("config-reload").addEventListener("click", loadConfig);
+// 图形字段 → 原文手术 → 标脏。不直接保存：所有改动都走同一道 diff 关。
+function applyQuick(section, key, value) {
+  $("config-text").value = patchToml($("config-text").value, section, key, value);
+  markConfigDirty();
+  say("config-hint", "已写进下面的原文（还没保存）—— 点「保存」看 diff 确认");
+}
+
+$("cfg-endpoint").addEventListener("change", (e) => {
+  const v = e.target.value.trim();
+  applyQuick("node", "endpoint", v ? JSON.stringify(v) : "");
+});
+$("cfg-poll").addEventListener("change", (e) => {
+  const v = Number(e.target.value);
+  if (Number.isFinite(v) && v > 0) applyQuick("runtime", "poll_interval", String(v));
+});
+$("cfg-watch").addEventListener("change", (e) => {
+  applyQuick("runtime", "watch_mode", JSON.stringify(e.target.value));
+});
+$("config-text").addEventListener("input", markConfigDirty);
+
+$("config-node").addEventListener("change", () => loadConfig());
+$("config-reload").addEventListener("click", () => loadConfig());
 
 $("config-save").addEventListener("click", async () => {
   const button = $("config-save");
+  const node = $("config-node").value || state.node;
   button.disabled = true;
-  say("config-hint", "校验并保存中…");
   try {
-    const node = $("config-node").value || state.node;
-    await api(u("api/config"), {
-      method: "PUT",
-      body: JSON.stringify({ text: $("config-text").value, node }),
-    });
+    // diff 的基准取**磁盘上的最新版**，不是页面加载时那份 ——
+    // 中间别人（或别的页面）改过的话，这里会如实显示出来
+    const fresh = await api(u(`api/config?node=${encodeURIComponent(node)}`));
+    const mine = $("config-text").value;
+    if (fresh.text === mine) {
+      configView.loaded = mine;
+      markConfigDirty();
+      say("config-hint", "和磁盘上一字不差，没有需要保存的");
+      return;
+    }
+    const entries = diffLines(fresh.text, mine);
+    const changed = entries.filter((e) => e.type !== " ").length;
+    const go = await ask(
+      `保存到 ${node} 的 node.toml？`,
+      [`磁盘当前版 → 编辑器版，<b>${changed}</b> 行有改动：`, renderDiff(entries)],
+      [{ label: "保存这些改动", value: true }],
+    );
+    if (go === null) { say("config-hint", "没保存，磁盘没动"); return; }
+    say("config-hint", "校验并保存中…");
+    await api(u("api/config"), { method: "PUT", body: JSON.stringify({ text: mine, node }) });
+    await loadConfig({ discard: true });   // 概览与基准一起刷新
+    // 提示放在 loadConfig **之后** —— 它开头会把提示清掉，先说后刷等于没说
     say("config-hint", `已保存到 ${node}（上一版存为 node.toml.bak）；重启 agentd 后生效`, "ok");
   } catch (err) {
     // 校验没过时磁盘一个字都没改，把原因原样告诉人

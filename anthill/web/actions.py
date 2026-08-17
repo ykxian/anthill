@@ -183,7 +183,16 @@ async def _send(
 
 
 def read_config(layout: NodeLayout) -> dict[str, Any]:
-    return {"text": layout.node_toml.read_text(encoding="utf-8")}
+    """原文 + 解析后的结构 —— 页面拿后者画概览卡片和常用字段表单。
+
+    文件被改坏时更需要打开这一页修：原文照常给，`parsed` 置 null，
+    图形视图标不可用就行，别让整页 500。"""
+    text = layout.node_toml.read_text(encoding="utf-8")
+    try:
+        parsed: dict[str, Any] | None = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        parsed = None
+    return {"text": text, "parsed": parsed}
 
 
 def write_config(layout: NodeLayout, request: ConfigRequest) -> dict[str, Any]:

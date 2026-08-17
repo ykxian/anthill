@@ -761,3 +761,50 @@ def test_cancelling_a_wipe_really_does_nothing(browser: object, panel: str) -> N
 
     assert errors == []
     page.close()
+
+
+def test_saving_the_config_shows_a_git_style_diff_first(
+    browser: object, panel: str
+) -> None:
+    """保存配置前把「改了什么」摆出来 —— 删行红、加行绿，像 git diff。
+    看不见 diff 的保存等于闭眼签字：node.toml 改坏了所有 agentd 都起不来。
+    取消必须一个字都不写。"""
+    page, errors = open_panel(browser, panel)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+    page.click('.tab[data-pane="config"]')
+    page.wait_for_function(
+        "() => document.getElementById('config-text').value.includes('[node]')", timeout=15000
+    )
+
+    # 概览卡片画出来了（图形视图）
+    assert "节点" in (page.text_content("#config-overview") or "")
+
+    original = page.input_value("#config-text")
+    page.fill("#config-text", original + "\n# 面板加的测试注释\n")
+    assert not page.is_hidden("#config-dirty"), "改了没保存该有脏标记"
+
+    # 保存 → diff 确认框，新增行带 + 号
+    page.click("#config-save")
+    page.wait_for_selector("#ask .diff", timeout=5000)
+    diff = page.text_content("#ask-body") or ""
+    assert "面板加的测试注释" in diff and "+" in diff
+
+    # 取消：磁盘没动
+    page.click('#ask-choices [data-pick="cancel"]')
+    page.click("#config-reload")
+    page.wait_for_selector("#ask[open]", timeout=5000)   # 有脏改动，先问丢不丢
+    page.click('#ask-choices [data-pick="0"]')
+    page.wait_for_function(
+        "() => !document.getElementById('config-text').value.includes('测试注释')", timeout=5000
+    )
+
+    # 再来一遍，这次确认：保存成功
+    page.fill("#config-text", page.input_value("#config-text") + "\n# 面板加的测试注释\n")
+    page.click("#config-save")
+    page.wait_for_selector("#ask .diff", timeout=5000)
+    page.click('#ask-choices [data-pick="0"]')
+    page.wait_for_selector("#config-hint.ok", timeout=15000)
+    assert "已保存" in (page.text_content("#config-hint") or "")
+    assert page.is_hidden("#config-dirty"), "保存后脏标记该消失"
+    assert errors == []
+    page.close()

@@ -635,8 +635,14 @@ def mount_panel_actions(
             speaker = nodes.speaker_for(node)
             return await _remote(remote_read_config(speaker.config, speaker.peers, node))
         ctx = _pick(nodes, node)
+        # 文件被改坏时 ctx.name（活配置）会在重读时抛解析错 —— 而这一页
+        # 恰恰是修坏文件的地方，名字退回注册名，原文照常给
         try:
-            return {"node": ctx.name, **read_config(ctx.layout)}
+            name = ctx.name
+        except Exception:  # noqa: BLE001 - 坏 TOML / 缺文件都只影响显示名
+            name = node or nodes.primary_name
+        try:
+            return {"node": name, **read_config(ctx.layout)}
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"读不出配置：{exc}") from exc
 

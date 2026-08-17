@@ -480,3 +480,33 @@ async def test_other_lan_hosts_are_still_refused(
         response = await client.post("/panel/api/run", json={"task": "别人的机器"})
 
     assert response.status_code == 403
+
+
+# ---------- 配置页的图形视图 ----------
+
+
+async def test_the_config_comes_with_a_parsed_view(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    """页面要画概览卡片和常用字段表单，不能靠前端自己解析 TOML ——
+    服务端本来就会解析，顺手把结构给出去。"""
+    async with client_for(node) as client:
+        body = (await client.get("/panel/api/config")).json()
+
+    assert body["parsed"]["node"]["name"] == "laptop"
+    assert "agents" in body["parsed"]
+
+
+async def test_a_broken_config_still_shows_its_text(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    """文件被改坏时更需要打开这一页修 —— 原文必须照常给，图形视图标不可用。"""
+    layout, _, _ = node
+
+    async with client_for(node) as client:
+        # 先起服务再改坏文件 —— 真实场景就是运行中被改坏
+        layout.node_toml.write_text("这不是 toml [", encoding="utf-8")
+        body = (await client.get("/panel/api/config")).json()
+
+    assert "这不是 toml" in body["text"]
+    assert body["parsed"] is None

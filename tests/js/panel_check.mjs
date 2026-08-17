@@ -91,7 +91,7 @@ const panel = new Function(
   "setTimeout",
   // setWrite：写权限开着时拓扑会多画启停/删除按钮和「加 Agent」表单，
   // 那几处也把外部数据拼进了 HTML，必须一起验
-  `${script}\nreturn { state, local, topoOpen, draw, applyCluster, applyLocal, renderWorkspaces, chat, renderChat, setWrite: (v) => { canWrite = v; } };`,
+  `${script}\nreturn { state, local, topoOpen, draw, applyCluster, applyLocal, renderWorkspaces, chat, renderChat, patchToml, diffLines, renderDiff, setWrite: (v) => { canWrite = v; } };`,
 )(document, window, localStorage, history, URL, location, fetch, WebSocket, noop, noop);
 
 // ---- 数据 ----
@@ -435,5 +435,24 @@ assert.ok(
 
 panel.chat.data = { threads: [] };
 panel.renderChat();
+
+// ---- 配置页：文本手术 + git 式 diff ----
+// 图形字段改的是**原文**（注释和未知节区原样保留），保存前一律过 diff 关
+const TOML = '[node]\nname = "x"\n\n[runtime]\npoll_interval = 0.5\n';
+assert.ok(panel.patchToml(TOML, "runtime", "poll_interval", "2").includes("poll_interval = 2"));
+assert.ok(!panel.patchToml(TOML, "runtime", "poll_interval", "2").includes("0.5"));
+const inserted = panel.patchToml(TOML, "node", "endpoint", '"http://a:1"');
+assert.ok(inserted.includes('endpoint = "http://a:1"') && inserted.indexOf("endpoint") < inserted.indexOf("[runtime]"),
+  "缺的 key 该插进对应节区，不是文件末尾");
+assert.ok(panel.patchToml('[node]\nname = "x"\n', "runtime", "watch_mode", '"poll"').includes("[runtime]"),
+  "缺的节区要整个补出来");
+assert.ok(!panel.patchToml('[node]\nname = "x"\nendpoint = "e"\n', "node", "endpoint", "").includes("endpoint"),
+  "空值 = 删掉那一行");
+assert.ok(panel.patchToml(TOML, "node", "name", '"y"').includes("# 注释也不能丢") === false, "冒烟");
+
+const d = panel.diffLines("a\nb\nc", "a\nX\nc");
+assert.deepEqual(d.map((x) => x.type), [" ", "-", "+", " "], "diff 分类不对");
+assert.ok(!panel.renderDiff([{ type: "-", line: EVIL }]).includes("<img"), "diff 行没转义");
+assert.ok(panel.renderDiff(panel.diffLines("a", "b")).includes("diff"), "diff 容器该在");
 
 console.log("ok");
