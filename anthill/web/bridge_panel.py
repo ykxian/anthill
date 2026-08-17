@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from anthill.adapters.bridge import BRIDGE_DIR, BridgeHandler, parse_note
 from anthill.adapters.bridge_connect import connect_recipes, watch_prompt
-from anthill.adapters.bridge_history import recent
+from anthill.adapters.bridge_history import BODY_LIMIT, recent
 from anthill.adapters.bridge_session import last_claim, read_claim
 from anthill.core.config import Config
 from anthill.core.errors import AntHillError
@@ -28,7 +28,6 @@ from anthill.core.ids import is_valid_id, new_id
 from anthill.core.paths import NodeLayout
 
 MAX_BODY = 32_000
-PREVIEW = 400
 
 
 class BridgeReply(BaseModel):
@@ -61,6 +60,9 @@ def inbox(layout: NodeLayout, config: Config, agent: str) -> dict[str, Any]:
     waiting = []
     for path in sorted(handler.dir("inbox").glob("*.md")):
         headers, body = parse_note(path.read_text(encoding="utf-8"))
+        # 换行原样保留（这是要人读完再回的正文，不是一行摘要）；
+        # 以前 400 字一刀还压平换行，长审查意见只剩开头一段残句
+        tidy = body.strip()
         waiting.append(
             {
                 "id": path.stem,
@@ -68,7 +70,8 @@ def inbox(layout: NodeLayout, config: Config, agent: str) -> dict[str, Any]:
                 "frm": headers.get("from", ""),
                 "type": headers.get("type", ""),
                 "thread": headers.get("thread", ""),
-                "body": " ".join(body.split())[:PREVIEW],
+                "body": tidy[:BODY_LIMIT],
+                "clipped": len(tidy) > BODY_LIMIT,
             }
         )
     return {

@@ -424,6 +424,15 @@ panel.chat.data = {
 };
 panel.renderChat();
 assert.ok(!$("chat-body").innerHTML.includes("<img"), "对话分组里有没转义的工作区名");
+// 一页空对话 + 一家读不到：不能静默 —— 段数栏平时只在有对话时才说话，
+// 空的时候更要把「有一家没读出来」说出口，不然人以为真的什么都没有
+panel.chat.data = { threads: [], broken: ["坏了的家"] };
+panel.renderChat();
+assert.ok(
+  $("chat-count").textContent.includes("坏了的家"),
+  "空对话时读不到的工作区被静默了",
+);
+
 panel.chat.data = { threads: [] };
 panel.renderChat();
 

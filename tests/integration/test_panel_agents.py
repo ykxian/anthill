@@ -472,3 +472,34 @@ async def test_a_reply_cannot_be_steered_out_of_the_bridge_directory(tmp_path: P
 
     assert response.status_code in (400, 404)
     assert outside.read_text(encoding="utf-8") == "原文"
+
+
+async def test_a_long_waiting_message_keeps_its_text_and_line_breaks(tmp_path: Path) -> None:
+    """在等人回的消息也一样：400 字一刀 + 换行压平，长审查意见在页面上
+    只剩开头一段残句 —— 人还以为对方只说了这些。"""
+    node = bridge_node(tmp_path)
+    inbox = node[0].agent_dir("cc") / "bridge" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    body = "第一点\n第二点\n" + "审" * 4100
+    (inbox / "01KZ000000000000000000000B.md").write_text(
+        f"---\nfrom: box:cli\nto: box:cc\ntype: chat\nthread: T1\n---\n{body}\n",
+        encoding="utf-8",
+    )
+
+    async with client_for(node) as client:
+        got = (await client.get("/panel/api/bridge/cc")).json()["waiting"][0]
+
+    assert "第一点\n第二点" in got["body"], "换行被压平了"
+    assert len(got["body"]) >= 4000, "还没到上限就被截了"
+    assert got["clipped"] is True, "截了得说一声"
+
+
+async def test_a_short_waiting_message_is_not_marked_clipped(tmp_path: Path) -> None:
+    node = bridge_node(tmp_path)
+    waiting_note(node[0])
+
+    async with client_for(node) as client:
+        got = (await client.get("/panel/api/bridge/cc")).json()["waiting"][0]
+
+    assert got["clipped"] is False
+    assert got["body"] == "这块接口我想改成异步的，你那边有依赖吗"

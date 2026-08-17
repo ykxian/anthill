@@ -1171,10 +1171,13 @@ function syncAgentPicker() {
 function renderChat() {
   const all = chat.data.threads || [];
   const shown = all.filter(matchesChat);
+  // 「读不到」空对话时也要说 —— 段数栏平时只在有对话时说话，
+  // 空的时候不说这一句，人会以为真的什么都没有
+  const brokenNote = (chat.data.broken || []).length
+    ? `（${chat.data.broken.join("、")} 读不到）` : "";
   $("chat-count").textContent = all.length
-    ? `${shown.length} 段` + (chat.data.truncated ? "（只读了最近一批）" : "")
-      + ((chat.data.broken || []).length ? `（${chat.data.broken.join("、")} 读不到）` : "")
-    : "";
+    ? `${shown.length} 段` + (chat.data.truncated ? "（只读了最近一批）" : "") + brokenNote
+    : brokenNote;
   const body = $("chat-body");
   const pinned = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
   // 好几个工作区时按工作区分组 —— 各家的 cli/echo 重名，一屏「cli ↔ echo」
@@ -1282,7 +1285,9 @@ async function loadChat() {
     // 对话记录分散在每个工作区自己的 .anthill/ 里 —— 各拉各的，拼成一页。
     // 一家读不到不该拖垮整页：跳过它，在段数旁边说一声。
     const locals = state.nodes.filter((n) => n.local).map((n) => n.node);
-    const wanted = locals.length ? locals : [""];
+    // 刚开页、快照还没到时退化为单批 —— ws 标签尽力用已知的主节点名兜底，
+    // 别标空串：空串会让本该显示短名的同工作区地址全按「别家」摆完整身份
+    const wanted = locals.length ? locals : [state.node || ""];
     const batches = await Promise.all(wanted.map(async (ws) => {
       try {
         return { ws, data: await api(u(ws ? `api/traffic?node=${encodeURIComponent(ws)}` : "api/traffic")) };
@@ -1661,6 +1666,7 @@ function renderLog(history) {
           <span class="who">${who}</span>
           <span class="pill">${esc(x.kind || "chat")}</span>
           ${x.failed ? `<span class="pill bad">发送失败</span>` : ""}
+          ${x.clipped ? `<span class="pill" title="原文超过显示上限，完整的在归档文件里">有截断</span>` : ""}
           ${x.direction === "in" && !x.answered ? `<span class="pill">没回</span>` : ""}
           <span class="grow"></span>
           <span class="meta">${esc(fmtStamp(x.ts))} ${esc(x.short || "")}</span>
@@ -1694,6 +1700,7 @@ function renderBridge(info) {
           <span class="meta">${esc(w.short)}</span>
         </div>
         <div class="said">${esc(w.body)}</div>
+        ${w.clipped ? `<div class="meta">……原文更长，这里只显示前一段（完整的在它的 inbox 文件里）</div>` : ""}
         <textarea data-reply="${esc(w.id)}" placeholder="替它回一句…"></textarea>
         <div class="actions" style="margin-top:8px">
           <button type="button" data-send-reply="${esc(w.id)}">回复</button>

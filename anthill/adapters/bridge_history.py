@@ -31,8 +31,12 @@ from anthill.core.errors import AntHillError
 from anthill.core.ids import is_valid_id
 
 DEFAULT_LIMIT = 40
-BODY_PREVIEW = 500
 FAILED_SUFFIX = ".failed"
+
+# 正文上限，对齐对话页（web/chat.py 的 BODY_LIMIT）。以前是 500 字还把换行
+# 压平 —— 审查意见这类消息动辄上千字、靠换行分点，截完只剩开头一段残句，
+# 页面上还看不出被截过。真截了就在记录里说一声（clipped）。
+BODY_LIMIT = 4000
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +54,9 @@ class Exchange:
     incoming: str
     reply: str
     failed: bool
+    clipped: bool
+    """正文超过 BODY_LIMIT 被截过 —— 页面靠它标出「原文更长」。"""
+
     at: float
     """排序用的时刻（epoch 秒）。**不是文件的 mtime** —— 见 `recent`。"""
 
@@ -66,6 +73,7 @@ class Exchange:
             "reply": self.reply,
             "answered": bool(self.reply),
             "failed": self.failed,
+            "clipped": self.clipped,
         }
 
 
@@ -128,6 +136,8 @@ def _read(done: Path, stem: str, *, fallback_at: float) -> Exchange | None:
         # front matter（`id:` 等于文件名），那就说明这条根本没被回复过就归档了
         # （对话到头、hop 用尽）。这个判据比「文件在不在」可靠。
         answered = headers.get("id", "") != stem
+        incoming, in_cut = _clip(_body_of(envelope))
+        reply, reply_cut = _clip(body) if answered else ("", False)
         return Exchange(
             id=envelope.id,
             ts=envelope.ts.isoformat(),
@@ -135,9 +145,10 @@ def _read(done: Path, stem: str, *, fallback_at: float) -> Exchange | None:
             peer=str(envelope.from_),
             kind=str(envelope.type),
             thread=envelope.thread,
-            incoming=_clip(_body_of(envelope)),
-            reply=_clip(body) if answered else "",
+            incoming=incoming,
+            reply=reply,
             failed=failed,
+            clipped=in_cut or reply_cut,
             at=envelope.ts.timestamp(),
         )
 
@@ -146,6 +157,7 @@ def _read(done: Path, stem: str, *, fallback_at: float) -> Exchange | None:
     # 没有配对信封 = 主动发起的那条（文件名是随手起的）。
     # 它没有信封时刻，只能拿归档时刻顶上 —— 而那对「自己发出去的」恰好是准的：
     # 主动发的消息写进 outbox 就立刻被发走、归档，两个时刻差不了几秒。
+    sent, sent_cut = _clip(body)
     return Exchange(
         id=stem if is_valid_id(stem) else "",
         ts=_iso(fallback_at),
@@ -154,8 +166,9 @@ def _read(done: Path, stem: str, *, fallback_at: float) -> Exchange | None:
         kind=headers.get("type", "chat"),
         thread=headers.get("thread", ""),
         incoming="",
-        reply=_clip(body),
+        reply=sent,
         failed=failed,
+        clipped=sent_cut,
         at=fallback_at,
     )
 
@@ -186,8 +199,10 @@ def _body_of(env: Envelope) -> str:
     return str(getattr(payload, "body", "") or getattr(payload, "summary", "") or "").strip()
 
 
-def _clip(text: str) -> str:
-    return " ".join(text.split())[:BODY_PREVIEW]
+def _clip(text: str) -> tuple[str, bool]:
+    """截到上限，**换行原样保留** —— 这是对话正文，不是一行摘要。"""
+    tidy = text.strip()
+    return tidy[:BODY_LIMIT], len(tidy) > BODY_LIMIT
 
 
 def _iso(epoch: float) -> str:

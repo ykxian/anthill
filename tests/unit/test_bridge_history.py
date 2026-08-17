@@ -142,3 +142,28 @@ def test_ordered_by_when_it_happened_not_when_it_was_filed(tmp_path: Path) -> No
 def test_missing_archive_is_empty_not_an_error(tmp_path: Path) -> None:
     # Act / Assert
     assert recent(tmp_path / "nope") == []
+
+
+def test_long_bodies_keep_their_text_and_line_breaks(tmp_path: Path) -> None:
+    """审查意见这类消息动辄上千字、靠换行分点 —— 500 字一刀再把换行压平，
+    页面上读到的就是残句，还看不出被截过。上限对齐对话页（4000），
+    换行原样保留，真截了要在数据里说一声。
+    """
+    body = "第一点\n第二点\n" + "审" * 4100
+    env = _incoming(body)
+    _archive(tmp_path, env, reply="收到\n分行回你\n" + "回" * 4100)
+
+    (record,) = recent(tmp_path)
+    assert "第一点\n第二点" in record["incoming"], "换行被压平了"
+    assert len(record["incoming"]) >= 4000, "还没到上限就被截了"
+    assert "收到\n分行回你" in record["reply"]
+    assert record["clipped"] is True, "截了得说一声"
+
+
+def test_short_bodies_are_not_marked_clipped(tmp_path: Path) -> None:
+    env = _incoming("短消息\n两行")
+    _archive(tmp_path, env, reply=None)
+
+    (record,) = recent(tmp_path)
+    assert record["incoming"] == "短消息\n两行"
+    assert record["clipped"] is False
