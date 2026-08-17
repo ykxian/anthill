@@ -636,6 +636,40 @@ def bridge_in_second(tmp_path: Path) -> Iterator[str]:
     yield from serve(first, home=home)
 
 
+def test_chat_groups_conversations_by_workspace(
+    browser: object, two_workspaces: str
+) -> None:
+    """一台机器好几个工作区，各家的 cli/echo 重名 —— 对话页把所有工作区的
+    对话拼成一页、按工作区分组，组里才敢用短名。
+
+    只有一个工作区有对话时不出组头：单机用户的页面不该多一层没意义的壳。
+    """
+    page, errors = open_panel(browser, two_workspaces)
+    page.wait_for_selector("#topo-body .node-group", timeout=15000)
+    page.click('.tab[data-pane="chat"]')
+
+    # 第一家：以主节点（collab）身份发一条 —— 多工作区时收件人取值带工作区前缀
+    page.select_option("#chat-to", "collab:echo")
+    page.fill("#chat-input", "第一家的消息")
+    page.click('#chat-form button[type="submit"]')
+    page.wait_for_selector("#chat-body .convo", timeout=15000)
+    assert page.query_selector("#chat-body .chat-ws") is None, "只有一家有对话时不该出组头"
+
+    # 第二家：切到 collab-tst 再发一条
+    page.click('[data-focus-node="collab-tst"]')
+    page.select_option("#chat-to", "collab-tst:echo")
+    page.fill("#chat-input", "第二家的消息")
+    page.click('#chat-form button[type="submit"]')
+    page.wait_for_function(
+        "() => document.querySelectorAll('#chat-body .chat-ws').length >= 2",
+        timeout=15000,
+    )
+    body = page.text_content("#chat-body")
+    assert "第一家的消息" in body and "第二家的消息" in body, "两家的对话该在同一页"
+    assert errors == []
+    page.close()
+
+
 def test_the_bridge_tab_follows_the_focused_workspace(
     browser: object, bridge_in_second: str
 ) -> None:

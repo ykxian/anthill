@@ -91,7 +91,7 @@ const panel = new Function(
   "setTimeout",
   // setWrite：写权限开着时拓扑会多画启停/删除按钮和「加 Agent」表单，
   // 那几处也把外部数据拼进了 HTML，必须一起验
-  `${script}\nreturn { state, local, topoOpen, draw, applyCluster, applyLocal, renderWorkspaces, setWrite: (v) => { canWrite = v; } };`,
+  `${script}\nreturn { state, local, topoOpen, draw, applyCluster, applyLocal, renderWorkspaces, chat, renderChat, setWrite: (v) => { canWrite = v; } };`,
 )(document, window, localStorage, history, URL, location, fetch, WebSocket, noop, noop);
 
 // ---- 数据 ----
@@ -383,5 +383,48 @@ assert.ok(
   $("ws-list").innerHTML.includes("data-ws-row="),
   "工作区行少了 data-ws-row 身份 —— 行内报错要靠它找到出错的那一行",
 );
+
+// ---- 对话按工作区分组：一台机器好几个工作区，各家的 cli/echo 重名，
+// 不标工作区的话一屏「cli ↔ echo」根本分不清是谁家的 ----
+const msg = (frm, body) => ({ frm, body, ts: "" });
+panel.chat.data = {
+  threads: [
+    {
+      thread: "t1", short: "T1", ws: "alpha-ws", count: 1, last: "",
+      peers: ["alpha-ws:cli", "alpha-ws:echo"],
+      messages: [msg("alpha-ws:echo", "自家的")],
+    },
+    {
+      thread: "t2", short: "T2", ws: "beta-ws", count: 1, last: "",
+      peers: ["beta-ws:cli", "alpha-ws:tst9"],
+      messages: [msg("alpha-ws:tst9", "跨工作区来的")],
+    },
+  ],
+};
+panel.renderChat();
+let convo = $("chat-body").innerHTML;
+assert.ok(convo.includes('class="chat-ws"'), "多工作区时对话没按工作区分组");
+assert.ok(convo.includes("alpha-ws") && convo.includes("beta-ws"), "分组标题少了工作区名");
+assert.ok(!convo.includes("alpha-ws:echo"), "同工作区的 agent 该显示短名");
+assert.ok(convo.includes("alpha-ws:tst9"), "跨工作区的 agent 必须带完整身份，不然重名分不清");
+
+// 只有一个工作区时不摆分组标题 —— 单机用户的页面不该多出一层没意义的壳
+panel.chat.data.threads.forEach((t) => { t.ws = "solo"; });
+panel.renderChat();
+assert.ok(!$("chat-body").innerHTML.includes('class="chat-ws"'), "单工作区不该出分组标题");
+
+// 工作区名也是外部数据（目录名、node.toml），进 HTML 前要转义
+panel.chat.data = {
+  threads: [{
+    thread: "t3", short: "T3", ws: EVIL, count: 1, last: "",
+    peers: [`${EVIL}:cli`, "x:y"], messages: [msg(`${EVIL}:cli`, EVIL)],
+  }, {
+    thread: "t4", short: "T4", ws: "别家", count: 1, last: "", peers: ["别家:cli"], messages: [],
+  }],
+};
+panel.renderChat();
+assert.ok(!$("chat-body").innerHTML.includes("<img"), "对话分组里有没转义的工作区名");
+panel.chat.data = { threads: [] };
+panel.renderChat();
 
 console.log("ok");
