@@ -276,6 +276,9 @@ class RuntimeSection(_Section):
     poll_interval: float = Field(default=DEFAULT_POLL_INTERVAL, gt=0)
     task_timeout: float = Field(default=DEFAULT_TASK_TIMEOUT, gt=0)
     watch_mode: Literal["auto", "inotify", "poll"] = "auto"
+    # 定期卫生（core/hygiene.py）：role=user 信箱的保留时长与记录类文件的保留天数
+    mailbox_keep_hours: float = Field(default=24.0, gt=0)
+    records_keep_days: float = Field(default=30.0, gt=0)
     spool_unroutable: bool = False
     """路由不到的目标改为暂存，等对方 `anthill pull` 来取。
 

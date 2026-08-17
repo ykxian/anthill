@@ -351,6 +351,7 @@ async def _serve(
         asyncio.create_task(_status_loop(nodes, log, stop, enabled=summary), name="status"),
         asyncio.create_task(_pull_loop(nodes, log, stop), name="pull"),
         asyncio.create_task(_schedule_loop(nodes, log, stop), name="schedule"),
+        asyncio.create_task(_hygiene_loop(nodes, log, stop), name="hygiene"),
         asyncio.create_task(stop.wait(), name="stop"),
     ]
     http = tasks[0]
@@ -528,3 +529,32 @@ async def _fire(ctx: Any, name: str, schedule: Any, log: EventLog) -> None:
     request = RunRequest(task=goal, to=schedule.to or "")
     result = await start_run(ctx.layout, ctx.config, request, log)
     log.info("schedule.fired", node=ctx.name, schedule=name, msg=result.get("id", ""))
+
+
+HYGIENE_INTERVAL = 3600.0
+"""定期卫生一小时一轮 —— 清理不该占资源，也不该攒到 doctor 天天报积压。"""
+
+
+async def _hygiene_loop(nodes: NodeRegistry, log: EventLog, stop: asyncio.Event) -> None:
+    """每小时对每个照看的工作区做一次卫生（core/hygiene.py）。
+
+    和状态循环同一条纪律：**清不动绝不能把 serve 带走** —— 磁盘抖一下
+    只该让这一轮少清几个文件，不该让节点停止收消息。
+    """
+    from anthill.core.hygiene import sweep_bridge_done, sweep_records, sweep_user_mailboxes
+
+    while not stop.is_set():
+        for ctx in nodes.all():
+            try:
+                config = ctx.config
+                keep_hours = config.runtime.mailbox_keep_hours
+                keep_days = config.runtime.records_keep_days
+                moved = sweep_user_mailboxes(ctx.layout, config, keep_hours=keep_hours)
+                pruned = sweep_records(ctx.layout, keep_days=keep_days)
+                pruned += sweep_bridge_done(ctx.layout, config, keep_days=keep_days)
+                if moved or pruned:
+                    log.info("hygiene.swept", node=ctx.name, archived=moved, pruned=pruned)
+            except Exception as exc:
+                log.warn("hygiene.failed", node=getattr(ctx, "name", "?"), error=str(exc))
+        with suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=HYGIENE_INTERVAL)
