@@ -56,6 +56,8 @@ def watch_prompt(layout: NodeLayout, agent: str) -> str:
         "\n"
         "被唤起后：读那条消息 → 回复 → **再往后台放一条同样的命令**，如此循环：\n"
         f'  {exe} bridge {agent} --reply <消息id> --text "你的回复" -w {workspace}\n'
+        "纯回执（「收到」「无需回复」这类）**别回** —— 回了对方还得再回执，没有终点；\n"
+        f"用 --ack 清掉它再重新挂监听：{exe} bridge {agent} --ack <消息id> -w {workspace}\n"
         "\n"
         "等消息的时候我照常可以让你干别的活，你不用一直卡在等待里。\n"
         f'想主动找别人说话：{exe} bridge {agent} --to <对方> --text "..." -w {workspace}\n'

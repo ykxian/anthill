@@ -321,3 +321,54 @@ def test_the_refusal_says_all_three_ways_out(
     assert "ANTHILL_AGENT" in message  # 换一个
     assert "再建一个" in message  # 加一个
     assert "ANTHILL_TAKEOVER" in message  # 接管
+
+
+# ---------- 等新消息：别被「已经回过草稿」的待办叫醒 ----------
+
+
+def test_wait_skips_messages_that_already_have_a_draft(tmp_path: Path) -> None:
+    """`--reply` 完立刻挂 `--wait` 的竞态：草稿还没被 tick 送出、待办还在
+    inbox 里，wait 一启动就退出 —— 白醒一轮，还得再挂一次。
+    有同名回复草稿的待办已经是「处理过的」，不该再当新消息叫醒人。
+    """
+    inbox = tmp_path / "inbox"
+    outbox = tmp_path / "outbox"
+    inbox.mkdir()
+    outbox.mkdir()
+    (inbox / "01A.md").write_text("找你", encoding="utf-8")
+    (outbox / "01A.md").write_text("回过了", encoding="utf-8")
+
+    assert wait_for_message(inbox, timeout=1.0, drafted=outbox) == []
+
+
+def test_wait_still_wakes_for_a_message_without_a_draft(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    outbox = tmp_path / "outbox"
+    inbox.mkdir()
+    outbox.mkdir()
+    (inbox / "01A.md").write_text("回过", encoding="utf-8")
+    (outbox / "01A.md").write_text("草稿", encoding="utf-8")
+    (inbox / "01B.md").write_text("新的", encoding="utf-8")
+
+    found = wait_for_message(inbox, timeout=1.0, drafted=outbox)
+
+    assert [p.name for p in found] == ["01B.md"]
+
+
+def test_wait_sees_the_message_again_after_its_draft_fails(tmp_path: Path) -> None:
+    """发送失败时 tick 会把草稿改名挪进 done/（.failed）—— outbox 里没了，
+    跳过条件自动失效，那条待办重新可见。**这是这个设计安全的前提**：
+    任何失败路径若让原名草稿滞留 outbox，待办就被永久跳过、消息静默失踪。
+    """
+    inbox = tmp_path / "inbox"
+    outbox = tmp_path / "outbox"
+    inbox.mkdir()
+    outbox.mkdir()
+    (inbox / "01A.md").write_text("找你", encoding="utf-8")
+    (outbox / "01A.md").write_text("要发的", encoding="utf-8")
+    assert wait_for_message(inbox, timeout=1.0, drafted=outbox) == []
+
+    (outbox / "01A.md").unlink()  # tick 失败路径：_archive(suffix=".failed") 挪走原文件
+
+    found = wait_for_message(inbox, timeout=1.0, drafted=outbox)
+    assert [p.name for p in found] == ["01A.md"]

@@ -233,6 +233,9 @@ def bridge_command(
         "", help="桥接 Agent 名；留空 = 用 $ANTHILL_AGENT，再没有就自动认领一个没人占的"
     ),
     reply: str = typer.Option("", "--reply", help="回复哪一条（信封 id，可只给后 6 位）"),
+    ack: str = typer.Option(
+        "", "--ack", help="无声确认哪一条：直接归档，不发任何回复（纯回执类消息用）"
+    ),
     text: str = typer.Option("", "--text", help="回复正文；留空则只列出待办"),
     to: str = typer.Option("", "--to", help="主动发一条：收件人"),
     kind: str = typer.Option("chat", "--kind", help="主动发一条时：chat 或 task"),
@@ -274,10 +277,12 @@ def bridge_command(
 
     handler = BridgeHandler(root=layout.agent_dir(agent), agent_name=agent)
 
-    if wait != 0 and not (to or reply):
+    if wait != 0 and not (to or reply or ack):
         # 阻塞到有东西为止。**这就是「一直盯着」缺的那块** ——
         # MCP 与 hook 都是拉取式的，会话闲着时没有任何东西会把它叫醒。
-        wait_for_message(handler.dir("inbox"), timeout=wait)
+        # drafted：已写好回复草稿的待办不算「新消息」，不然 --reply 完
+        # 立刻挂 --wait 必然立即退出（草稿要下一轮 tick 才送出）。
+        wait_for_message(handler.dir("inbox"), timeout=wait, drafted=handler.dir("outbox"))
 
     if to:
         _draft(
@@ -294,6 +299,29 @@ def bridge_command(
             fail(f"{reply!r} 匹配到 {len(match)} 条待回复；用 `anthill bridge {agent}` 看看列表")
         _draft(handler, match[0].name, text or "")
         console.print(f"[bold green]✓[/bold green] 已写好回复 {match[0].stem[-6:]}")
+        return
+    if ack:
+        # 纯回执消息（「收到」「无需回复」）回一句只会在对方队列里生成新待办，
+        # 对方再回执，循环没有终点 —— 以前只能手动 mv 文件清掉，现在收进协议。
+        pending = _pending(handler)
+        match = [p for p in pending if p.stem.endswith(ack) or p.stem == ack]
+        if len(match) != 1:
+            fail(f"{ack!r} 匹配到 {len(match)} 条待回复；用 `anthill bridge {agent}` 看看列表")
+        note = match[0]
+        if (handler.dir("outbox") / note.name).is_file():
+            # 又写了回复草稿又要无声确认 —— 意图矛盾，谁都不替谁做主
+            fail(
+                f"{note.stem[-6:]} 在 outbox 里已有回复草稿；"
+                f"想回就等它发出，想清掉就先删草稿再 --ack"
+            )
+        done = handler.dir("done")
+        # 先挪信封再挪正文：两步之间崩溃时 inbox 里还留着 .md，
+        # 待办仍可见、重跑一次 --ack 就补齐；反过来会留孤儿信封在 pending
+        envelope = handler.dir("pending") / f"{note.stem}.json"
+        if envelope.is_file():
+            envelope.replace(done / envelope.name)
+        note.replace(done / note.name)
+        console.print(f"[bold green]✓[/bold green] 已确认 {note.stem[-6:]}，不发回复")
         return
 
     if as_json:

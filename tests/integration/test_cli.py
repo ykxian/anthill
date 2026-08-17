@@ -163,3 +163,68 @@ def test_agent_list_shows_what_each_brain_actually_is(workspace: Path):
     assert result.exit_code == 0
     assert "bridge" in result.output
     assert "claude" in result.output
+
+
+# ---------- bridge --ack：协议内的无声确认 ----------
+#
+# 纯回执消息（「收到」「无需回复」）以前只能靠手动 mv 文件清掉 ——
+# 回一句会在对方队列里生成新待办，对方再回执，循环没有终点。
+
+
+def bridge_workspace(tmp_path: Path) -> Path:
+    result = runner.invoke(app, ["init", str(tmp_path), "--node-name", "box"])
+    assert result.exit_code == 0, result.output
+    toml = NodeLayout(tmp_path).node_toml
+    toml.write_text(
+        toml.read_text(encoding="utf-8") + '\n[agents.cc]\nrole = "worker"\nbridge = true\n',
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+def seed_pending(workspace: Path, msg_id: str = "01KZ000000000000000000AAAA") -> Path:
+    bridge = NodeLayout(workspace).agent_dir("cc") / "bridge"
+    (bridge / "inbox").mkdir(parents=True, exist_ok=True)
+    (bridge / "pending").mkdir(parents=True, exist_ok=True)
+    (bridge / "inbox" / f"{msg_id}.md").write_text(
+        f"---\nfrom: box:cli\nid: {msg_id}\n---\n收到，无需回复\n", encoding="utf-8"
+    )
+    (bridge / "pending" / f"{msg_id}.json").write_text("{}", encoding="utf-8")
+    return bridge
+
+
+def test_bridge_ack_clears_a_message_without_replying(tmp_path: Path):
+    workspace = bridge_workspace(tmp_path)
+    bridge = seed_pending(workspace)
+
+    result = runner.invoke(app, ["bridge", "cc", "--ack", "00AAAA", "-w", str(workspace)])
+
+    assert result.exit_code == 0, result.output
+    assert not list((bridge / "inbox").glob("*.md")), "确认后 inbox 该清空"
+    assert not list((bridge / "pending").glob("*.json")), "确认后 pending 该清空"
+    assert not list((bridge / "outbox").glob("*.md")), "无声确认不该发任何东西"
+    assert (bridge / "done" / "01KZ000000000000000000AAAA.md").is_file(), "确认的消息该归档"
+
+
+def test_bridge_ack_refuses_when_a_reply_draft_exists(tmp_path: Path):
+    """又写了回复草稿又要无声确认 —— 意图矛盾，拒绝并让人自己拿主意。"""
+    workspace = bridge_workspace(tmp_path)
+    bridge = seed_pending(workspace)
+    (bridge / "outbox").mkdir(parents=True, exist_ok=True)
+    (bridge / "outbox" / "01KZ000000000000000000AAAA.md").write_text("想回的话", encoding="utf-8")
+
+    result = runner.invoke(app, ["bridge", "cc", "--ack", "00AAAA", "-w", str(workspace)])
+
+    assert result.exit_code != 0
+    assert "草稿" in result.output
+    assert (bridge / "inbox" / "01KZ000000000000000000AAAA.md").is_file(), "拒绝时什么都不该动"
+    assert (bridge / "outbox" / "01KZ000000000000000000AAAA.md").is_file()
+
+
+def test_bridge_ack_with_an_unknown_id_fails(tmp_path: Path):
+    workspace = bridge_workspace(tmp_path)
+    seed_pending(workspace)
+
+    result = runner.invoke(app, ["bridge", "cc", "--ack", "ZZZZZZ", "-w", str(workspace)])
+
+    assert result.exit_code != 0

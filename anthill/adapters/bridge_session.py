@@ -222,7 +222,11 @@ def workspace_from_env() -> Path | None:
 
 
 def wait_for_message(
-    inbox: Path, *, timeout: float = DEFAULT_WAIT, known: set[str] | None = None
+    inbox: Path,
+    *,
+    timeout: float = DEFAULT_WAIT,
+    known: set[str] | None = None,
+    drafted: Path | None = None,
 ) -> list[Path]:
     """阻塞到收件箱里有东西为止。返回那些 `.md`；超时返回空。
 
@@ -239,12 +243,22 @@ def wait_for_message(
     实现是轮询而不是 inotify：这条路要跨 NFS（学校服务器的 home 就是），
     而远端写入根本不产生本地 inotify 事件 —— watcher 那边为此专门做过降级。
     半秒一次的 `iterdir` 换来「哪儿都能用」，值。
+
+    `drafted` 给的是 outbox 目录：**有同名回复草稿的待办已经是「处理过的」**，
+    不再当新消息叫醒人 —— 否则 `--reply` 完立刻挂 `--wait` 必然立即退出
+    （草稿要下一轮 tick 才送出、待办才归档），白醒一轮还得再挂。
+    每轮循环里现查（不是启动时快照）：tick 把草稿送走或改名 `.failed` 后，
+    条件自动失效 —— 发送失败的待办会重新变得可见，不会静默失踪。
     """
     seen = known if known is not None else set()
     deadline = None if timeout < 0 else time.monotonic() + timeout
     while True:
         try:
-            fresh = [p for p in sorted(inbox.glob("*.md")) if p.name not in seen]
+            fresh = [
+                p
+                for p in sorted(inbox.glob("*.md"))
+                if p.name not in seen and not (drafted and (drafted / p.name).is_file())
+            ]
         except OSError:
             fresh = []
         if fresh:
