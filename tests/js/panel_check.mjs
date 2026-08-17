@@ -61,7 +61,7 @@ const document = {
   addEventListener() {},
 };
 const window = { prompt: () => null, alert() {}, confirm: () => false };
-const localStorage = { getItem: () => null, setItem() {} };
+const localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
 const history = { replaceState() {} };
 class URL {
   constructor() { this.searchParams = { get: () => null, delete() {} }; }
@@ -243,10 +243,22 @@ panel.topoOpen.clear();
 panel.local.node = "";
 panel.applyCluster(FOLD_CLUSTER);
 let fold = $("topo-body").innerHTML;
-assert.ok(fold.includes("cli"), "正在操作的工作区没展开");
+// 谁都没点过的时候，**主节点也折着** —— 「选中谁展开谁」的另一半是
+// 「没选中就都别展开」：默认焦点是服务端的主节点，不是人选的
+assert.ok(!fold.includes(">cli<"), "没人选过时主节点不该自动展开");
+assert.ok(fold.includes("正在操作"), "主节点折着也得标出它是正在操作的那个");
 assert.ok(!fold.includes("deskbot"), "没在操作的本机工作区应当折叠");
 assert.ok(!fold.includes("labbot"), "远端节点默认应当折叠");
 assert.ok(fold.includes("nobody home"), "折叠的节点连不上时，原因至少要在悬停提示里");
+
+// 点过（选中）之后才展开
+panel.local.node = "laptop";
+panel.draw();
+fold = $("topo-body").innerHTML;
+assert.ok(fold.includes("cli"), "选中的工作区没展开");
+panel.local.node = "";
+panel.draw();
+fold = $("topo-body").innerHTML;
 
 // 可点的头部得让键盘也够得着：能 Tab 到、读屏认得出是按钮、报告开合状态
 assert.ok(
@@ -275,6 +287,22 @@ panel.draw();
 fold = $("topo-body").innerHTML;
 assert.ok(fold.includes("deskbot"), "切过去的工作区没展开");
 assert.ok(!fold.includes(">cli<"), "切走之后原来的工作区应当折叠");
+
+// 存档的选择指向已消失的工作区：一次**全量**快照后必须清掉 ——
+// 不清的话 scoped() 会把它挂到每个 ?node= 请求上，服务端全线 404，
+// 而顶栏显示的还是主节点，人毫无线索
+panel.local.node = "ghost-of-removed";
+panel.applyCluster(FOLD_CLUSTER);
+assert.equal(panel.local.node, "", "陈旧的工作区选择没被清掉");
+assert.ok(
+  $("topo-body").innerHTML.includes("正在操作"),
+  "清掉陈旧选择后主节点该拿回「正在操作」标签",
+);
+// WS 快照只带主节点 —— 在那儿校验会把合法的选择误清掉
+panel.local.node = "desk";
+panel.applyLocal({ node: "laptop", agents: [], runs: [], events: [] });
+assert.equal(panel.local.node, "desk", "WS 快照不该把合法的工作区选择误清");
+
 panel.topoOpen.clear();
 panel.local.node = "";
 panel.applyCluster(CLUSTER);

@@ -807,8 +807,13 @@ function renderTopo(nodes) {
     // 以前只折叠本机的兄弟工作区，远端节点全摊着：连几台机器之后一屏都是
     // 别处的 Agent 卡片，正在操作的那个反而要翻着找。
     // 点头部：本机的切过去（顺带展开），远端的原地扒开看一眼。
+    //
+    // 「焦点」和「展开」是两回事：谁都没点过时焦点默认是服务端的主节点 ——
+    // 那不是人选的，凭什么替人摊开一屏卡片。多工作区时**点过才展开**
+    // （选择记在 localStorage，下次进来还是它）；单工作区没得选，照旧摊开。
     const isFocus = node.local && (locals < 2 || node.node === focus);
-    const folded = !isFocus && !topoOpen.has(node.node);
+    const expanded = isFocus && (locals < 2 || Boolean(local.node));
+    const folded = !expanded && !topoOpen.has(node.node);
     const count = (node.agents || []).length;
     // 本机头部一律可点（点正在操作的那个等于原地刷新，无害）；远端头部点了原地扒开。
     // 可点就得让键盘也够得着：Tab 到、读屏认得出是按钮、报告开合状态
@@ -838,7 +843,7 @@ function renderTopo(nodes) {
         ? (node.agents || []).map((a) => agentCard(a, node)).join("") ||
           `<div class="node-note">这个节点没有配置 Agent</div>`
         : `<div class="node-note">${esc(node.reason || "")}</div>`}
-      ${isFocus && canWrite ? addAgentForm() : ""}
+      ${expanded && canWrite ? addAgentForm() : ""}
     </div>`;
   }).join("") || `<div class="empty">还没有配置 Agent</div>`);
 }
@@ -984,11 +989,18 @@ function syncLocalNodes(info) {
   if (picker.dataset.signature === names.join(",")) return;
   picker.dataset.signature = names.join(",");
   picker.innerHTML = names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+  // 下拉框**显示**默认的主节点，但不把它写进 local.node —— 那是「人的选择」，
+  // 启动时替人选上，「没选中也展开」的老毛病就从这儿回来了
   picker.value = local.node || info.node;
-  local.node = picker.value;
+  if (!picker.value) picker.value = info.node;   // 存的节点已不在：显示回主节点
 }
 
+// 「正在操作哪个」是人的选择，跟着浏览器走 —— 刷新、明天再开，还是它。
+// 存的节点已经不在了：applyCluster 拿到全量清单时会把它清掉（连同这条存档），
+// 不然 scoped() 会拿着死名字去请求，服务端 404 一片。
+const NODE_KEY = "anthill.panel.node";
 const local = { node: "" };
+try { local.node = localStorage.getItem(NODE_KEY) || ""; } catch (err) { /* 隐私模式 */ }
 
 // 「你正在操作本机的哪个节点」。没显式切过就是服务端的主节点。
 function focusedNode(info) {
@@ -1036,6 +1048,14 @@ function draw() {
 function applyCluster(data) {
   state.node = data.node || state.node;
   state.nodes = data.nodes || [asNode(data)];  // 单机节点没有 nodes 字段
+  // 存档的选择指向已消失的工作区时必须清掉 —— 不清的话 scoped() 会把它挂到
+  // 每个 ?node= 请求上，服务端 404 一片，而顶栏显示的还是主节点，人毫无线索。
+  // 只在**真全量**清单上校验：api/state 回退和 WS 快照都只带主节点，
+  // 在那儿校验会把合法的存档选择误清掉。
+  if (data.nodes && local.node && !state.nodes.some((n) => n.local && n.node === local.node)) {
+    local.node = "";
+    try { localStorage.removeItem(NODE_KEY); } catch (err) { /* 隐私模式 */ }
+  }
   draw();
 }
 
@@ -2005,6 +2025,7 @@ document.addEventListener("keydown", (event) => {
 function switchNode(node) {
   if (!node) return;
   local.node = node;
+  try { localStorage.setItem(NODE_KEY, node); } catch (err) { /* 隐私模式 */ }
   // 换了工作区，别处扒开看过的也一并收起 —— 「选中谁就只看谁」
   topoOpen.clear();
   const picker = $("node-pick");
