@@ -462,8 +462,8 @@ def test_a_working_coordinator_can_be_built_without_touching_a_terminal(
     page, errors = open_panel(browser, panel)
     page.wait_for_selector("#topo-body .card", timeout=15000)
 
-    # 1) 配一个 provider（选预设，省得手填 base_url）
-    page.click('.tab[data-pane="models"]')
+    # 1) 配一个 provider（选预设，省得手填 base_url）—— 模型管理并进了配置页
+    page.click('.tab[data-pane="config"]')
     page.wait_for_selector("#provider-form", timeout=15000)
     page.select_option("#provider-preset", "deepseek")
     page.click('#provider-form button[type="submit"]')

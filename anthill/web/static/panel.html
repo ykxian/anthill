@@ -442,6 +442,7 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
   border-radius: var(--r); padding: 16px; box-shadow: var(--shadow);
 }
 .card-block h3 { margin: 0 0 4px; font-family: var(--serif); font-size: 15px; font-weight: 500; }
+.pane .card-block + .card-block { margin-top: 18px; }
 .card-block .why { margin: 0 0 12px; font-size: 12.5px; color: var(--dim); }
 #config-text { width: 100%; min-height: 280px; resize: vertical; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; }
 /* 配置页概览卡片 + 常用字段 + 保存前的 diff 确认 */
@@ -493,7 +494,6 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
       <button class="tab" type="button" data-pane="events">消息流</button>
       <button class="tab" type="button" data-pane="bridge" hidden>桥接</button>
       <button class="tab" type="button" data-pane="setup" hidden>工作区</button>
-      <button class="tab" type="button" data-pane="models" hidden>模型</button>
       <button class="tab" type="button" data-pane="config" hidden>配置</button>
     </nav>
 
@@ -613,7 +613,29 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
       </div>
     </section>
 
-    <section class="pane hold" id="pane-models" hidden>
+    <section class="pane hold" id="pane-config" hidden>
+      <div class="card-block" id="config">
+        <h3>node.toml <select id="config-node" aria-label="改哪台机器" style="margin-left:8px"></select>
+          <span class="pill warn" id="config-dirty" hidden>有未保存的改动</span></h3>
+        <p class="why">图形字段改的就是下面的原文（注释与未知节区原样保留）——一切改动保存前都会像
+          git diff 一样摆出来确认；校验不过磁盘一个字不改，并留一份 node.toml.bak。</p>
+        <div id="config-overview"></div>
+        <div class="cfg-quick" id="config-quick" hidden>
+          <label>endpoint（跨机通告地址，留空 = 自动识别）
+            <input id="cfg-endpoint" placeholder="http://10.0.0.5:45778" autocomplete="off" style="width:240px" /></label>
+          <label>poll_interval（秒）
+            <input id="cfg-poll" type="number" step="0.05" min="0.05" style="width:100px" /></label>
+          <label>watch_mode
+            <select id="cfg-watch"><option value="inotify">inotify</option><option value="poll">poll</option></select></label>
+        </div>
+        <textarea id="config-text" spellcheck="false"></textarea>
+        <div class="actions" style="margin-top:10px">
+          <button id="config-save" type="button">保存</button>
+          <button class="ghost" id="config-reload" type="button">重新读取</button>
+        </div>
+        <div class="hint" id="config-hint"></div>
+      </div>
+
       <div class="card-block">
         <h3>模型（provider）</h3>
         <p class="why">
@@ -623,7 +645,7 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
         <div id="models-body"></div>
       </div>
 
-      <div class="card-block" style="margin-top:18px">
+      <div class="card-block">
         <h3>加一个 provider</h3>
         <form id="provider-form">
           <div class="line">
@@ -646,7 +668,7 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
         <div class="hint" id="provider-hint"></div>
       </div>
 
-      <div class="card-block" style="margin-top:18px">
+      <div class="card-block">
         <h3>存一个密钥</h3>
         <p class="why">
           <code>node.toml</code> 里<b>永远只有变量名</b>，这条规矩没动 —— 它会进 git、会被
@@ -663,30 +685,6 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
           </div>
         </form>
         <div class="hint" id="secret-hint"></div>
-      </div>
-    </section>
-
-    <section class="pane hold" id="pane-config" hidden>
-      <div class="card-block" id="config">
-        <h3>node.toml <select id="config-node" aria-label="改哪台机器" style="margin-left:8px"></select>
-          <span class="pill warn" id="config-dirty" hidden>有未保存的改动</span></h3>
-        <p class="why">图形字段改的就是下面的原文（注释与未知节区原样保留）——一切改动保存前都会像
-          git diff 一样摆出来确认；校验不过磁盘一个字不改，并留一份 node.toml.bak。</p>
-        <div id="config-overview"></div>
-        <div class="cfg-quick" id="config-quick" hidden>
-          <label>endpoint（跨机通告地址，留空 = 自动识别）
-            <input id="cfg-endpoint" placeholder="http://10.0.0.5:45778" autocomplete="off" style="width:240px" /></label>
-          <label>poll_interval（秒）
-            <input id="cfg-poll" type="number" step="0.05" min="0.05" style="width:100px" /></label>
-          <label>watch_mode
-            <select id="cfg-watch"><option value="inotify">inotify</option><option value="poll">poll</option></select></label>
-        </div>
-        <textarea id="config-text" spellcheck="false"></textarea>
-        <div class="actions" style="margin-top:10px">
-          <button id="config-save" type="button">保存</button>
-          <button class="ghost" id="config-reload" type="button">重新读取</button>
-        </div>
-        <div class="hint" id="config-hint"></div>
       </div>
     </section>
 
@@ -1807,6 +1805,13 @@ $("bridge-say").addEventListener("submit", async (event) => {
 // 这一页补的是「面板建不出一个能干活的 Agent」那堵墙的另一半 ——
 // 选 provider 大脑要求 [providers.*] 已存在，而以前面板没有任何地方能配它。
 
+// provider / 密钥的改动写的是 node.toml —— 同页上方的概览和原文得跟上。
+// 编辑器里有未保存改动时不动它（丢字比过时严重），只说一声。
+async function refreshConfigIfClean() {
+  if ($("config-text").value === configView.loaded) await loadConfig({ discard: true });
+  else say("config-hint", "provider/密钥已更新 —— 原文编辑器里是旧版，「重新读取」可看到", "bad");
+}
+
 async function loadModels() {
   try {
     const data = await api(u(scoped("api/providers")));
@@ -1873,6 +1878,7 @@ $("provider-form").addEventListener("submit", async (event) => {
     $("provider-form").reset();
     say("provider-hint", `已加上 ${body.name}`, "ok");
     loadModels();
+    refreshConfigIfClean();
   } catch (err) {
     say("provider-hint", String(err.message || err), "bad");
   }
@@ -1891,6 +1897,7 @@ $("models-body").addEventListener("click", async (event) => {
   try {
     await api(u(scoped(`api/providers/${encodeURIComponent(name)}`)), { method: "DELETE" });
     loadModels();
+    refreshConfigIfClean();
   } catch (err) {
     say("provider-hint", String(err.message || err), "bad");
   }
@@ -1999,7 +2006,7 @@ $("ws-purge-all").addEventListener("click", () => clearWorkspaces(false, true));
 // 这个列表必须和上面的 .tab[data-pane] 一一对应 —— 漏一个的后果很隐蔽：
 // 那一页的数据照常加载、照常渲染，只是**永远不显示**（showPane 把别人藏了，
 // 却没把它放出来）。panel_check.mjs 里有一条检查专门盯这个。
-const PANES = ["runs", "chat", "events", "bridge", "models", "setup", "config"];
+const PANES = ["runs", "chat", "events", "bridge", "setup", "config"];
 
 function showPane(name) {
   for (const pane of PANES) {
@@ -2011,9 +2018,8 @@ function showPane(name) {
   }
   if (name === "chat") { syncAgentPicker(); loadChat(); }
   if (name === "bridge") loadBridge();
-  if (name === "models") loadModels();
   if (name === "setup") refreshSetup();
-  if (name === "config") loadConfig();
+  if (name === "config") { enterConfig(); loadModels(); }
 }
 
 for (const tab of document.querySelectorAll(".tab")) {
@@ -2293,7 +2299,7 @@ async function enableActions() {
   $("run-form").hidden = false;
   $("chat-form").hidden = false;
   $("chat-wipe").hidden = false;
-  for (const name of ["models", "setup", "config"]) {
+  for (const name of ["setup", "config"]) {
     const tab = document.querySelector(`.tab[data-pane="${name}"]`);
     if (tab) tab.hidden = false;
   }
@@ -2434,9 +2440,19 @@ function renderConfigOverview(parsed) {
       <div class="meta" style="margin-top:4px">增删启停在拓扑页</div></div>
     <div class="cfg-card"><h4>Provider × ${providers.length}</h4>
       ${providers.map(([n, pr]) => `<div class="meta">${esc(n)} · ${esc(pr.model || "")}</div>`).join("") || `<div class="meta">无</div>`}
-      <div class="meta" style="margin-top:4px">增删与密钥在模型页</div></div>
+      <div class="meta" style="margin-top:4px">管理就在本页下方</div></div>
     ${mcp.length ? `<div class="cfg-card"><h4>MCP × ${mcp.length}</h4>${mcp.map((n) => `<div class="meta">${esc(n)}</div>`).join("")}</div>` : ""}
   </div>`);
+}
+
+// 切进配置页时的温和入口：编辑器里有未保存改动就**不重载**、只说一声 ——
+// 「丢弃」这种问题留给显式点「重新读取」的人，切个页不该被逼答一次。
+async function enterConfig() {
+  if (configView.loaded && $("config-text").value !== configView.loaded) {
+    say("config-hint", "编辑器里有未保存的改动（切页未刷新）——「重新读取」可放弃并刷新", "bad");
+    return;
+  }
+  await loadConfig({ discard: true });
 }
 
 async function loadConfig({ discard = false } = {}) {
