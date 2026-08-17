@@ -14,14 +14,14 @@ import json
 from pathlib import Path
 from typing import Any
 
+from anthill.core.chat_log import BODY_LIMIT, CHAT_DIR, chats_dir, record_outgoing
 from anthill.core.envelope import Envelope
 from anthill.core.errors import AntHillError
 from anthill.core.mailbox import Mailbox
-from anthill.core.chat_log import BODY_LIMIT, CHAT_DIR, chats_dir, record_outgoing
 from anthill.core.paths import NodeLayout
 from anthill.core.payloads import MessageType
 
-__all__ = ["CHAT_DIR", "BODY_LIMIT", "record_outgoing"]
+__all__ = ["BODY_LIMIT", "CHAT_DIR", "record_outgoing"]
 
 MAX_MESSAGES = 200
 MAX_THREADS = 40

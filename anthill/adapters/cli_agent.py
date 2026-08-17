@@ -24,7 +24,6 @@ import asyncio
 import json
 import os
 import re
-import signal
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +40,7 @@ from anthill.core.payloads import (
     TaskErrorPayload,
     TaskResultPayload,
 )
+from anthill.core.procs import detach_kwargs, kill_tree
 from anthill.providers.base import Msg, Role
 
 DEFAULT_TIMEOUT = 900.0
@@ -167,7 +167,7 @@ class CliAgentHandler:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,  # 自成进程组，超时才能整组杀干净
+                **detach_kwargs(),  # 自成进程组/独立会话，超时才能整组杀干净
                 env={**os.environ, **self._spec.env},
             )
         except (OSError, ValueError) as exc:
@@ -283,11 +283,11 @@ async def _kill_group(proc: asyncio.subprocess.Process) -> None:
     if proc.returncode is not None:
         return
     with suppress(ProcessLookupError, PermissionError):
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        kill_tree(proc.pid, force=False)
     with suppress(TimeoutError):
         await asyncio.wait_for(proc.wait(), timeout=KILL_GRACE_SECONDS)
         return
     with suppress(ProcessLookupError, PermissionError):
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        kill_tree(proc.pid, force=True)
     with suppress(TimeoutError):
         await asyncio.wait_for(proc.wait(), timeout=KILL_GRACE_SECONDS)

@@ -14,6 +14,7 @@ import typer
 
 from anthill.agent.sender import Sender
 from anthill.cli.common import console, fail, load, read_body
+from anthill.core.chat_log import record_outgoing
 from anthill.core.config import Config
 from anthill.core.envelope import Address, Envelope
 from anthill.core.errors import AntHillError
@@ -21,7 +22,6 @@ from anthill.core.ids import new_thread_id, now
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
-from anthill.core.chat_log import record_outgoing
 from anthill.core.payloads import ChatPayload, MessageType, Payload, TaskRequestPayload
 from anthill.core.router import Router, extract_mentions
 from anthill.core.states import DeliveryTracker

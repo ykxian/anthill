@@ -478,6 +478,8 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
     <select id="node-pick" aria-label="切换到本机的哪个节点"></select>
   </span>
   <span class="spacer"></span>
+  <span class="pill warn" id="serve-stale" hidden
+        title="serve 启动之后代码更新过 —— 重启 serve 才能用上新版">serve 需重启</span>
   <span id="conn"><span class="dot"></span><span id="conn-text">连接中</span></span>
 </header>
 
@@ -790,7 +792,9 @@ function agentCard(a, node) {
     : "";
   const badges =
     (a.queue ? `<span class="pill warn">待处理 ${esc(a.queue)}</span>` : "") +
-    (a.dead ? `<span class="pill bad">死信 ${esc(a.dead)}</span>` : "");
+    (a.dead ? `<span class="pill bad">死信 ${esc(a.dead)}</span>` : "") +
+    // 磁盘新代码、进程旧版本 —— 「明明修了怎么还坏」的头号来源，必须摆在脸上
+    (a.stale_code ? `<span class="pill warn" title="这只 agentd 启动之后代码更新过，重启才生效">代码新·需重启</span>` : "");
   return `
     <div class="card">
       <div class="row">
@@ -1079,6 +1083,9 @@ function draw() {
   const focus = local.node || state.node;
   $("node").textContent = focus || "?";
   document.title = `AntHill · ${focus || ""}`;
+  // serve 自己带病工作也要说 —— 顶栏挂个「需重启」，别让人对着新代码的旧行为抓头
+  const stale = state.nodes.some((n) => n.local && n.serve_stale);
+  $("serve-stale").hidden = !stale;
   renderTopo(state.nodes);
   renderApprovals(state.nodes);
   renderRuns(state.nodes);

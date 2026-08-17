@@ -21,6 +21,8 @@ import os
 import signal
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -31,6 +33,7 @@ from anthill.core.envelope import AGENT_NAME_RE
 from anthill.core.errors import AntHillError
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
+from anthill.core.procs import detach_kwargs
 
 RUNTIME_FILE = "runtime.json"
 STOP_GRACE = signal.SIGTERM
@@ -140,6 +143,25 @@ def is_running(layout: NodeLayout, name: str) -> bool:
     return running_pid(layout, name) is not None
 
 
+IN_FLIGHT: set[tuple[str, str]] = set()
+"""正在启停/删除中的 (节点, Agent)。同一只 Agent 的操作不许叠加 ——
+面板双击、两个操作方同时动手（重启撞车实证）都会互相顶：
+一边 stop 的宽限期里另一边 start，得到的是「刚启动就被停」。
+只防**本 serve 进程内**的并发；跨进程的手动 CLI 操作管不到（已记录）。"""
+
+
+@contextmanager
+def agent_op(node: str, name: str) -> Iterator[None]:
+    key = (node, name)
+    if key in IN_FLIGHT:
+        raise AntHillError(f"{name} 正在操作中 —— 等上一个动作完成再点")
+    IN_FLIGHT.add(key)
+    try:
+        yield
+    finally:
+        IN_FLIGHT.discard(key)
+
+
 def start_agent(layout: NodeLayout, config: Config, name: str) -> dict[str, Any]:
     """把一个 agentd 拉起来，脱离本进程独活。
 
@@ -165,29 +187,15 @@ def start_agent(layout: NodeLayout, config: Config, name: str) -> dict[str, Any]
         "--quiet",  # 没有终端可回显；它自己写 jsonl 日志
         "--unattended",  # 没人在这个进程前面，需要确认的高危操作一律拒绝
     ]
-    # 「脱离本进程独活」两个平台写法不同：POSIX 靠 start_new_session（setsid），
-    # Windows 上那个参数被静默忽略 —— agentd 会和 serve 共用控制台，
-    # 任何控制台 Ctrl+C（包括曾经的 os.kill(pid, 0) 探测广播）都会连坐。
-    # 用 CREATE_NO_WINDOW 而不是 DETACHED_PROCESS：uv 装的 venv 里 python.exe
-    # 是个蹦床启动器，DETACHED 下它拉起真 Python 时会分配一个**可见**控制台
-    # （实机上就是「点启动弹小黑框」）；NO_WINDOW 给的是隐藏控制台，后代继承、
-    # 不闪窗，同样和 serve 的控制台隔离。CREATE_NEW_PROCESS_GROUP 自成一组。
-    detach: dict[str, Any] = (
-        {
-            "creationflags": subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
-            | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
-        }
-        if sys.platform == "win32"
-        else {"start_new_session": True}
-    )
     try:
-        # 参数全是本机配置里的名字（已过 AGENT_NAME_RE），不拼接外部输入
+        # 参数全是本机配置里的名字（已过 AGENT_NAME_RE），不拼接外部输入。
+        # 「脱离本进程独活」的平台差异（含 uv 蹦床小黑框）统一在 detach_kwargs。
         process = subprocess.Popen(
             command,
             cwd=str(layout.workspace),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            **detach,
+            **detach_kwargs(),
         )
     except OSError as exc:
         raise AntHillError(f"起不来：{exc}") from exc
@@ -195,7 +203,12 @@ def start_agent(layout: NodeLayout, config: Config, name: str) -> dict[str, Any]
 
 
 def stop_agent(layout: NodeLayout, name: str) -> dict[str, Any]:
-    """SIGTERM 而不是 SIGKILL —— agentd 收到之后会把手上那条消息处理完再退。"""
+    """SIGTERM 而不是 SIGKILL —— agentd 收到之后会把手上那条消息处理完再退。
+
+    只发给 agentd 本体而非进程组：让它自己收尾孩子，组杀会把干活中的
+    command Agent 一起带走。win32 上 os.kill(SIGTERM) 是 TerminateProcess
+    **硬停**（无窗口进程没有更好的信号可用）——优雅的正解是 stop.flag
+    文件 + 主循环轮询，记在清单里。"""
     pid = running_pid(layout, name)
     if pid is None:
         return {"ok": True, "name": name, "already": True}

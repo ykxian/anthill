@@ -52,6 +52,7 @@ def doctor_command(
         *_check_providers(config),
         *_check_mailboxes(layout, config),
         *_check_backlog(layout, config),
+        *_check_freshness(layout, config),
     ]
 
     console.print(f"[bold]{config.node.name}[/bold] [dim]{layout.workspace}[/dim]\n")
@@ -169,3 +170,35 @@ def _check_backlog(layout: NodeLayout, config: Config) -> list[Finding]:
                 )
             )
     return out
+
+
+def _check_freshness(layout: NodeLayout, config: Config) -> list[Finding]:
+    """磁盘新代码、进程旧版本 —— 「明明修了怎么还坏」的头号来源。
+
+    agentd 的启动时刻在它自己写的 runtime.json 里；比一比包里最新的
+    .py 改动时刻就知道谁在带病工作。serve 的对应提示在面板顶栏。
+    """
+    import json
+
+    from anthill.core.freshness import stale_since
+    from anthill.web.agents import running_pid, runtime_path
+
+    stale: list[str] = []
+    for name in sorted(config.agents):
+        if running_pid(layout, name) is None:
+            continue
+        try:
+            data = json.loads(runtime_path(layout, name).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if stale_since(str(data.get("started_at", ""))):
+            stale.append(name)
+    if not stale:
+        return [Finding(OK, "在跑的 agentd 都是最新代码")]
+    return [
+        Finding(
+            WARN,
+            f"这些 agentd 启动之后代码更新过，跑的是旧版：{', '.join(stale)}",
+            "重启它们：面板上停→启，或 anthill agent stop/start <名字>",
+        )
+    ]

@@ -35,8 +35,8 @@ from typing import Any
 from anthill.agent.conversation import chat_payload, plan_reply
 from anthill.agent.handlers import HandlerContext
 from anthill.agent.memory import ThreadMemory
-from anthill.core.envelope import Envelope
 from anthill.core.chat_log import record_outgoing
+from anthill.core.envelope import Envelope
 from anthill.core.errors import AntHillError, HopLimitExceeded
 from anthill.core.ids import is_valid_id, now
 from anthill.core.payloads import ChatPayload, MessageType, TaskResultPayload

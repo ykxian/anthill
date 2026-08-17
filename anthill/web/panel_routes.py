@@ -45,7 +45,7 @@ from anthill.web.actions import (
     start_run,
     write_config,
 )
-from anthill.web.agents import AgentSpec, add_agent, remove_agent, start_agent, stop_agent
+from anthill.web.agents import AgentSpec, add_agent, agent_op, remove_agent, start_agent, stop_agent
 from anthill.web.bridge_panel import BridgeReply
 from anthill.web.bridge_panel import inbox as bridge_inbox
 from anthill.web.bridge_panel import reply as bridge_reply
@@ -572,7 +572,12 @@ def mount_panel_actions(
     async def panel_agent_remove(request: Request, name: str, node: str = "") -> dict[str, Any]:
         _guard(request)
         ctx = _pick(nodes, node)
-        return _agent_edit(ctx.layout, log, lambda fresh: remove_agent(ctx.layout, fresh, name))
+        try:
+            # 删除和启停一样不许与别的操作交错
+            with agent_op(ctx.name, name):
+                return _agent_edit(ctx.layout, log, lambda fresh: remove_agent(ctx.layout, fresh, name))
+        except AntHillError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.delete(f"{PANEL_PATH}/api/peers/{{name}}")
     async def panel_peer_forget(request: Request, name: str) -> dict[str, Any]:
@@ -617,13 +622,16 @@ def mount_panel_actions(
             )
         ctx = _pick(nodes, node)
         try:
-            result = (
-                start_agent(ctx.layout, ctx.config, name)
-                if action == "start"
-                else stop_agent(ctx.layout, name)
-            )
+            # 同一只 Agent 的操作串行 —— 双击/两个页面同时点会互相顶（409 而不是竞态）
+            with agent_op(ctx.name, name):
+                result = (
+                    start_agent(ctx.layout, ctx.config, name)
+                    if action == "start"
+                    else stop_agent(ctx.layout, name)
+                )
         except AntHillError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            busy = "正在操作中" in str(exc)
+            raise HTTPException(status_code=409 if busy else 400, detail=str(exc)) from exc
         log.info(f"panel.agent_{action}", node=ctx.name, agent=name)
         return result
 
@@ -639,7 +647,7 @@ def mount_panel_actions(
         # 恰恰是修坏文件的地方，名字退回注册名，原文照常给
         try:
             name = ctx.name
-        except Exception:  # noqa: BLE001 - 坏 TOML / 缺文件都只影响显示名
+        except Exception:
             name = node or nodes.primary_name
         try:
             return {"node": name, **read_config(ctx.layout)}

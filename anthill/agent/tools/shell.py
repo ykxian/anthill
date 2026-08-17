@@ -9,14 +9,13 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import shlex
-import signal
 from contextlib import suppress
 from typing import Any, ClassVar
 
 from anthill.agent.tools.base import BaseTool, ToolContext, ToolResult, string_param
 from anthill.core.payloads import RiskLevel
+from anthill.core.procs import detach_kwargs, kill_tree
 
 KILL_GRACE_SECONDS = 2.0
 
@@ -59,7 +58,7 @@ class RunShellTool(BaseTool):
                 cwd=str(ctx.workspace),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,  # 合并，避免两路各自阻塞
-                start_new_session=True,  # 自成进程组，超时才能整组杀干净
+                **detach_kwargs(),  # 自成进程组/独立会话，超时才能整组杀干净
             )
         except OSError as exc:
             return ToolResult.failed(f"无法启动命令：{exc}")
@@ -81,13 +80,11 @@ async def _kill_group(proc: asyncio.subprocess.Process) -> None:
     """先 TERM 整组，宽限期后 KILL。孙子进程也在同组里，跑不掉。"""
     if proc.returncode is not None:
         return
-    with suppress(ProcessLookupError, PermissionError):
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    kill_tree(proc.pid, force=False)
     with suppress(TimeoutError):
         await asyncio.wait_for(proc.wait(), timeout=KILL_GRACE_SECONDS)
         return
-    with suppress(ProcessLookupError, PermissionError):
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    kill_tree(proc.pid, force=True)
     with suppress(TimeoutError):
         await asyncio.wait_for(proc.wait(), timeout=KILL_GRACE_SECONDS)
 

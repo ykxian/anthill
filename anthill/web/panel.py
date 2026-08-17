@@ -18,6 +18,8 @@ from datetime import datetime
 from typing import Any
 
 from anthill.core.config import Config, brain_of
+from anthill.core.freshness import stale_since
+from anthill.core.ids import now
 from anthill.core.logging import read_log
 from anthill.core.mailbox import Mailbox
 from anthill.core.outbox import Outbox
@@ -29,6 +31,9 @@ from anthill.security.approvals import ApprovalStore
 DEFAULT_EVENT_LIMIT = 80
 PER_AGENT_EVENTS = 40
 RUNTIME_FILE = "runtime.json"
+
+PROCESS_STARTED = now().isoformat()
+"""本进程（serve）拉起的时刻 —— import 即启动，误差可忽略。"""
 
 
 def build_snapshot(
@@ -51,6 +56,9 @@ def build_snapshot(
         "runs": _runs(layout),
         "approvals": _approvals(layout),
         "events": _events(layout, config, event_limit),
+        # serve 自己是不是也在带病工作 —— 磁盘新代码、进程旧版本的错位
+        # 一天踩了三次，机器知道就得说（PROCESS_STARTED 即本进程拉起时刻）
+        "serve_stale": stale_since(PROCESS_STARTED),
     }
     if include_peers:
         snapshot["peers"] = _peers(peers)
@@ -65,12 +73,14 @@ def _agents(layout: NodeLayout, config: Config) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for name, agent in sorted(config.agents.items()):
         status_file = layout.agent_dir(name) / RUNTIME_FILE
-        running, watch_mode = False, "-"
+        running, watch_mode, stale = False, "-", False
         if status_file.is_file():
             try:
                 data = json.loads(status_file.read_text(encoding="utf-8"))
                 running = is_running(int(data.get("pid", -1)))
                 watch_mode = str(data.get("watch_mode", "-"))
+                # 在跑、但启动之后代码又更新过 = 跑的是旧版，页面要标出来
+                stale = running and stale_since(str(data.get("started_at", "")))
             except (OSError, json.JSONDecodeError, ValueError):
                 pass
         mailbox = Mailbox(layout.mailbox_dir(name))
@@ -83,6 +93,7 @@ def _agents(layout: NodeLayout, config: Config) -> list[dict[str, Any]]:
                 "watch_mode": watch_mode,
                 "queue": len(mailbox.list_new()) if mailbox.exists else 0,
                 "dead": len(Outbox(mailbox).dead_letters()) if mailbox.exists else 0,
+                "stale_code": stale,
             }
         )
     return out

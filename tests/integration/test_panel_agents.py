@@ -503,3 +503,22 @@ async def test_a_short_waiting_message_is_not_marked_clipped(tmp_path: Path) -> 
 
     assert got["clipped"] is False
     assert got["body"] == "这块接口我想改成异步的，你那边有依赖吗"
+
+
+async def test_concurrent_ops_on_the_same_agent_get_a_busy_answer(tmp_path: Path) -> None:
+    """同一只 Agent 的启停不许叠加 —— 重启撞车实证：一边 stop 的宽限期里
+    另一边 start，得到「刚启动就被停」。第二个操作方该得到 409，不是竞态。"""
+    from anthill.web.agents import agent_op
+
+    node = bridge_node(tmp_path)
+    with agent_op("box", "cc"):
+        async with client_for(node) as client:
+            response = await client.post("/panel/api/agents/cc/start")
+
+    assert response.status_code == 409
+    assert "正在操作中" in response.json()["detail"]
+
+    # 锁释放后照常可用
+    async with client_for(node) as client:
+        ok = await client.post("/panel/api/agents/echo/stop")
+    assert ok.status_code == 202
