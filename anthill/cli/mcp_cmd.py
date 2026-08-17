@@ -44,7 +44,9 @@ def serve(
 def tools(
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
 ) -> None:
-    """列出配置里那些外部 MCP server（`\[mcp.*]` 那几节），以及谁在用它们。"""
+    # r-string：`\[` 是给 rich 的转义（不然 [mcp.*] 被当富文本标记吃掉），
+    # 普通字符串里它是无效转义 —— Windows 新版 Python 一启动就报 SyntaxWarning
+    r"""列出配置里那些外部 MCP server（`\[mcp.*]` 那几节），以及谁在用它们。"""
     _, config = load(workspace)
     if not config.mcp:
         console.print(
