@@ -116,3 +116,32 @@ def test_the_budget_is_deterministic(budget: int) -> None:
         should_reply=False,
         reason=f"这个话题已经聊了 {budget} 轮，到上限 {budget}，不再接话",
     )
+
+
+def test_a_cross_node_sender_mentioning_itself_gets_its_full_address_back() -> None:
+    """跨机器的回信惯例是「把自己 @ 回去」—— 对面的 tst1 发来 chat 时
+    mentions=("tst1",)。@ 规则把被 @ 的人解析成**本机节点**的地址，
+    于是回信发给了不存在的 本机:tst1，route.failed。
+    被 @ 的就是发件人自己时，用信封上的完整地址。
+    Windows 实机复现：wtst 回 collab-tst:tst1 被路由拒绝，只能手写 outbox。
+    """
+    sender = Address(node="othermachine", agent="tst1")
+    env = Envelope.new(
+        sender=sender,
+        recipient=ME,
+        type=MessageType.CHAT,
+        payload=ChatPayload(body="回我这条", mentions=("tst1",)),
+    )
+
+    plan = plan_reply(env, identity=ME, history=[], budget=6)
+
+    assert plan.recipient == sender, "被 @ 的就是发件人时，该用信封上的完整地址（含节点）"
+
+
+def test_a_mention_of_a_third_party_still_resolves_to_my_node() -> None:
+    """@ 第三方（既不是我也不是发件人）时，信封上没有它的地址 ——
+    维持「同机协作」的旧解析：本机节点。"""
+    plan = plan_reply(chat_from("cli", mentions=("reviewer",)), identity=ME, history=[], budget=6)
+
+    assert plan.recipient is not None
+    assert plan.recipient.node == "n"

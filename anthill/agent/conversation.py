@@ -65,11 +65,20 @@ def plan_reply(env: Envelope, *, identity: Address, history: list[Msg], budget: 
 
 
 def _partner(env: Envelope, identity: Address) -> Address:
-    """带 @ 的对话，回给被 @ 的那个人；否则回给发件人。"""
+    """带 @ 的对话，回给被 @ 的那个人；否则回给发件人。
+
+    @ 只带裸名字，节点得自己补：**被 @ 的就是发件人自己时用信封上的完整地址**
+    —— 跨机器的回信惯例是「把自己 @ 回去」，这时补成本机节点等于把回信发给
+    一个不存在的 本机:对方名，route.failed（Windows 实机踩过）。
+    @ 第三方时信封上没有它的地址，维持同机协作的旧解析：本机节点。
+    """
     mentions = tuple(getattr(env.payload, "mentions", ()) or ())
     for name in mentions:
-        if name != identity.agent:
-            return Address(node=identity.node, agent=name)
+        if name == identity.agent:
+            continue
+        if name == env.from_.agent:
+            return env.from_
+        return Address(node=identity.node, agent=name)
     return env.from_
 
 
