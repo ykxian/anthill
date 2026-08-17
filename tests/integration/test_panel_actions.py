@@ -456,3 +456,27 @@ async def test_forgetting_a_peer_requires_write_access(
 
     async with client_for(node, writable=False) as client:
         assert (await client.delete("/panel/api/peers/ghost")).status_code in (403, 404, 405)
+
+
+async def test_browsing_your_own_lan_ip_counts_as_local(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    """本机浏览器里打开的是本机自己的局域网 IP —— TCP 源地址是这台机器
+    自有的地址，包根本没出过这台机器（伪造它无法完成握手）。以前只认回环：
+    serve 自己打印的面板地址，在它自己的机器上打开反而 403、WebSocket 拒绝
+    握手，页面永远「已断开，重连中」—— Windows 实机第一步就栽在这。
+    判据：这条连接的对端地址 == 这条连接的本端地址。
+    """
+    async with lan_or_local(node, "panel.test") as client:  # 与 base_url 同名 = 连自己
+        response = await client.post("/panel/api/run", json={"task": "自己的 IP 也算本机"})
+
+    assert response.status_code == 202
+
+
+async def test_other_lan_hosts_are_still_refused(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    async with lan_or_local(node, "10.0.8.9") as client:
+        response = await client.post("/panel/api/run", json={"task": "别人的机器"})
+
+    assert response.status_code == 403

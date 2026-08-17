@@ -97,6 +97,7 @@ async def _join(config: Config, peers: PeerRegistry, *, target: str, pin: str) -
             my_endpoint=config.node.endpoint,
             pin=pin,
             peers=peers,
+            for_node="" if target.startswith(("http://", "https://")) else target,
         )
     except PeerError as exc:
         fail(str(exc))

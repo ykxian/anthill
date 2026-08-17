@@ -66,14 +66,28 @@ class ConfigRequest(BaseModel):
     text: str = Field(min_length=1, max_length=200_000)
 
 
-def is_local_client(host: str | None) -> bool:
+def is_local_client(host: str | None, server_host: str | None = None) -> bool:
     """请求是不是来自本机。逐请求判，不依赖「我们绑的是回环」这个假设。
 
     判据是 TCP 连接的对端地址，**不看任何 HTTP 头** —— 头是客户端说了算的，
     拿它当授权依据等于没有授权。uvicorn 那边也显式关掉了 proxy_headers，
     免得 `X-Forwarded-For` 有机会影响这个值。
+
+    回环之外还认一种：**对端地址 == 这条连接的本端地址**（`server_host` 来自
+    ASGI scope，是内核给这条连接的本地套接字地址，不是任何头）。在本机浏览器里
+    打开本机自己的局域网 IP 就是这种 —— 包没出过这台机器，而伪造这个源地址
+    无法完成 TCP 握手（SYN-ACK 会回到本机自己）。不认它的话，serve 自己
+    打印的面板地址在它自己的机器上打开反而 403 —— Windows 实机第一步就栽这。
+
+    有意的边界决策：经**本机 NAT 出口**的客体（VirtualBox NAT 虚拟机、部分
+    容器网络）源地址也是本机自有 IP，同样会被算作本机 —— 它们是同一台
+    物理机上的软件，符合「挡的是 LAN 上其他主机」的威胁模型。
     """
-    return (host or "").strip().lower() in LOOPBACK_HOSTS
+    peer = (host or "").strip().lower()
+    if peer in LOOPBACK_HOSTS:
+        return True
+    own = (server_host or "").strip().lower()
+    return bool(peer) and peer == own
 
 
 def is_same_origin(origin: str | None, host_header: str | None) -> bool:

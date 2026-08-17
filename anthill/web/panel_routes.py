@@ -90,7 +90,11 @@ def denial(conn: HTTPConnection, token: str, *, what: str = "这个接口") -> H
     """
     if not is_same_origin(conn.headers.get("origin"), conn.headers.get("host")):
         return HTTPException(status_code=403, detail=f"拒绝跨站访问{what}")
-    if is_local_client(conn.client.host if conn.client else None):
+    server = conn.scope.get("server")
+    if is_local_client(
+        conn.client.host if conn.client else None,
+        server[0] if server else None,
+    ):
         return None
     given = presented(
         {k.lower(): v for k, v in conn.headers.items()},
@@ -349,6 +353,9 @@ def mount_panel_actions(
                 my_endpoint=ctx.config.node.endpoint,
                 pin=body.pin,
                 peers=ctx.peers,
+                # 对方一台机器好几个节点：窗口开在谁头上就指名谁。
+                # target 是裸地址时无从得知节点名，维持主节点旧行为。
+                for_node="" if body.target.startswith(("http://", "https://")) else body.target,
             )
         except PeerError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

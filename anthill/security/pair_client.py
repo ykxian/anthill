@@ -42,16 +42,26 @@ def resolve(peers: PeerRegistry, target: str) -> str:
 
 
 async def join(
-    *, base: str, my_node: str, my_endpoint: str, pin: str, peers: PeerRegistry
+    *,
+    base: str,
+    my_node: str,
+    my_endpoint: str,
+    pin: str,
+    peers: PeerRegistry,
+    for_node: str = "",
 ) -> PeerRecord:
     """去连对方：一次往返把密钥换完，成功后写进本机 peers 列表。
 
     **先验对方，再落自己的库** —— PIN 打错时 SPAKE2 不报错，
     只是两边各得一把不同的钥匙，不验就会配成「之后每条消息都验签失败」。
+
+    `for_node`：对方一台机器照看好几个节点时，窗口开在哪个节点上就写谁 ——
+    接收端一直按它路由，但这边以前**从来没发过**这个字段，空值落到主节点，
+    「窗口开在第二个工作区」的配对永远踩空。
     """
     state, outbound = exchange(pin)
     async with peer_client(TIMEOUT) as client:
-        body = await _offer(client, base, my_node, my_endpoint, outbound)
+        body = await _offer(client, base, my_node, my_endpoint, outbound, for_node)
         try:
             key = derive(state, b64decode(str(body["msg"]), validate=True))
         except (KeyError, ValueError) as exc:
@@ -60,7 +70,7 @@ async def join(
         if not tags_match(str(body.get("confirm", "")), confirm_tag(key, CONFIRM_HOST)):
             raise PeerError("PIN 不对：两边推导出的密钥不一致，本机什么都没写入。")
 
-        await _confirm(client, base, my_node, key)
+        await _confirm(client, base, my_node, key, for_node)
 
     return peers.trust(
         PairingToken(
@@ -73,9 +83,11 @@ async def join(
 
 
 async def _offer(
-    client: httpx.AsyncClient, base: str, node: str, endpoint: str, outbound: bytes
+    client: httpx.AsyncClient, base: str, node: str, endpoint: str, outbound: bytes, for_node: str
 ) -> dict[str, Any]:
     payload = {"node": node, "endpoint": endpoint, "msg": b64encode(outbound).decode()}
+    if for_node:
+        payload["for_node"] = for_node
     try:
         response = await client.post(base + PAIR_PATH, json=payload)
     except httpx.HTTPError as exc:
@@ -90,8 +102,12 @@ async def _offer(
     return result
 
 
-async def _confirm(client: httpx.AsyncClient, base: str, node: str, key: bytes) -> None:
+async def _confirm(
+    client: httpx.AsyncClient, base: str, node: str, key: bytes, for_node: str
+) -> None:
     payload = {"node": node, "confirm": confirm_tag(key, CONFIRM_JOINER)}
+    if for_node:
+        payload["for_node"] = for_node
     try:
         response = await client.post(base + PAIR_CONFIRM_PATH, json=payload)
     except httpx.HTTPError as exc:

@@ -465,7 +465,11 @@ def _local_only(request: Request, *, what: str = "这个接口") -> None:
     面板绑 0.0.0.0 时（跨机投递需要），这些接口会跟着暴露给整个网段 ——
     而它们给出的是**所有**对端的状态和对话内容，不是本机那点公开信息。
     """
-    if not is_local_client(request.client.host if request.client else None):
+    server = request.scope.get("server")
+    if not is_local_client(
+        request.client.host if request.client else None,
+        server[0] if server else None,
+    ):
         raise HTTPException(status_code=403, detail=f"{what}只允许本机访问")
     if not is_same_origin(request.headers.get("origin"), request.headers.get("host")):
         raise HTTPException(status_code=403, detail=f"拒绝跨站读取{what}")

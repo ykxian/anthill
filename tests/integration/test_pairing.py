@@ -315,3 +315,57 @@ async def test_a_wrong_pin_leaves_both_sides_clean(tmp_path: Path) -> None:
 
     assert joiner[2].all() == []
     assert host_bundle[2].all() == []
+
+
+# ---------- 一台机器好几个工作区：窗口开在哪个节点，join 就得指名道姓 ----------
+
+
+async def test_pairing_reaches_the_named_node_not_the_primary(tmp_path: Path) -> None:
+    """接收端早就按 for_node 路由了，但 join 客户端的载荷里从来没有这个字段 ——
+    空值落到主节点，于是窗口开在第二个工作区时永远是「没有开着的配对窗口」。
+    cli 在 Windows 实机连 collab-tst 时两次踩空，就是它。
+    """
+    import contextlib
+
+    from anthill.security import pair_client
+    from anthill.security.pairing import PairingStore
+    from anthill.web.context import NodeContext, NodeRegistry
+
+    first = make_node(tmp_path / "a", "alpha")
+    second = make_node(tmp_path / "b", "beta")
+    registry = NodeRegistry([NodeContext(first[0]), NodeContext(second[0])])
+    app = create_app(
+        registry=registry,
+        log=EventLog(None, agent="test", echo=False),
+        advertise="http://host.test:45778",
+    )
+
+    # 窗口开在**第二个**节点（beta）上
+    PairingStore(second[0].root).open("246810")
+
+    # join 走真实客户端代码，只是网络换成 ASGI 直连
+    @contextlib.asynccontextmanager
+    async def fake_client(_timeout: float):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, client=("10.0.0.9", 1)),  # type: ignore[arg-type]
+            base_url="http://host.test",
+        ) as client:
+            yield client
+
+    visitor = make_node(tmp_path / "v", "visitor")
+    original = pair_client.peer_client
+    pair_client.peer_client = fake_client  # type: ignore[assignment]
+    try:
+        record = await pair_client.join(
+            base="http://host.test",
+            my_node="visitor",
+            my_endpoint="http://visitor.test:1",
+            pin="246810",
+            peers=visitor[2],
+            for_node="beta",
+        )
+    finally:
+        pair_client.peer_client = original  # type: ignore[assignment]
+
+    assert record.node == "beta", "配到的该是指名的那个节点"
+    assert any(p.node == "beta" and p.trusted for p in visitor[2].all())
