@@ -442,3 +442,19 @@ def test_init_registers_the_workspace_so_serve_can_find_it(
     runner.invoke(app, ["init", str(tmp_path / "solo")])
 
     assert str(tmp_path / "solo") in [e["path"] for e in listing()]
+
+
+def test_doctor_flags_a_loosened_security_posture(workspace: Path) -> None:
+    """无人值守放宽是安全姿态，巡检必须一眼看到哪台机器开了口子。"""
+    layout = NodeLayout(workspace)
+    toml = layout.node_toml.read_text(encoding="utf-8")
+    # init 模板里已有 [security] 节，键要插进那一节而不是再声明一次
+    layout.node_toml.write_text(
+        toml.replace("[security]", '[security]\nunattended_allow = ["low", "medium"]', 1),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["doctor", "-w", str(workspace)])
+
+    assert "unattended_allow" in result.output
+    assert "medium" in result.output

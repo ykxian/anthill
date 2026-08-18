@@ -140,3 +140,37 @@ def test_layout_discovery_walks_up(layout: NodeLayout):
 def test_layout_discovery_fails_outside_workspace(tmp_path: Path):
     with pytest.raises(ConfigError, match="anthill init"):
         NodeLayout.discover(tmp_path)
+
+
+def test_unattended_allow_accepts_the_loosenable_tiers(tmp_path: Path):
+    layout = write_config(
+        tmp_path,
+        '[node]\nname = "n1"\n[agents.cli]\nrole = "user"\n'
+        '[security]\nunattended_allow = ["low", "medium"]\n',
+    )
+
+    assert Config.load_from(layout).security.unattended_allow == ("low", "medium")
+
+
+def test_unattended_allow_rejects_high(tmp_path: Path):
+    """红线：high 永远到不了免确认 —— 配置层就得把这扇门焊死。"""
+    layout = write_config(
+        tmp_path,
+        '[node]\nname = "n1"\n[agents.cli]\nrole = "user"\n'
+        '[security]\nunattended_allow = ["high"]\n',
+    )
+
+    with pytest.raises(ConfigError, match="high"):
+        Config.load_from(layout)
+
+
+def test_unattended_allow_rejects_typos_instead_of_ignoring_them(tmp_path: Path):
+    """拼错的档位静默忽略 = 配置没生效还不报 —— 必须炸在启动期。"""
+    layout = write_config(
+        tmp_path,
+        '[node]\nname = "n1"\n[agents.cli]\nrole = "user"\n'
+        '[security]\nunattended_allow = ["hgih"]\n',
+    )
+
+    with pytest.raises(ConfigError, match="hgih"):
+        Config.load_from(layout)

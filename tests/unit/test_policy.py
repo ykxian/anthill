@@ -164,3 +164,96 @@ async def test_authorize_denies_when_nobody_can_confirm() -> None:
 
     assert not verdict.allowed
     assert "确认" in verdict.reason
+
+
+# ---------- 无人值守白名单（unattended_allow）----------
+
+
+async def test_low_risk_is_matrix_allowed_and_takes_no_allowlist_credit() -> None:
+    """LOW × TRUSTED_PEER 在矩阵里本来就是放行 —— 白名单没出过力，
+    auto_allowed 必须是 False：这个标志只给真实的放宽记账。"""
+    engine = make_engine(unattended_allow=("low",))
+
+    verdict = await engine.authorize(
+        tool="read_file",
+        risk=RiskLevel.LOW,
+        trust=TrustLevel.TRUSTED_PEER,
+        detail="看一眼 README",
+        confirm=None,
+    )
+
+    assert verdict.allowed
+    assert not verdict.auto_allowed
+
+
+async def test_unattended_allow_does_not_cover_unlisted_risk() -> None:
+    engine = make_engine(unattended_allow=("low",))
+
+    verdict = await engine.authorize(
+        tool="write_file",
+        risk=RiskLevel.MEDIUM,
+        trust=TrustLevel.TRUSTED_PEER,
+        detail="改配置",
+        confirm=None,
+    )
+
+    assert not verdict.allowed
+
+
+async def test_unattended_allow_medium_covers_the_remote_peer_case() -> None:
+    engine = make_engine(unattended_allow=("low", "medium"))
+
+    verdict = await engine.authorize(
+        tool="write_file",
+        risk=RiskLevel.MEDIUM,
+        trust=TrustLevel.TRUSTED_PEER,
+        detail="改配置",
+        confirm=None,
+    )
+
+    assert verdict.allowed
+    assert verdict.auto_allowed
+
+
+async def test_high_risk_never_passes_the_allowlist() -> None:
+    """红线的第二道保险：config 校验已经拒收 "high"，但就算有人绕过校验
+    把它塞进来（model_construct），策略层自己也要顶住。"""
+    from anthill.core.config import SecuritySection
+
+    rigged = SecuritySection.model_construct(
+        **{**SecuritySection().model_dump(), "unattended_allow": ("low", "medium", "high")}
+    )
+    engine = PolicyEngine(rigged)
+
+    verdict = await engine.authorize(
+        tool="run_shell",
+        risk=RiskLevel.HIGH,
+        trust=TrustLevel.USER,
+        detail="rm -rf build",
+        confirm=None,
+    )
+
+    assert not verdict.allowed
+
+
+async def test_a_person_present_is_still_asked_even_for_listed_risk() -> None:
+    """放宽只针对「没人可问」的通道 —— 人在场永远问人。"""
+    asked: list[str] = []
+
+    async def confirm(prompt: str) -> bool:
+        asked.append(prompt)
+        return True
+
+    engine = make_engine(unattended_allow=("medium",))
+
+    verdict = await engine.authorize(
+        tool="write_file",
+        risk=RiskLevel.MEDIUM,
+        trust=TrustLevel.TRUSTED_PEER,
+        detail="改配置",
+        confirm=confirm,
+    )
+
+    assert verdict.allowed
+    assert asked, "有确认通道时必须真的问人"
+    assert not verdict.auto_allowed

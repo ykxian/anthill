@@ -53,6 +53,7 @@ def doctor_command(
         *_check_mailboxes(layout, config),
         *_check_backlog(layout, config),
         *_check_freshness(layout, config),
+        *_check_security_posture(config),
     ]
 
     console.print(f"[bold]{config.node.name}[/bold] [dim]{layout.workspace}[/dim]\n")
@@ -65,6 +66,20 @@ def doctor_command(
         return
     console.print("\n[red]有阻断性问题 —— 上面标 ✗ 的那些会让对应功能直接用不了。[/red]")
     raise typer.Exit(code=1)
+
+
+def _check_security_posture(config: Config) -> list[Finding]:
+    """无人值守放宽是这台机器的安全姿态事实 —— 巡检必须一眼看到谁开了口子。"""
+    allow = config.security.unattended_allow
+    if not allow:
+        return []
+    return [
+        Finding(
+            WARN,
+            f"无人值守放宽已开启：{'、'.join(allow)} 风险免确认（unattended_allow）",
+            fix="确认这是有意的；收回：删掉 node.toml [security] 里的 unattended_allow",
+        )
+    ]
 
 
 def _check_agents(layout: NodeLayout, config: Config) -> list[Finding]:

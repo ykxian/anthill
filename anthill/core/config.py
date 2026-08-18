@@ -12,7 +12,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from anthill.core.envelope import AGENT_NAME_RE, NODE_NAME_RE, TransportKind
 from anthill.core.errors import ConfigError
@@ -206,7 +206,27 @@ class SecuritySection(_Section):
     confirm_high_risk: bool = True
     """False 表示无人值守模式：high 风险直接拒绝而不是等人确认。"""
 
+    unattended_allow: tuple[str, ...] = ()
+    """无人值守通道的有界放宽：决策为「需确认」但没人可问时，实际风险在这个
+    列表里就放行（可选值只有 "low"、"medium"）。默认空 = 一律拒，
+    行为与没有这个配置时逐字节相同。
+
+    三条硬边界："high" 永远进不了这张表（下面校验期焊死）；有确认通道
+    （人在场）时这张表不生效 —— 人在场永远问人；每次命中都记
+    policy.auto_allowed，agentd 启动时非空还会响一声 policy.loosened。"""
+
     max_output_bytes: int = Field(default=64_000, gt=0)
+
+    @field_validator("unattended_allow")
+    @classmethod
+    def _only_loosenable_tiers(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """拼错的档位静默忽略 = 配置没生效还不报 —— 一律炸在启动期。"""
+        for item in value:
+            if item == "high":
+                raise ValueError('unattended_allow 不收 "high"：高风险永远要人点头')
+            if item not in ("low", "medium"):
+                raise ValueError(f"unattended_allow 里认不出 {item!r}（可选：low、medium）")
+        return value
 
     remote_admin: bool = False
     """允许**已信任的对端**在它的总控面板上直接改本机的 node.toml。

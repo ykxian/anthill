@@ -309,3 +309,54 @@ async def test_a_plain_text_answer_also_lands_in_the_transcript(tool_ctx: ToolCo
 
     assert [m.role for m in outcome.transcript] == [Role.ASSISTANT]
     assert [m.content for m in seen] == ["我觉得先加日志"]
+
+
+async def test_auto_allowed_tool_calls_are_loudly_logged(
+    tool_ctx: ToolContext, tmp_path: Path
+) -> None:
+    """白名单放行不是静默特权 —— 每次命中都要在事件日志里响一声 warn。"""
+    import json
+
+    from anthill.core.config import SecuritySection
+
+    loosened_ctx = ToolContext(
+        workspace=tool_ctx.workspace,
+        blackboard=tool_ctx.blackboard,
+        security=SecuritySection(unattended_allow=("medium",)),
+        thread=THREAD,
+    )
+    provider = FakeProvider(
+        [
+            Turn(
+                tool_calls=(
+                    ToolCall(
+                        id="c1",
+                        name="write_file",
+                        arguments={"path": "a.py", "content": "x = 1\n"},
+                    ),
+                )
+            ),
+            finish_turn("写完了"),
+        ]
+    )
+    log_path = tmp_path / "loop-log.jsonl"
+    loop = AgentLoop(
+        provider=provider,
+        tools=build_toolset(("write_file", "finish")),
+        policy=PolicyEngine(loosened_ctx.security),
+        tool_ctx=loosened_ctx,
+        log=EventLog(log_path, agent="coder", echo=False),
+        trust=TrustLevel.TRUSTED_PEER,  # 远端信任节点：MEDIUM 风险本要 CONFIRM
+        max_steps=5,
+        token_budget=100_000,
+        confirm=None,  # 无人值守通道
+    )
+
+    outcome = await loop.run([Msg.user("看看 a.py")])
+
+    assert outcome.finished
+    events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    hits = [e for e in events if e.get("event") == "policy.auto_allowed"]
+    assert hits, "白名单放行必须记 policy.auto_allowed"
+    assert hits[0]["tool"] == "write_file"
+    assert hits[0]["risk"] == "medium"

@@ -51,6 +51,8 @@ class Verdict:
     allowed: bool
     reason: str = ""
     decision: Decision = Decision.ALLOW
+    auto_allowed: bool = False
+    """本要问人、因 unattended_allow 白名单放行 —— 调用方要为它响一声。"""
 
 
 # 风险 → 「免确认执行所需的最低信任级」。够不到就要确认；来源未知则一律拒绝。
@@ -94,6 +96,12 @@ class PolicyEngine:
                 decision=decision,
             )
         if confirm is None:
+            # 无人值守的有界放宽：只把「差个人点头」的档位转成放行。
+            # high 到不了这里享受白名单 —— 就算有人绕过配置校验塞进来，
+            # 这里再焊一道（红线的第二道保险）。人在场时不查表：问人永远更好。
+            loosened = risk is not RiskLevel.HIGH and risk.value in self._security.unattended_allow
+            if loosened:
+                return Verdict(allowed=True, decision=Decision.ALLOW, auto_allowed=True)
             return Verdict(
                 allowed=False,
                 reason=(

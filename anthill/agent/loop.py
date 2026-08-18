@@ -165,6 +165,15 @@ class AgentLoop:
                 reason=verdict.reason,
             )
             return ToolResult.failed(f"{verdict.reason}。请换一个更安全的做法。")
+        if verdict.auto_allowed:
+            # 白名单放行不是静默特权：本要问人的操作被放过去了，必须响一声
+            self._log.warn(
+                "policy.auto_allowed",
+                tool=tool.name,
+                risk=str(risk),
+                trust=self._trust.name,
+                thread=self._ctx.thread,
+            )
 
         try:
             result = await tool.run(call.arguments, self._ctx)

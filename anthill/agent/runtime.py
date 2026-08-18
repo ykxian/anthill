@@ -152,6 +152,12 @@ class AgentRuntime:
             mailbox=str(self.mailbox.root),
             handler=self.handler.name,
         )
+        if self.config.security.unattended_allow:
+            # 放宽的安全姿态每次启动都要响一声，不许静默生效
+            self.log.warn(
+                "policy.loosened",
+                unattended_allow=", ".join(self.config.security.unattended_allow),
+            )
         queue: asyncio.Queue[Path] = asyncio.Queue()
         workers = [
             asyncio.create_task(self._produce(queue), name="watch"),

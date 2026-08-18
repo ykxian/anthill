@@ -343,3 +343,27 @@ async def test_a_finished_message_is_not_redone_after_a_restart(layout, config, 
         await asyncio.sleep(0.4)
 
     assert handled == [env.id], "已经处理完的消息被重放处理了第二遍"
+
+
+async def test_startup_announces_a_loosened_security_posture(layout, make_task):
+    """unattended_allow 非空是这台机器的安全姿态事实 ——
+    每次 agentd 启动都要在日志里响一声，不许静默生效。"""
+    import json
+
+    toml = layout.node_toml.read_text(encoding="utf-8")
+    layout.node_toml.write_text(
+        toml + '\n[security]\nunattended_allow = ["low"]\n', encoding="utf-8"
+    )
+    loosened = Config.load_from(layout)
+
+    async with running(layout, loosened, "beta"):
+        await wait_until(lambda: layout.log_file("beta").is_file())
+
+    events = [
+        json.loads(line)
+        for line in layout.log_file("beta").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    hits = [e for e in events if e.get("event") == "policy.loosened"]
+    assert hits, "启动时必须announce放宽姿态"
+    assert "low" in str(hits[0])
