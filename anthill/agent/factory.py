@@ -20,7 +20,7 @@ from anthill.core.paths import NodeLayout
 from anthill.core.payloads import RiskLevel
 from anthill.orchestrator.board import Blackboard
 from anthill.orchestrator.coordinator import CoordinatorHandler, CoordinatorSettings
-from anthill.providers.registry import TapeMode, provider_for_agent
+from anthill.providers.registry import TapeMode, build_provider, provider_for_agent
 from anthill.security.policy import PolicyEngine
 
 COORDINATOR_ROLE = "coordinator"
@@ -66,10 +66,17 @@ def build_handler(
 
     blackboard = Blackboard(layout.blackboard)
     if agent.role == COORDINATOR_ROLE:
+        judge = None
+        if agent.judge_provider:
+            # 存在性在 Config 载入期已校验过 —— 这里不可能 KeyError
+            judge = build_provider(
+                config.providers[agent.judge_provider], name=agent.judge_provider
+            )
         return CoordinatorHandler(
             provider=provider,
             blackboard=blackboard,
             settings=CoordinatorSettings(step_timeout=config.runtime.task_timeout),
+            judge_provider=judge,
         )
 
     section = config.provider_for(agent_name)

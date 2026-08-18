@@ -47,6 +47,9 @@ def runs_command(
     active: bool = typer.Option(False, "--active", help="只看还没跑完的"),
     follow: bool = typer.Option(False, "--follow", "-f", help="盯着这条任务，跑完为止"),
     trace: bool = typer.Option(False, "--trace", help="回放这条任务的执行流水（事件级）"),
+    fork_from: str = typer.Option(
+        "", "--fork-from", help="从这一步开始重跑：复制成一条新任务（仅限已结束的任务）"
+    ),
     as_json: bool = typer.Option(False, "--json", help="输出 JSON，便于接进脚本"),
 ) -> None:
     """列出编排任务，或看某一条的每一步。
@@ -71,6 +74,9 @@ def runs_command(
             fail(f"没有匹配 {task_id!r} 的任务；先跑 `anthill runs` 看看有哪些")
         if len(matched) > 1:
             fail(f"{task_id!r} 匹配到 {len(matched)} 条，多给几位")
+        if fork_from:
+            _fork(layout, matched[0], fork_from)
+            return
         if trace:
             _replay(layout, matched[0], as_json=as_json)
             return
@@ -100,6 +106,51 @@ def runs_command(
         )
     console.print(table)
     console.print("[dim]看某一条：anthill runs <任务号>[/dim]")
+
+
+def _fork(layout: NodeLayout, state: RunState, from_step: str) -> None:
+    """从某一步重跑。**只写盘不碰调度**：BOARD.md 是 coordinator 的单写者
+    地盘，这里不写；在跑的 coordinator 下个周期从 store.active() 自然接手。
+
+    v1 只对已结束的任务开放：源 run 还在跑就 fork，同一批 worker 会同时
+    收到两份一样的活 —— 失败重试这个主场景根本用不上活 run。
+    """
+    from anthill.core.ids import new_id, new_thread_id
+    from anthill.orchestrator.trace import RunTrace, read_trace
+
+    if not state.finished:
+        fail(
+            "这条任务还在跑 —— fork 只对已结束的任务开放（不然同一批 Agent 会收到双份活）。"
+            "等它结束，或先看 --follow"
+        )
+    try:
+        state.step(from_step)
+    except KeyError:
+        fail(f"没有步骤 {from_step!r}；这条任务有：{', '.join(r.id for r in state.steps)}")
+
+    events = read_trace(layout.blackboard / "tasks" / state.task_id)
+    last_seq = int(events[-1].get("seq", 0)) if events else 0  # 纯出处记录：源流水落笔处
+    forked = state.fork(
+        from_step, task_id=new_id(), root_thread=new_thread_id(), root_msg_id=new_id()
+    )
+    RunStore(layout.blackboard).save(forked)
+    RunTrace(layout.blackboard / "tasks" / forked.task_id).emit(
+        # 出处字段不能叫 seq —— 那是流水的协议保留键，会被本事件自己的序号顶掉
+        "forked_from",
+        task=state.task_id,
+        source_seq=last_seq,
+        step=from_step,
+    )
+
+    kept = sum(1 for r in forked.steps if r.state is StepState.DONE)
+    console.print(
+        f"已从步骤 [bold]{from_step}[/bold] fork 出新任务 "
+        f"[bold]{forked.task_id[-6:]}[/bold]（保留 {kept} 步已完成的交付）"
+    )
+    console.print(
+        "[dim]coordinator 在跑的话下个周期自动接手；"
+        f"盯进度：anthill runs {forked.task_id[-6:]} -f[/dim]"
+    )
 
 
 def _replay(layout: NodeLayout, state: RunState, *, as_json: bool) -> None:

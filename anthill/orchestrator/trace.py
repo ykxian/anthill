@@ -66,9 +66,26 @@ def read_trace(task_dir: Path) -> list[dict[str, object]]:
     return events
 
 
+_COUNT_CACHE: dict[Path, tuple[int, int, int]] = {}
+"""event_count 的 (mtime_ns, size, count) 缓存。面板每 2 秒全量快照，
+不缓存的话是 N 条 run × 每轮全文读+解析。size 也进键：同一秒内连续
+追加时 mtime 分辨率可能不够，字节数不会骗人。条目极小，不做驱逐。"""
+
+
 def event_count(task_dir: Path) -> int:
     """给面板的「N 条事件」。只数完整行，不带任何内容。"""
-    return len(read_trace(task_dir))
+    path = task_dir / TRACE_FILE
+    try:
+        stat = path.stat()
+    except OSError:
+        _COUNT_CACHE.pop(path, None)
+        return 0
+    cached = _COUNT_CACHE.get(path)
+    if cached is not None and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+        return cached[2]
+    count = len(read_trace(task_dir))
+    _COUNT_CACHE[path] = (stat.st_mtime_ns, stat.st_size, count)
+    return count
 
 
 def _last_seq(path: Path) -> int:

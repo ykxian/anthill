@@ -475,3 +475,99 @@ def test_doctor_flags_tools_an_agent_cannot_use(workspace: Path) -> None:
 
     assert "capped" in result.output
     assert "run_shell" in result.output
+
+
+def _seed_finished_failed_run(workspace: Path) -> str:
+    """s1 成、s2 败、已收尾的 run —— fork 的主场景数据。"""
+    from anthill.core.ids import new_id, new_thread_id
+    from anthill.orchestrator.plan import Plan
+    from anthill.orchestrator.state import RunState, RunStore
+    from anthill.orchestrator.trace import RunTrace
+
+    layout = NodeLayout(workspace)
+    plan = Plan.model_validate(
+        {
+            "goal": "修日期解析",
+            "steps": [
+                {"id": "s1", "assignee": "boss", "task": "写", "depends_on": []},
+                {"id": "s2", "assignee": "boss", "task": "审", "depends_on": ["s1"]},
+            ],
+            "done_when": "",
+        }
+    )
+    state = RunState.start(
+        task_id=new_id(),
+        plan=plan,
+        requester="box:cli",
+        root_thread=new_thread_id(),
+        root_msg_id=new_id(),
+    )
+    state = state.dispatch("s1", thread=new_thread_id(), msg_id=new_id())
+    state = state.complete("s1", summary="写完了")
+    state = state.dispatch("s2", thread=new_thread_id(), msg_id=new_id())
+    state = state.fail("s2", error="炸了")
+    state = state.finish(summary="步骤 s2 失败")
+    RunStore(layout.blackboard).save(state)
+    trace = RunTrace(layout.blackboard / "tasks" / state.task_id)
+    trace.emit("run.started")
+    trace.emit("run.finished", status="error")
+    return state.task_id
+
+
+def test_fork_creates_a_new_pending_run_with_provenance(workspace: Path) -> None:
+    from anthill.orchestrator.state import RunStore, StepState
+    from anthill.orchestrator.trace import read_trace
+
+    task_id = _seed_finished_failed_run(workspace)
+    layout = NodeLayout(workspace)
+
+    result = runner.invoke(app, ["runs", task_id[-6:], "-w", str(workspace), "--fork-from", "s2"])
+
+    assert result.exit_code == 0, result.output
+    states = {s.task_id: s for s in RunStore(layout.blackboard).all()}
+    assert len(states) == 2
+    forked = next(s for s in states.values() if s.task_id != task_id)
+    assert not forked.finished
+    assert forked.step("s1").state is StepState.DONE
+    assert forked.step("s2").state is StepState.PENDING
+    first = read_trace(layout.blackboard / "tasks" / forked.task_id)[0]
+    assert first["kind"] == "forked_from"
+    assert first["task"] == task_id
+    assert first["step"] == "s2"
+    assert first["source_seq"] == 2  # 源流水落笔处，纯出处记录
+    assert first["seq"] == 1  # 本事件在新流水里的序号，别和出处混了
+
+
+def test_fork_refuses_a_run_that_is_still_going(workspace: Path) -> None:
+    """v1 红线：活 run 上 fork = 同一批 worker 双份活，直接拒。"""
+    from anthill.core.ids import new_id, new_thread_id
+    from anthill.orchestrator.plan import Plan
+    from anthill.orchestrator.state import RunState, RunStore
+
+    layout = NodeLayout(workspace)
+    plan = Plan.model_validate(
+        {"goal": "g", "steps": [{"id": "s1", "assignee": "boss", "task": "t"}], "done_when": ""}
+    )
+    state = RunState.start(
+        task_id=new_id(),
+        plan=plan,
+        requester="box:cli",
+        root_thread=new_thread_id(),
+        root_msg_id=new_id(),
+    )
+    RunStore(layout.blackboard).save(state)
+
+    result = runner.invoke(app, ["runs", state.task_id, "-w", str(workspace), "--fork-from", "s1"])
+
+    assert result.exit_code != 0
+    assert "已结束" in result.output
+    assert len(RunStore(layout.blackboard).all()) == 1, "拒绝时不许留下半个 fork"
+
+
+def test_fork_of_an_unknown_step_names_the_real_ones(workspace: Path) -> None:
+    task_id = _seed_finished_failed_run(workspace)
+
+    result = runner.invoke(app, ["runs", task_id, "-w", str(workspace), "--fork-from", "ghost"])
+
+    assert result.exit_code != 0
+    assert "s1" in result.output and "s2" in result.output

@@ -25,6 +25,9 @@ from anthill.core.config import Config
 
 PER_MILLION = 1_000_000
 TASK_DONE = "task.done"
+"""花销账的记账事件。coordinator 的 plan/judge 模型调用也复用它 ——
+所以 boss 行的「任务数」列数的是**模型调用次数**而不是编排任务数
+（一次 run 至少 plan+judge 两笔）。token 与钱才是这张表的主角。"""
 
 
 @dataclass(frozen=True, slots=True)

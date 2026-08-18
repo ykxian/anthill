@@ -96,3 +96,46 @@ def test_detail_cannot_shadow_the_reserved_keys(tmp_path: Path) -> None:
     assert event["seq"] == 1
     assert event["kind"] == "run.started"
     assert event["ts"] != "假的"
+
+
+def test_event_count_stays_correct_as_events_append(tmp_path: Path) -> None:
+    """缓存不许牺牲正确性：文件一变（mtime 或 size），计数就得跟上。"""
+    trace = RunTrace(tmp_path)
+    trace.emit("run.started")
+    trace.emit("step.dispatched", step="s1")
+    assert event_count(tmp_path) == 2
+
+    trace.emit("run.finished")
+    assert event_count(tmp_path) == 3
+
+
+def test_event_count_does_not_reread_an_unchanged_file(tmp_path: Path) -> None:
+    """面板每 2 秒全量快照 —— trace 没动就不该重读重解析。
+    钉法：算过一次后，原地换成同长度的别的内容并复原 mtime，
+    读了才会看见新内容 —— 计数不变即证明走了缓存。"""
+    import os
+
+    trace = RunTrace(tmp_path)
+    trace.emit("run.started")
+    path = tmp_path / TRACE_FILE
+    assert event_count(tmp_path) == 1
+
+    original = path.read_bytes()
+    stat = path.stat()
+    # 同长度但**两条**合法事件 —— 真读了文件计数就会变成 2
+    forged = b'{"seq": 9}\n{"seq": 8}' + b" " * (len(original) - 22) + b"\n"
+    assert len(forged) == len(original)
+    path.write_bytes(forged)
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    assert event_count(tmp_path) == 1
+
+
+def test_event_count_forgets_a_deleted_trace(tmp_path: Path) -> None:
+    trace = RunTrace(tmp_path)
+    trace.emit("run.started")
+    assert event_count(tmp_path) == 1
+
+    (tmp_path / TRACE_FILE).unlink()
+
+    assert event_count(tmp_path) == 0

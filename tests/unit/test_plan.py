@@ -280,3 +280,24 @@ def test_per_step_timeout_defaults_to_zero_meaning_global() -> None:
 
     assert plan.steps[0].timeout == 30
     assert PlanStep(id="x", assignee="c", task="t").timeout == 0
+
+
+# ---------- roster 名片带风险上限（④残口：计划别派高风险步给戴帽 Agent）----------
+
+
+def test_a_capped_agent_wears_its_cap_on_the_roster_card() -> None:
+    entry = RosterEntry(name="junior", role="worker", cap="medium")
+
+    assert "风险上限 medium" in entry.render()
+
+
+def test_an_uncapped_agent_card_stays_clean() -> None:
+    entry = RosterEntry(name="senior", role="worker")
+
+    assert "风险上限" not in entry.render()
+
+
+def test_the_plan_prompt_teaches_the_cap_rule() -> None:
+    from anthill.orchestrator.plan import PLAN_PROMPT
+
+    assert "风险上限" in PLAN_PROMPT

@@ -102,6 +102,46 @@ class RunState(BaseModel):
             started_at=now().isoformat(),
         )
 
+    def fork(self, from_step: str, *, task_id: str, root_thread: str, root_msg_id: str) -> RunState:
+        """从某一步开始重跑的新 run（纯数据操作，调度由 coordinator 自然接手）。
+
+        重置集 = `from_step` 的**传递闭包下游**（含自己）∪ 所有非 DONE 的步骤；
+        只有「与重跑无关且真的成过」的步骤连 summary/artifacts 一起保留 ——
+        下游的 _compose_body 直接可用。闭包按 depends_on 算：for_each 展开的
+        步骤是普通节点、run_if 在重算就绪时自然生效，都不需要特判。
+
+        安全语义（有意）：新 task_id 意味着 needs_approval 步骤的审批 id
+        全部重新派生 —— **批准不跨 fork 继承**，重置的步骤要重新走审批。
+        保留步骤里的旧 thread 无害：只有 RUNNING 状态才被回信认领。
+        """
+        self.step(from_step)  # 不存在就 KeyError
+        downstream = {from_step}
+        changed = True
+        while changed:
+            changed = False
+            for record in self.steps:
+                if record.id not in downstream and any(
+                    dep in downstream for dep in record.depends_on
+                ):
+                    downstream.add(record.id)
+                    changed = True
+        records = tuple(
+            StepRecord(id=r.id, assignee=r.assignee, task=r.task, depends_on=r.depends_on)
+            if r.id in downstream or r.state is not StepState.DONE
+            else r
+            for r in self.steps
+        )
+        return RunState(
+            task_id=task_id,
+            plan=self.plan,
+            requester=self.requester,
+            root_thread=root_thread,
+            root_msg_id=root_msg_id,
+            steps=records,
+            round=self.round,
+            started_at=now().isoformat(),
+        )
+
     # ---------- 查询 ----------
 
     def step(self, step_id: str) -> StepRecord:

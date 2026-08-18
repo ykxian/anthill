@@ -967,9 +967,7 @@ async def test_trace_seq_survives_a_coordinator_restart(layout: NodeLayout, node
     assert [e["kind"] for e in events][-1] == "run.finished"
 
 
-async def test_finished_runs_do_not_pile_up_trace_writers(
-    layout: NodeLayout, node: Config
-) -> None:
+async def test_finished_runs_do_not_pile_up_trace_writers(layout: NodeLayout, node: Config) -> None:
     """收尾即驱逐 —— serve 一跑几周，coordinator 的写者字典不许随
     历史任务数线性长胖。"""
     boss = FakeProvider([plan_turn(), verdict_turn(satisfied=True)])
@@ -986,6 +984,159 @@ async def test_finished_runs_do_not_pile_up_trace_writers(
         await stack.enter_async_context(running(layout, node, "boss", handler))
         Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
         await wait_until(lambda: bool(finals_in(cli_box)))
+        # 最终结果的发出在驱逐**之前**（同一次 _advance 里）——
+        # 直接停机可能把 pop 截胡，等到驱逐完成再收
+        await wait_until(lambda: not handler._traces)
 
     assert RunStore(layout.blackboard).all()[0].finished
     assert handler._traces == {}
+
+
+# ---------- 任务级模型路由（judge_provider）与 roster 风险名片 ----------
+
+
+async def test_the_judge_can_run_on_a_cheaper_brain(layout: NodeLayout, node: Config) -> None:
+    """拆计划要强模型，判定「达没达成」是便宜活 —— 两个调用点可以分脑。"""
+    planner = FakeProvider([plan_turn()])
+    judge = FakeProvider([verdict_turn(satisfied=True)])
+    coder = FakeProvider([finish_turn("写完了", ("tests/test_date.py",))])
+    reviewer = FakeProvider([finish_turn("approve")])
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+    from anthill.orchestrator.board import Blackboard
+
+    handler = CoordinatorHandler(
+        provider=planner, blackboard=Blackboard(layout.blackboard), judge_provider=judge
+    )
+
+    async with AsyncExitStack() as stack:
+        for name, provider in (("coder", coder), ("reviewer", reviewer)):
+            await stack.enter_async_context(
+                running(layout, node, name, worker_handler(layout, node, name, provider))
+            )
+        await stack.enter_async_context(running(layout, node, "boss", handler))
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(finals_in(cli_box)))
+
+    assert finals_in(cli_box)[0].payload.status == "ok"
+    assert len(planner.calls) == 1, "主脑只该被问一次（拆计划）"
+    assert len(judge.calls) == 1, "判定必须走 judge_provider"
+    assert "完成标准" in judge.calls[0].messages[-1].content
+
+
+async def test_aclose_closes_both_brains(layout: NodeLayout, node: Config) -> None:
+    """双 provider 最容易漏的资源口子：第二个大脑也要被关掉。"""
+    from anthill.orchestrator.board import Blackboard
+
+    class ClosingFake(FakeProvider):
+        def __init__(self, script) -> None:
+            super().__init__(script)
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    planner = ClosingFake([plan_turn()])
+    judge = ClosingFake([verdict_turn()])
+    handler = CoordinatorHandler(
+        provider=planner, blackboard=Blackboard(layout.blackboard), judge_provider=judge
+    )
+
+    await handler.aclose()
+
+    assert planner.closed and judge.closed
+
+
+async def test_coordinator_model_calls_land_in_the_cost_ledger(
+    layout: NodeLayout, node: Config
+) -> None:
+    """`anthill cost` 只认 task.done 事件 —— plan/judge 两处调用此前一直是
+    账上的黑数，现在必须各记一笔（provider/model 字段齐全）。"""
+    import json as _json
+
+    boss = FakeProvider([plan_turn(), verdict_turn(satisfied=True)])
+    coder = FakeProvider([finish_turn("写完了", ("tests/test_date.py",))])
+    reviewer = FakeProvider([finish_turn("approve")])
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+
+    async with AsyncExitStack() as stack:
+        for name, provider in (("coder", coder), ("reviewer", reviewer)):
+            await stack.enter_async_context(
+                running(layout, node, name, worker_handler(layout, node, name, provider))
+            )
+        await stack.enter_async_context(
+            running(layout, node, "boss", coordinator_handler(layout, boss))
+        )
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(finals_in(cli_box)))
+
+    events = [
+        _json.loads(line)
+        for line in layout.log_file("boss").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    ledger = [e for e in events if e.get("event") == "task.done"]
+    kinds = {e.get("kind") for e in ledger}
+    assert "plan" in kinds and "judge" in kinds
+    assert all(e.get("provider") == "fake" and e.get("model") == "fake-model" for e in ledger)
+
+
+async def test_the_planner_sees_worker_caps(layout: NodeLayout) -> None:
+    """戴帽 Agent 的名片要写「风险上限」——计划别一开始就把高风险步派给它。"""
+    toml = NODE_TOML.replace(
+        '[agents.coder]\nrole = "worker"',
+        '[agents.coder]\nrole = "worker"\nmax_tool_risk = "medium"',
+    )
+    layout.node_toml.write_text(toml, encoding="utf-8")
+    capped_node = Config.load_from(layout)
+    boss = FakeProvider([plan_turn()])
+
+    async with running(layout, capped_node, "boss", coordinator_handler(layout, boss)):
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(boss.calls))
+
+    prompt = boss.calls[0].messages[-1].content
+    assert "coder（角色 worker）（风险上限 medium）" in prompt
+    assert "风险上限" in prompt
+
+
+async def test_a_forked_run_is_picked_up_and_kept_steps_are_not_redispatched(
+    layout: NodeLayout, node: Config
+) -> None:
+    """fork 落盘之后，在跑的 coordinator 从 store.active() 自然接手；
+    保留的已完成步骤**不重派** —— coder 全程只被叫过一次。"""
+    from anthill.core.ids import new_id, new_thread_id
+    from anthill.orchestrator.trace import read_trace
+
+    boss = FakeProvider([plan_turn(), verdict_turn(satisfied=True), verdict_turn(satisfied=True)])
+    coder = FakeProvider([finish_turn("写完了", ("tests/test_date.py",))])
+    reviewer = FakeProvider([finish_turn("approve"), finish_turn("再次 approve")])
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+    store = RunStore(layout.blackboard)
+
+    async with AsyncExitStack() as stack:
+        for name, provider in (("coder", coder), ("reviewer", reviewer)):
+            await stack.enter_async_context(
+                running(layout, node, name, worker_handler(layout, node, name, provider))
+            )
+        await stack.enter_async_context(
+            running(layout, node, "boss", coordinator_handler(layout, boss), tick=0.05)
+        )
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(finals_in(cli_box)))
+
+        source = store.all()[0]
+        forked = source.fork(
+            "s2", task_id=new_id(), root_thread=new_thread_id(), root_msg_id=new_id()
+        )
+        store.save(forked)
+
+        await wait_until(lambda: (store.load(forked.task_id) or forked).finished)
+
+    done = store.load(forked.task_id)
+    assert done is not None and done.finished
+    assert done.step("s1").summary == "写完了"  # 保留的交付原样在
+    assert len(coder.calls) == 1, "s1 的交付被保留，coder 不该被再叫一次"
+    assert len(reviewer.calls) == 2, "s2 重跑，reviewer 该被叫第二次"
+    # fork run 的流水独立成篇，从头讲自己的故事
+    kinds = [e["kind"] for e in read_trace(layout.blackboard / "tasks" / forked.task_id)]
+    assert kinds[-1] == "run.finished"

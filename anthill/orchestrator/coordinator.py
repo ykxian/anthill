@@ -35,7 +35,7 @@ from anthill.orchestrator.notify import notify
 from anthill.orchestrator.plan import Plan, PlanStep, RosterEntry, generate_plan
 from anthill.orchestrator.state import RunState, RunStore, StepRecord, StepState
 from anthill.orchestrator.trace import RunTrace
-from anthill.providers.base import ChatProvider, Msg
+from anthill.providers.base import ChatProvider, Msg, Usage
 from anthill.security.approvals import ApprovalRequest, ApprovalStore
 from anthill.security.policy import USER_ROLE
 
@@ -100,11 +100,15 @@ class CoordinatorHandler:
         provider: ChatProvider,
         blackboard: Blackboard,
         settings: CoordinatorSettings | None = None,
+        judge_provider: ChatProvider | None = None,
     ) -> None:
         self._provider = provider
         self._board = blackboard
         self._store = RunStore(blackboard.root)
         self._settings = settings or CoordinatorSettings()
+        self._judge_provider = judge_provider
+        """done_when 判定的专用大脑（config 的 judge_provider）。
+        None = 沿用主 provider。拆计划要强模型，判定是便宜活。"""
         self._traces: dict[str, RunTrace] = {}
 
     def _trace(self, task_id: str) -> RunTrace:
@@ -117,6 +121,9 @@ class CoordinatorHandler:
 
     async def aclose(self) -> None:
         await self._provider.aclose()
+        # 第二个大脑也要关 —— 双 provider 最容易漏的资源口子
+        if self._judge_provider is not None and self._judge_provider is not self._provider:
+            await self._judge_provider.aclose()
 
     # ---------- 入口 ----------
 
@@ -147,7 +154,14 @@ class CoordinatorHandler:
             return
 
         try:
-            plan = await generate_plan(self._provider, goal=goal, roster=roster)
+            plan = await generate_plan(
+                self._provider,
+                goal=goal,
+                roster=roster,
+                on_usage=lambda usage: self._log_model_call(
+                    ctx, kind="plan", usage=usage, provider=self._provider
+                ),
+            )
         except PlanError as exc:
             ctx.log.error("plan.failed", msg=env.id, error=str(exc))
             await self._reply_error(env, ctx, f"拆解任务失败：{exc}")
@@ -461,12 +475,32 @@ class CoordinatorHandler:
                 f"- {r.id}（{r.assignee}）：{r.summary or '（无交付说明）'}" for r in state.steps
             ),
         )
+        judge = self._judge_provider or self._provider
         try:
-            turn = await self._provider.complete([Msg.user(prompt)], [])
+            turn = await judge.complete([Msg.user(prompt)], [])
         except Exception as exc:  # 判定失败不该让整次协作变成失败
             ctx.log.warn("done_when.judge_failed", task=state.task_id, error=str(exc))
             return Verdict(satisfied=True, reason=f"完成标准判定失败（{exc}），按已完成处理")
+        self._log_model_call(ctx, kind="judge", usage=turn.usage, provider=judge)
         return _parse_verdict(turn.text)
+
+    def _log_model_call(
+        self, ctx: HandlerContext, *, kind: str, usage: Usage, provider: ChatProvider
+    ) -> None:
+        """coordinator 自己的模型调用也要进花销账。
+
+        `anthill cost` 只认 task.done 事件 —— 此前 plan/judge 两处调用
+        从来没记过，一直是账上的黑数；拆出 judge_provider 之后更不能黑。
+        """
+        ctx.log.info(
+            "task.done",
+            kind=kind,
+            tokens=usage.total,
+            in_tokens=usage.input_tokens,
+            out_tokens=usage.output_tokens,
+            provider=provider.name,
+            model=provider.model,
+        )
 
     def _append_rework(self, state: RunState, fix: str) -> RunState:
         """返工只追加一步，派给**最后一个真的有产出的**执行者。
@@ -588,7 +622,7 @@ def _parse_verdict(text: str) -> Verdict:
 def build_roster(ctx: HandlerContext) -> tuple[RosterEntry, ...]:
     """可派活的对象：本节点上除自己与用户信箱之外的所有 Agent。"""
     return tuple(
-        RosterEntry(name=name, role=agent.role, persona=agent.persona)
+        RosterEntry(name=name, role=agent.role, persona=agent.persona, cap=agent.max_tool_risk)
         for name, agent in sorted(ctx.config.agents.items())
         if name != ctx.identity.agent and agent.role != USER_ROLE
     )
@@ -617,12 +651,18 @@ def _approval_id(state: RunState, step: PlanStep) -> str:
     """审批 id 必须**稳定**：每次 tick 都重算一次，变了就会不停提交新请求。
 
     `ApprovalRequest.id` 强制 ULID（它会被拼进文件路径），所以这里从 task_id
-    派生一个合法 ULID：拿 task_id 的前缀 + 步骤序号，同一步永远得到同一个。
+    派生一个合法 ULID：覆写随机段**开头**两位为步骤序号，同一步永远得到同一个。
+
+    为什么不是砍掉末两位再拼：`new_id()` 同毫秒是单调递增 —— 两个连着生成的
+    task_id 往往只差最后一两位（fork 一次就是活例子），砍尾等于把唯一性砍没，
+    两次运行会互相冒领审批。随机段开头在同毫秒对里恰恰是**相同**的，覆写它
+    不丢任何区分度。
     """
     index = [s.id for s in state.plan.steps].index(step.id)
     # 十六进制的 0-9A-F 全都在 Crockford Base32 字母表里（它排除的是 I/L/O/U），
-    # 所以直接拿它当后两位，得到的仍然是一个合法 ULID。步骤数上限 12，两位够了。
-    return state.task_id[:-2] + f"{index:02X}"
+    # 覆写后仍是合法 ULID。ULID 前 10 位是时间戳，10、11 两位是随机段开头。
+    # 步骤数上限 12，两位十六进制够了。
+    return state.task_id[:10] + f"{index:02X}" + state.task_id[12:]
 
 
 def _first_error(state: RunState) -> str:

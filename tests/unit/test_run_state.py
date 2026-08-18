@@ -224,3 +224,158 @@ def test_the_board_survives_one_branch_failing_while_another_still_runs(tmp_path
 
     text = (tmp_path / BOARD_FILE).read_text(encoding="utf-8")
     assert "skipped" in text and "failed" in text
+
+
+# ---------- fork：从某一步重跑 ----------
+
+
+def _three_step_state() -> RunState:
+    """s1 → s2 → s3 一条链，s1 成了、s2 失败、s3 被跳过，run 已结束。"""
+    plan = Plan.model_validate(
+        {
+            "goal": "g",
+            "steps": [
+                {"id": "s1", "assignee": "a", "task": "一", "depends_on": []},
+                {"id": "s2", "assignee": "b", "task": "二", "depends_on": ["s1"]},
+                {"id": "s3", "assignee": "c", "task": "三", "depends_on": ["s2"]},
+            ],
+            "done_when": "",
+        }
+    )
+    state = RunState.start(
+        task_id=new_id(),
+        plan=plan,
+        requester="n:cli",
+        root_thread=new_thread_id(),
+        root_msg_id=new_id(),
+    )
+    state = state.dispatch("s1", thread=new_thread_id(), msg_id=new_id())
+    state = state.complete("s1", summary="一号交付", artifacts=("a.py",))
+    state = state.dispatch("s2", thread=new_thread_id(), msg_id=new_id())
+    state = state.fail("s2", error="炸了")
+    state = state.block_unreachable()
+    return state.finish(summary="步骤 s2 失败")
+
+
+def test_fork_resets_the_step_and_its_transitive_downstream() -> None:
+    source = _three_step_state()
+
+    forked = source.fork("s2", task_id=new_id(), root_thread=new_thread_id(), root_msg_id=new_id())
+
+    assert forked.step("s1").state is StepState.DONE
+    assert forked.step("s1").summary == "一号交付"  # 保留的交付连内容一起带走
+    assert forked.step("s1").artifacts == ("a.py",)
+    assert forked.step("s2").state is StepState.PENDING
+    assert forked.step("s2").attempts == 0 and forked.step("s2").error == ""
+    assert forked.step("s3").state is StepState.PENDING
+    assert not forked.finished
+    assert forked.task_id != source.task_id
+    assert forked.root_thread != source.root_thread
+    assert forked.ready_steps() == ("s2",)
+
+
+def test_fork_also_resets_non_done_steps_outside_the_closure() -> None:
+    """闭包外但没成过的步骤（失败/跳过/在跑）一律重置 —— fork 出来的 run
+    不该带着一身旧伤起跑。"""
+    source = _three_step_state()
+
+    forked = source.fork("s3", task_id=new_id(), root_thread=new_thread_id(), root_msg_id=new_id())
+
+    # s2 在 s3 的闭包之外，但它是 FAILED —— 也要重置
+    assert forked.step("s2").state is StepState.PENDING
+    assert forked.step("s1").state is StepState.DONE
+
+
+def test_fork_treats_fanout_steps_as_plain_nodes() -> None:
+    """for_each 展开出来的 s2__1/s2__2 是普通节点，闭包按 depends_on 走。"""
+    plan = Plan.model_validate(
+        {
+            "goal": "g",
+            "steps": [
+                {"id": "s1", "assignee": "a", "task": "一", "depends_on": []},
+                {
+                    "id": "s2",
+                    "assignee": "b",
+                    "task": "处理 {item}",
+                    "depends_on": ["s1"],
+                    "for_each": ["x", "y"],
+                },
+            ],
+            "done_when": "",
+        }
+    )
+    state = RunState.start(
+        task_id=new_id(),
+        plan=plan,
+        requester="n:cli",
+        root_thread=new_thread_id(),
+        root_msg_id=new_id(),
+    )
+    state = state.dispatch("s1", thread=new_thread_id(), msg_id=new_id())
+    state = state.complete("s1", summary="好了")
+    for sid in ("s2__1", "s2__2"):
+        state = state.dispatch(sid, thread=new_thread_id(), msg_id=new_id())
+        state = state.complete(sid, summary="done")
+    state = state.finish(summary="ok")
+
+    forked = state.fork("s1", task_id=new_id(), root_thread=new_thread_id(), root_msg_id=new_id())
+
+    assert forked.step("s2__1").state is StepState.PENDING
+    assert forked.step("s2__2").state is StepState.PENDING
+
+
+def test_fork_lets_run_if_recompute_naturally() -> None:
+    """run_if 的三态在重算就绪时自然生效：上游成了，upstream_failed 的
+    兜底步不就绪 —— fork 不需要为它写一行特判。"""
+    plan = Plan.model_validate(
+        {
+            "goal": "g",
+            "steps": [
+                {"id": "s1", "assignee": "a", "task": "一", "depends_on": []},
+                {
+                    "id": "clean",
+                    "assignee": "b",
+                    "task": "兜底",
+                    "depends_on": ["s1"],
+                    "run_if": "upstream_failed",
+                },
+                {"id": "s3", "assignee": "c", "task": "三", "depends_on": ["s1"]},
+            ],
+            "done_when": "",
+        }
+    )
+    state = RunState.start(
+        task_id=new_id(),
+        plan=plan,
+        requester="n:cli",
+        root_thread=new_thread_id(),
+        root_msg_id=new_id(),
+    )
+    state = state.dispatch("s1", thread=new_thread_id(), msg_id=new_id())
+    state = state.complete("s1", summary="好了")
+    state = state.dispatch("s3", thread=new_thread_id(), msg_id=new_id())
+    state = state.fail("s3", error="炸了")
+    state = state.block_unreachable()
+    state = state.finish(summary="s3 失败")
+
+    forked = state.fork("s3", task_id=new_id(), root_thread=new_thread_id(), root_msg_id=new_id())
+
+    assert forked.ready_steps() == ("s3",)  # 兜底步不就绪：它等的是上游失败
+
+
+def test_fork_does_not_inherit_approvals() -> None:
+    """批准不跨 fork 继承：审批 id 从 task_id 派生，新 task 一定重新走审批。"""
+    from anthill.orchestrator.coordinator import _approval_id
+
+    source = _three_step_state()
+    forked = source.fork("s2", task_id=new_id(), root_thread=new_thread_id(), root_msg_id=new_id())
+
+    step = source.plan.step("s2")
+    assert _approval_id(source, step) != _approval_id(forked, step)
+
+
+def test_fork_of_an_unknown_step_raises() -> None:
+    source = _three_step_state()
+
+    with pytest.raises(KeyError):
+        source.fork("ghost", task_id=new_id(), root_thread=new_thread_id(), root_msg_id=new_id())

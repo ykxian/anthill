@@ -400,3 +400,51 @@ async def test_runtime_closes_the_provider_on_shutdown(layout: NodeLayout) -> No
 
     # Assert
     assert closed == [True]
+
+
+def test_factory_wires_the_judge_brain_to_the_right_provider(
+    layout: NodeLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """钉的是**运输线**而不是目的地：e2e 测试手工构造过 judge_provider，
+    factory 查表接线这一段若接错（比如误拿主 provider 名查表），
+    行为测试照样全绿 —— 这里按 provider 名字验双脑各接各的。"""
+    monkeypatch.setenv("ANTHILL_TEST_KEY", "sk-test")
+    layout.node_toml.write_text(
+        LLM_NODE_TOML
+        + """
+[providers.cheap]
+kind = "openai_compat"
+api_key_env = "ANTHILL_TEST_KEY"
+model = "cheap-model"
+
+[agents.boss]
+role = "coordinator"
+provider = "fakeprov"
+judge_provider = "cheap"
+""",
+        encoding="utf-8",
+    )
+    config = Config.load_from(layout)
+
+    handler = build_handler(layout=layout, config=config, agent_name="boss")
+
+    judge = handler._judge_provider
+    assert judge is not None, "配置了 judge_provider，判定脑不该缺席"
+    assert judge is not handler._provider
+    assert judge.name == "cheap" and judge.model == "cheap-model"
+    assert handler._provider.name == "fakeprov"
+
+
+def test_factory_leaves_the_judge_brain_empty_by_default(
+    layout: NodeLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHILL_TEST_KEY", "sk-test")
+    layout.node_toml.write_text(
+        LLM_NODE_TOML + '\n[agents.boss]\nrole = "coordinator"\nprovider = "fakeprov"\n',
+        encoding="utf-8",
+    )
+    config = Config.load_from(layout)
+
+    handler = build_handler(layout=layout, config=config, agent_name="boss")
+
+    assert handler._judge_provider is None  # 缺省单脑，零行为变化

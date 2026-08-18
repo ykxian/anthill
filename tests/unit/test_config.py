@@ -194,3 +194,25 @@ def test_max_tool_risk_rejects_typos(tmp_path: Path):
 
     with pytest.raises(ConfigError, match="midium"):
         Config.load_from(layout)
+
+
+def test_judge_provider_reference_is_checked_at_load(tmp_path: Path):
+    """judge_provider 指向不存在的 provider 要炸在载入期,不是第一次判定时。"""
+    layout = write_config(
+        tmp_path,
+        """
+[node]
+name = "n1"
+[providers.main]
+kind = "openai_compat"
+api_key_env = "K"
+model = "m"
+[agents.boss]
+role = "coordinator"
+provider = "main"
+judge_provider = "ghost"
+""",
+    )
+
+    with pytest.raises(ConfigError, match="ghost"):
+        Config.load_from(layout)

@@ -129,6 +129,14 @@ class AgentSection(_Section):
     role: str = "worker"
     provider: str | None = None
     persona: str = ""
+
+    judge_provider: str | None = None
+    """coordinator 专用：done_when 判定（含返工判定）走这个 provider。
+
+    不设就沿用主 provider，零行为变化。拆分的理由：拆计划要强模型，
+    判定「达没达成」是个便宜得多、调用更频的活 —— 这是任务级模型路由
+    在 AntHill 里唯一说得通的落点（worker 侧路由天然 = 选 assignee，
+    每只 Agent 自带 provider，不该跨 Agent 塞模型提示）。"""
     tools: tuple[str, ...] = ()
     mcp: tuple[str, ...] = ()
     """这个 Agent 能用哪几台外部 MCP server 的工具（名字对应 `[mcp.<名字>]`）。
@@ -139,19 +147,12 @@ class AgentSection(_Section):
     max_steps: int = Field(default=DEFAULT_MAX_STEPS, gt=0)
     token_budget: int = Field(default=DEFAULT_TOKEN_BUDGET, gt=0)
 
-    max_tool_risk: str = "high"
-    """这只 Agent 允许碰的最高工具风险档（low/medium/high，与
-    [security] unattended_allow 同一套词表）。默认 high = 不设限。
+    max_tool_risk: Literal["low", "medium", "high"] = "high"
+    """这只 Agent 允许碰的最高工具风险档（与 [security] unattended_allow
+    同一套词表）。默认 high = 不设限。Literal 在 schema 层就挡住拼错的档位。
 
     这是**收紧**方向的旋钮：cap 是 Agent 自身的特权边界，先于一切放宽
     生效 —— 超上限的调用连策略矩阵都到不了，②的白名单更越不过它。"""
-
-    @field_validator("max_tool_risk")
-    @classmethod
-    def _known_risk_tier(cls, value: str) -> str:
-        if value not in ("low", "medium", "high"):
-            raise ValueError(f"max_tool_risk 里认不出 {value!r}（可选：low、medium、high）")
-        return value
     chat_turns: int = Field(default=DEFAULT_CHAT_TURNS, ge=0)
     """同一话题里最多接几轮对话。
 
@@ -384,6 +385,12 @@ class Config(_Section):
                 known = ", ".join(sorted(self.providers)) or "（未配置任何 provider）"
                 raise ValueError(
                     f"Agent {name} 引用了不存在的 provider {agent.provider!r}；已有：{known}"
+                )
+            if agent.judge_provider and agent.judge_provider not in self.providers:
+                known = ", ".join(sorted(self.providers)) or "（未配置任何 provider）"
+                raise ValueError(
+                    f"Agent {name} 引用了不存在的 judge_provider "
+                    f"{agent.judge_provider!r}；已有：{known}"
                 )
             unknown = [s for s in agent.mcp if s not in self.mcp]
             if unknown:

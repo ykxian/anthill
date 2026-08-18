@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from enum import StrEnum
 from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from anthill.core.errors import PlanError, ProviderError
-from anthill.providers.base import ChatProvider, Msg
+from anthill.providers.base import ChatProvider, Msg, Usage
 
 MAX_PLAN_ATTEMPTS = 3
 MAX_STEPS = 12
@@ -36,6 +37,8 @@ PLAN_PROMPT = """\
 - 只输出一个 JSON 对象，不要有任何解释文字。
 - 步骤数 1~{max_steps}，能一步做完就别拆成三步。
 - `assignee` 写具体 Agent 名，或 `role:角色名`（同角色多人时由系统挑负载最低的）。
+- 名片上标了「风险上限」的 Agent 干不了超过那档的操作（比如跑 shell 命令通常是
+  high）—— 这类步骤派给没标上限的 Agent。
 - `depends_on` 写依赖的步骤 id；没有依赖就留空数组，它们会被并发派发。
 - `done_when` 写一句可判定的完成标准，最后由你自己拿它对照结果。
 
@@ -73,9 +76,17 @@ class RosterEntry(BaseModel):
     role: str
     persona: str = ""
 
+    cap: str = "high"
+    """这只 Agent 的 max_tool_risk（词表同 [agents]）。high = 不设限，名片不提。
+
+    纯提示层：步骤的实际风险派发前不可知，静态校验是伪精确 —— 真正的
+    执法在工具调用时（loop 的 policy.capped）。名片上标出来只是让计划
+    别把高风险步骤派给戴帽 Agent，省得撞墙重试烧轮次。"""
+
     def render(self) -> str:
         suffix = f" —— {self.persona}" if self.persona else ""
-        return f"- {self.name}（角色 {self.role}）{suffix}"
+        capped = f"（风险上限 {self.cap}）" if self.cap != "high" else ""
+        return f"- {self.name}（角色 {self.role}）{capped}{suffix}"
 
 
 class RunIf(StrEnum):
@@ -306,7 +317,10 @@ async def generate_plan(
     goal: str,
     roster: tuple[RosterEntry, ...],
     max_attempts: int = MAX_PLAN_ATTEMPTS,
+    on_usage: Callable[[Usage], None] | None = None,
 ) -> Plan:
+    """`on_usage` 每次真实模型调用回调一次（重试也算）——
+    调用方拿它记花销账，这里不该认识日志或黑板。"""
     messages = [
         Msg.user(
             PLAN_PROMPT.format(
@@ -322,6 +336,8 @@ async def generate_plan(
             turn = await provider.complete(messages, [])
         except ProviderError as exc:
             raise PlanError(f"生成计划时模型调用失败：{exc}") from exc
+        if on_usage is not None:
+            on_usage(turn.usage)
 
         try:
             plan = parse_plan(turn.text)
