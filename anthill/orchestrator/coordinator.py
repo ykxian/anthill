@@ -34,6 +34,7 @@ from anthill.orchestrator.board import Blackboard
 from anthill.orchestrator.notify import notify
 from anthill.orchestrator.plan import Plan, PlanStep, RosterEntry, generate_plan
 from anthill.orchestrator.state import RunState, RunStore, StepRecord, StepState
+from anthill.orchestrator.trace import RunTrace
 from anthill.providers.base import ChatProvider, Msg
 from anthill.security.approvals import ApprovalRequest, ApprovalStore
 from anthill.security.policy import USER_ROLE
@@ -49,6 +50,9 @@ worker 回的 TaskErrorPayload 里本来就带 `retryable`，但整个 orchestra
 DEFAULT_STEP_TIMEOUT = 600.0
 DEFAULT_NUDGE_AFTER = 180.0
 MAX_SUMMARY_CHARS = 4_000
+TRACE_CLIP = 200
+"""trace.jsonl 里的文本字段上限。全文在 state.json / 信封里都有，
+流水只要能看懂「发生了什么」；回放要全文的走 state 快照。"""
 
 _APPROVED = object()
 """`_approval_gate` 的哨兵：批过了，可以往下派。"""
@@ -101,6 +105,15 @@ class CoordinatorHandler:
         self._board = blackboard
         self._store = RunStore(blackboard.root)
         self._settings = settings or CoordinatorSettings()
+        self._traces: dict[str, RunTrace] = {}
+
+    def _trace(self, task_id: str) -> RunTrace:
+        """这次 run 的执行流水写者。**观察者**：只记录，从不影响调度 ——
+        写失败在 RunTrace 里就地吞掉，恢复调度仍然只认 state.json。"""
+        trace = self._traces.get(task_id)
+        if trace is None:
+            trace = self._traces[task_id] = RunTrace(self._board.task_dir(task_id))
+        return trace
 
     async def aclose(self) -> None:
         await self._provider.aclose()
@@ -156,6 +169,23 @@ class CoordinatorHandler:
             steps=len(plan.steps),
             goal=plan.goal,
         )
+        trace = self._trace(task_id)
+        # msg+thread 是和 `agent start --record` 模型级录音做 join 的关联键
+        trace.emit(
+            "run.started",
+            goal=_clip_title(plan.goal, TRACE_CLIP),
+            requester=str(env.from_),
+            thread=env.thread,
+            msg=env.id,
+        )
+        trace.emit(
+            "plan.created",
+            steps=[
+                {"id": s.id, "assignee": s.assignee, "task": _clip_title(s.task, TRACE_CLIP)}
+                for s in plan.steps
+            ],
+            done_when=_clip_title(plan.done_when, TRACE_CLIP) if plan.done_when.strip() else "",
+        )
         await self._advance(state, ctx, env=env)
 
     # ---------- 下游回信 ----------
@@ -172,6 +202,9 @@ class CoordinatorHandler:
             artifacts = tuple(getattr(env.payload, "artifacts", ()))
             state = state.complete(record.id, summary=summary, artifacts=artifacts)
             ctx.log.info("step.done", task=state.task_id, step=record.id, frm=str(env.from_))
+            self._trace(state.task_id).emit(
+                "step.done", step=record.id, frm=str(env.from_), thread=env.thread, msg=env.id
+            )
         else:
             error = str(getattr(env.payload, "error", ""))[:MAX_SUMMARY_CHARS]
             if self._should_retry(env, record):
@@ -185,12 +218,21 @@ class CoordinatorHandler:
                     attempt=record.attempts,
                     error=error,
                 )
+                self._trace(state.task_id).emit(
+                    "step.retrying",
+                    step=record.id,
+                    attempt=record.attempts,
+                    error=error[:TRACE_CLIP],
+                )
                 state = state.reset_for_retry(record.id, error=error)
                 state = await self._dispatch(state, record.id, ctx, env=env)
                 await self._advance(state, ctx, env=env)
                 return
             state = state.fail(record.id, error=error)
             ctx.log.warn("step.failed", task=state.task_id, step=record.id, error=error)
+            self._trace(state.task_id).emit(
+                "step.failed", step=record.id, frm=str(env.from_), error=error[:TRACE_CLIP]
+            )
 
         await self._advance(state, ctx, env=env)
 
@@ -224,6 +266,9 @@ class CoordinatorHandler:
             state = await self._finalize(state, ctx, env=env)
 
         self._store.save(state)
+        if state.finished:
+            # 收尾即驱逐写者 —— 长跑进程里已结束的 run 不许在字典里缓慢积累
+            self._traces.pop(state.task_id, None)
         self._board.write(self._store.all())
 
     async def _dispatch(
@@ -249,6 +294,9 @@ class CoordinatorHandler:
             )
         except (HopLimitExceeded, UnknownRecipient, ValueError) as exc:
             ctx.log.error("step.dispatch_failed", task=state.task_id, step=step_id, error=str(exc))
+            self._trace(state.task_id).emit(
+                "step.dispatch_failed", step=step_id, error=str(exc)[:TRACE_CLIP]
+            )
             return state.fail(step_id, error=f"派发失败：{exc}")
 
         ctx.log.info(
@@ -257,6 +305,9 @@ class CoordinatorHandler:
             step=step_id,
             to=step.assignee,
             thread=sub_thread,
+        )
+        self._trace(state.task_id).emit(
+            "step.dispatched", step=step_id, to=step.assignee, thread=sub_thread, msg=sent.id
         )
         return state.dispatch(step_id, thread=sub_thread, msg_id=sent.id)
 
@@ -283,8 +334,10 @@ class CoordinatorHandler:
             store.close(request_id)
             if answer.approved:
                 ctx.log.warn("step.approved", task=state.task_id, step=step.id, by=answer.by)
+                self._trace(state.task_id).emit("step.approved", step=step.id, by=answer.by)
                 return _APPROVED
             ctx.log.warn("step.rejected", task=state.task_id, step=step.id, by=answer.by)
+            self._trace(state.task_id).emit("step.rejected", step=step.id, by=answer.by)
             return state.fail(step.id, error=f"这一步被拒绝了（{answer.by or '人工'}）")
 
         if not store.request_path(request_id).is_file():
@@ -303,6 +356,9 @@ class CoordinatorHandler:
                 task=state.task_id,
                 step=step.id,
                 hint="anthill approve",
+            )
+            self._trace(state.task_id).emit(
+                "step.awaiting_approval", step=step.id, approval=request_id
             )
         return state
 
@@ -329,6 +385,7 @@ class CoordinatorHandler:
         if state.failed_ids or state.skipped_ids:
             failed = ", ".join(sorted(state.failed_ids | state.skipped_ids))
             done = self._settle(state, f"步骤 {failed} 失败")
+            self._trace(state.task_id).emit("run.finished", status="error", failed=failed)
             await self._send_final(
                 done,
                 ctx,
@@ -344,12 +401,20 @@ class CoordinatorHandler:
             ctx.log.info(
                 "plan.rework", task=state.task_id, round=reworked.round, reason=verdict.reason
             )
+            self._trace(state.task_id).emit(
+                "plan.rework", round=reworked.round, reason=verdict.reason[:TRACE_CLIP]
+            )
             for step_id in reworked.ready_steps():
                 reworked = await self._dispatch(reworked, step_id, ctx, env=env)
             return reworked
 
         summary = _aggregate(state, verdict)
         done = self._settle(state, summary)
+        self._trace(state.task_id).emit(
+            "run.finished",
+            status="ok" if verdict.satisfied else "partial",
+            reason=verdict.reason[:TRACE_CLIP],
+        )
         await self._send_final(
             done,
             ctx,
@@ -458,9 +523,13 @@ class CoordinatorHandler:
                 ctx.log.warn(
                     "step.timeout", task=state.task_id, step=record.id, seconds=int(elapsed)
                 )
+                self._trace(state.task_id).emit(
+                    "step.timeout", step=record.id, seconds=int(elapsed)
+                )
                 updated = updated.fail(record.id, error=f"超过 {int(elapsed)}s 未回复，判为失败")
             elif elapsed > self._settings.nudge_after and not record.nudged:
                 await self._nudge(state, record, ctx)
+                self._trace(state.task_id).emit("step.nudged", step=record.id)
                 updated = updated.mark_nudged(record.id)
         return updated
 

@@ -103,6 +103,84 @@ def test_an_unknown_run_is_an_actionable_error(workspace: Path) -> None:
     assert "anthill runs" in result.output
 
 
+def _seed_run_with_trace(workspace: Path) -> str:
+    """落一条已完成的 run + 三条流水事件，给回放用例当数据。"""
+    from anthill.core.ids import new_id, new_thread_id
+    from anthill.orchestrator.plan import Plan
+    from anthill.orchestrator.state import RunState, RunStore
+    from anthill.orchestrator.trace import RunTrace
+
+    layout = NodeLayout(workspace)
+    plan = Plan.model_validate(
+        {
+            "goal": "修好日期解析",
+            "steps": [{"id": "s1", "assignee": "boss", "task": "写用例"}],
+            "done_when": "",
+        }
+    )
+    state = RunState.start(
+        task_id=new_id(),
+        plan=plan,
+        requester="box:cli",
+        root_thread=new_thread_id(),
+        root_msg_id=new_id(),
+    )
+    RunStore(layout.blackboard).save(state)
+    trace = RunTrace(layout.blackboard / "tasks" / state.task_id)
+    trace.emit("run.started", goal="修好日期解析")
+    trace.emit("step.dispatched", step="s1", to="coder", thread="T1", msg="M1")
+    trace.emit("run.finished", status="ok")
+    return state.task_id
+
+
+def test_runs_trace_replays_the_event_stream(workspace: Path) -> None:
+    """`anthill runs <id> --trace`：全文回放只走 CLI（敏感面纪律的另一半）。"""
+    task_id = _seed_run_with_trace(workspace)
+
+    result = runner.invoke(app, ["runs", task_id[-6:], "-w", str(workspace), "--trace"])
+
+    assert result.exit_code == 0
+    for kind in ("run.started", "step.dispatched", "run.finished"):
+        assert kind in result.output
+    assert "s1" in result.output
+
+
+def test_runs_trace_as_json_emits_the_raw_events(workspace: Path) -> None:
+    task_id = _seed_run_with_trace(workspace)
+
+    result = runner.invoke(app, ["runs", task_id, "-w", str(workspace), "--trace", "--json"])
+
+    assert result.exit_code == 0
+    events = json.loads(result.output)["events"]
+    assert [e["seq"] for e in events] == [1, 2, 3]
+    assert events[1]["step"] == "s1"
+
+
+def test_runs_trace_says_so_when_there_is_no_trace(workspace: Path) -> None:
+    """老任务没有流水文件 —— 说清楚，不是报错也不是空输出装哑巴。"""
+    from anthill.core.ids import new_id, new_thread_id
+    from anthill.orchestrator.plan import Plan
+    from anthill.orchestrator.state import RunState, RunStore
+
+    layout = NodeLayout(workspace)
+    plan = Plan.model_validate(
+        {"goal": "g", "steps": [{"id": "s1", "assignee": "boss", "task": "t"}], "done_when": ""}
+    )
+    state = RunState.start(
+        task_id=new_id(),
+        plan=plan,
+        requester="box:cli",
+        root_thread=new_thread_id(),
+        root_msg_id=new_id(),
+    )
+    RunStore(layout.blackboard).save(state)
+
+    result = runner.invoke(app, ["runs", state.task_id, "-w", str(workspace), "--trace"])
+
+    assert result.exit_code == 0
+    assert "没有执行流水" in result.output
+
+
 # ---------- 花销 ----------
 
 

@@ -193,3 +193,41 @@ def test_a_late_delivered_old_envelope_is_not_archived_on_arrival(tmp_path: Path
     moved = sweep_user_mailboxes(layout, config, keep_hours=24.0)
 
     assert moved == 0, "刚落地的信不该按信封时刻被判超龄"
+
+
+def test_old_run_traces_are_pruned_but_state_stays(tmp_path: Path) -> None:
+    """trace.jsonl 纳入 records_keep_days（与 tst2 对齐的补充 b）。
+
+    只清流水不清快照：state.json 是历史任务列表的数据源，看板还要读；
+    活跃 run 一直在追加事件，mtime 常新，天然不会被误清。
+    """
+    layout, _ = _node(tmp_path)
+    task_dir = layout.blackboard / "tasks" / new_id()
+    task_dir.mkdir(parents=True)
+    (task_dir / "state.json").write_text("{}", encoding="utf-8")
+    trace = task_dir / "trace.jsonl"
+    trace.write_text('{"seq": 1}\n', encoding="utf-8")
+    stale = time.time() - 40 * 86400
+    os.utime(trace, (stale, stale))
+    os.utime(task_dir / "state.json", (stale, stale))
+
+    fresh_dir = layout.blackboard / "tasks" / new_id()
+    fresh_dir.mkdir(parents=True)
+    young = fresh_dir / "trace.jsonl"
+    young.write_text('{"seq": 1}\n', encoding="utf-8")
+
+    removed = sweep_records(layout, keep_days=30.0)
+
+    assert removed == 1
+    assert not trace.exists()
+    assert (task_dir / "state.json").exists()
+    assert young.exists()
+
+
+def test_trace_glob_matches_the_real_trace_filename() -> None:
+    """hygiene 里的 TRACE_GLOB 是字面量（不让 core 向上 import orchestrator），
+    这里钉住它和真实文件名的等值 —— 改名时两边必须一起动。"""
+    from anthill.core.hygiene import TRACE_GLOB
+    from anthill.orchestrator.trace import TRACE_FILE
+
+    assert f"*/{TRACE_FILE}" == TRACE_GLOB

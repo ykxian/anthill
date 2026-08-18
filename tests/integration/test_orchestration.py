@@ -890,3 +890,102 @@ async def test_waiting_does_not_pile_up_duplicate_requests(
         await asyncio.sleep(0.5)  # 让 tick 转好几轮
 
         assert len(ApprovalStore(layout.root).pending()) == 1
+
+
+# ---------- 执行流水（trace.jsonl）----------
+
+
+async def test_a_run_leaves_a_replayable_trace(layout: NodeLayout, node: Config) -> None:
+    """state.json 是「现在什么样」，trace.jsonl 是「怎么走到这一步的」。
+
+    没有它，一次协作跑完只剩终态快照：哪一步先派、催没催过、
+    重试发生在哪个环节，全都无从回放。
+    """
+    from anthill.orchestrator.trace import read_trace
+
+    boss = FakeProvider([plan_turn(), verdict_turn(satisfied=True)])
+    coder = FakeProvider([finish_turn("写完了", ("tests/test_date.py",))])
+    reviewer = FakeProvider([finish_turn("approve")])
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+
+    async with AsyncExitStack() as stack:
+        for name, provider in (("coder", coder), ("reviewer", reviewer)):
+            await stack.enter_async_context(
+                running(layout, node, name, worker_handler(layout, node, name, provider))
+            )
+        await stack.enter_async_context(
+            running(layout, node, "boss", coordinator_handler(layout, boss))
+        )
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(finals_in(cli_box)))
+
+    state = RunStore(layout.blackboard).all()[0]
+    events = read_trace(layout.blackboard / "tasks" / state.task_id)
+    kinds = [e["kind"] for e in events]
+
+    assert kinds[0] == "run.started"
+    assert "plan.created" in kinds
+    assert kinds.count("step.dispatched") == 2
+    assert kinds.count("step.done") == 2
+    assert kinds[-1] == "run.finished"
+    # seq 严格递增：单写者纪律的可观测面
+    seqs = [e["seq"] for e in events]
+    assert seqs == sorted(seqs) and len(seqs) == len(set(seqs))
+    # 派发事件带 msg+thread —— 与 `agent start --record` 的模型级录音做 join 的键
+    dispatched = [e for e in events if e["kind"] == "step.dispatched"]
+    assert all(e["thread"] and e["msg"] for e in dispatched)
+    assert {e["step"] for e in dispatched} == {"s1", "s2"}
+
+
+async def test_trace_seq_survives_a_coordinator_restart(layout: NodeLayout, node: Config) -> None:
+    """换一个全新的 coordinator 实例接手，流水的 seq 接着编，不回卷不撞号。"""
+    from anthill.orchestrator.trace import read_trace
+
+    boss1 = FakeProvider([plan_turn()])
+    coder = FakeProvider([finish_turn("写完了")])
+    reviewer = FakeProvider([finish_turn("approve")])
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+    store = RunStore(layout.blackboard)
+
+    async with running(layout, node, "boss", coordinator_handler(layout, boss1)):
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(store.all()) and store.all()[0].step("s1").attempts > 0)
+
+    async with AsyncExitStack() as stack:
+        for name, provider in (("coder", coder), ("reviewer", reviewer)):
+            await stack.enter_async_context(
+                running(layout, node, name, worker_handler(layout, node, name, provider))
+            )
+        boss2 = FakeProvider([verdict_turn(satisfied=True)])
+        async with running(layout, node, "boss", coordinator_handler(layout, boss2)):
+            await wait_until(lambda: bool(finals_in(cli_box)))
+
+    events = read_trace(layout.blackboard / "tasks" / store.all()[0].task_id)
+    seqs = [e["seq"] for e in events]
+    assert seqs == sorted(seqs) and len(seqs) == len(set(seqs))
+    assert [e["kind"] for e in events].count("run.started") == 1
+    assert [e["kind"] for e in events][-1] == "run.finished"
+
+
+async def test_finished_runs_do_not_pile_up_trace_writers(
+    layout: NodeLayout, node: Config
+) -> None:
+    """收尾即驱逐 —— serve 一跑几周，coordinator 的写者字典不许随
+    历史任务数线性长胖。"""
+    boss = FakeProvider([plan_turn(), verdict_turn(satisfied=True)])
+    coder = FakeProvider([finish_turn("写完了", ("tests/test_date.py",))])
+    reviewer = FakeProvider([finish_turn("approve")])
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+    handler = coordinator_handler(layout, boss)
+
+    async with AsyncExitStack() as stack:
+        for name, provider in (("coder", coder), ("reviewer", reviewer)):
+            await stack.enter_async_context(
+                running(layout, node, name, worker_handler(layout, node, name, provider))
+            )
+        await stack.enter_async_context(running(layout, node, "boss", handler))
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(finals_in(cli_box)))
+
+    assert RunStore(layout.blackboard).all()[0].finished
+    assert handler._traces == {}

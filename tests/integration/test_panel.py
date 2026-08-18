@@ -126,6 +126,35 @@ def test_snapshot_includes_runs_and_their_steps(
     assert [s["id"] for s in snapshot["runs"][0]["steps"]] == ["s1"]
 
 
+def test_run_rows_carry_an_event_count_not_the_trace_itself(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    """敏感面纪律（与 tst2 对齐的补充 c）：面板只知道「有 N 条事件」，
+    流水全文只走 `anthill runs <id> --trace`。"""
+    from anthill.orchestrator.trace import RunTrace
+
+    layout, config, peers = node
+    task_id = new_id()
+    RunStore(layout.blackboard).save(
+        RunState.start(
+            task_id=task_id,
+            plan=PLAN,
+            requester="laptop:cli",
+            root_thread=new_thread_id(),
+            root_msg_id=new_id(),
+        )
+    )
+    trace = RunTrace(layout.blackboard / "tasks" / task_id)
+    trace.emit("run.started", goal="秘密目标全文")
+    trace.emit("step.dispatched", step="s1")
+
+    snapshot = build_snapshot(layout, config, peers)
+
+    run = snapshot["runs"][0]
+    assert run["events"] == 2
+    assert "秘密目标全文" not in str(run.get("trace", ""))
+
+
 def test_snapshot_merges_events_from_every_agent_log(
     node: tuple[NodeLayout, Config, PeerRegistry],
 ) -> None:

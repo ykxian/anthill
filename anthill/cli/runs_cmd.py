@@ -11,6 +11,7 @@ Ctrl-C 时提示的「用 anthill status 查看」还是条死路 —— `status
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from rich.table import Table
 from rich.text import Text
 
 from anthill.cli.common import console, fail, load
+from anthill.core.paths import NodeLayout
 from anthill.orchestrator.state import RunState, RunStore, StepState
 
 MARK = {
@@ -44,16 +46,24 @@ def runs_command(
     workspace: Path | None = typer.Option(None, "--workspace", "-w", help="工作区目录"),
     active: bool = typer.Option(False, "--active", help="只看还没跑完的"),
     follow: bool = typer.Option(False, "--follow", "-f", help="盯着这条任务，跑完为止"),
+    trace: bool = typer.Option(False, "--trace", help="回放这条任务的执行流水（事件级）"),
     as_json: bool = typer.Option(False, "--json", help="输出 JSON，便于接进脚本"),
 ) -> None:
     """列出编排任务，或看某一条的每一步。
 
     `--follow` 是 `anthill run` 按 Ctrl-C 之后的回程：协调器在磁盘上一直在跑，
     这条命令重新盯上去。**它只读黑板，不参与任何编排** —— 关掉它不影响协作。
+
+    `--trace` 回放 trace.jsonl —— 快照答不了的「怎么走到这一步的」：
+    哪一步先派、催没催过、重试发生在哪个环节。流水全文只出现在这里，
+    面板只知道「有 N 条事件」。
     """
     layout, _ = load(workspace)
     store = RunStore(layout.blackboard)
     states = store.active() if active else store.all()
+
+    if trace and not task_id:
+        fail("--trace 要指定看哪一条：anthill runs <任务号> --trace")
 
     if task_id:
         matched = [s for s in states if s.task_id == task_id or s.task_id.endswith(task_id)]
@@ -61,6 +71,9 @@ def runs_command(
             fail(f"没有匹配 {task_id!r} 的任务；先跑 `anthill runs` 看看有哪些")
         if len(matched) > 1:
             fail(f"{task_id!r} 匹配到 {len(matched)} 条，多给几位")
+        if trace:
+            _replay(layout, matched[0], as_json=as_json)
+            return
         if follow:
             _follow(matched[0].task_id, store)
             return
@@ -87,6 +100,60 @@ def runs_command(
         )
     console.print(table)
     console.print("[dim]看某一条：anthill runs <任务号>[/dim]")
+
+
+def _replay(layout: NodeLayout, state: RunState, *, as_json: bool) -> None:
+    """按 seq 回放一次 run 的执行流水。只读，不碰调度。"""
+    from anthill.orchestrator.trace import read_trace
+
+    events = read_trace(layout.blackboard / "tasks" / state.task_id)
+    if as_json:
+        console.print_json(data={"task_id": state.task_id, "events": events})
+        return
+    if not events:
+        console.print(
+            "[dim]这条任务没有执行流水 —— 旧版 coordinator 跑的，或已被定期卫生清掉。[/dim]"
+        )
+        return
+    console.print(f"[bold]{_clip(state.plan.goal, 60)}[/bold] · {len(events)} 条事件\n")
+    for event in events:
+        console.print(_event_line(event))
+    console.print("\n[dim]每一步的终态与产物：anthill runs " + state.task_id[-6:] + "[/dim]")
+
+
+_KIND_STYLE = {
+    "run.started": "bold cyan",
+    "plan.created": "cyan",
+    "plan.rework": "yellow",
+    "run.finished": "bold green",
+    "step.done": "green",
+    "step.failed": "bold red",
+    "step.dispatch_failed": "bold red",
+    "step.timeout": "red",
+    "step.retrying": "yellow",
+    "step.nudged": "yellow",
+    "step.rejected": "red",
+}
+
+
+def _event_line(event: dict[str, object]) -> Text:
+    """一行一事件：`seq 时:分:秒 kind step 其余字段`。"""
+    seq = event.get("seq", "?")
+    clock = str(event.get("ts", ""))[11:19]  # 日期在 state 里有，这里只要时分秒
+    kind = str(event.get("kind", "?"))
+    step = str(event.get("step", ""))
+    rest = {k: v for k, v in event.items() if k not in ("seq", "ts", "kind", "step")}
+    line = Text()
+    line.append(f"{seq:>4} ", style="dim")
+    line.append(f"{clock} ", style="dim")
+    line.append(f"{kind:<22}", style=_KIND_STYLE.get(kind, ""))
+    if step:
+        line.append(f" {step}", style="bold")
+    for key, value in rest.items():
+        rendered = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        line.append(f" {key}=", style="dim")
+        line.append(str(rendered))
+    return line
 
 
 def _follow(task_id: str, store: RunStore) -> None:

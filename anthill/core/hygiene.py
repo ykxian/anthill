@@ -32,6 +32,10 @@ from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
 from anthill.core.traffic import RECEIPT_PREFIX
 
+TRACE_GLOB = "*/trace.jsonl"
+"""编排执行流水的文件名，与 orchestrator/trace.TRACE_FILE 同名 ——
+字面量而不 import，是不让 core 向上依赖 orchestrator；等值有测试钉着。"""
+
 
 def sweep_user_mailboxes(layout: NodeLayout, config: Config, *, keep_hours: float) -> int:
     """归档 role=user 信箱里的旧信封。返回搬走的条数。"""
@@ -68,17 +72,25 @@ def sweep_user_mailboxes(layout: NodeLayout, config: Config, *, keep_hours: floa
 
 
 def sweep_records(layout: NodeLayout, *, keep_days: float) -> int:
-    """清掉 keep_days 没动过的 chats 发件记录文件。"""
+    """清掉 keep_days 没动过的记录文件：chats 发件记录 + 编排执行流水。
+
+    trace.jsonl 只清流水不清快照 —— state.json 是历史任务列表的数据源；
+    活跃 run 一直在追加事件、mtime 常新，天然不会被误清。
+    """
     removed = 0
     cutoff = time.time() - keep_days * 86400
-    chats = layout.root / "chats"
-    if not chats.is_dir():
-        return 0
-    for path in chats.glob("*.jsonl"):
-        with suppress(FileNotFoundError, OSError):
-            if path.stat().st_mtime < cutoff:
-                path.unlink()
-                removed += 1
+    groups = (
+        (layout.root / "chats", "*.jsonl"),
+        (layout.blackboard / "tasks", TRACE_GLOB),
+    )
+    for root, pattern in groups:
+        if not root.is_dir():
+            continue
+        for path in root.glob(pattern):
+            with suppress(FileNotFoundError, OSError):
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
     return removed
 
 

@@ -946,6 +946,7 @@ function renderRuns(nodes) {
         <span class="where">${esc(r.where)}</span>
         <span class="goal grow truncate">${esc(r.goal)}</span>
         ${r.round ? `<span class="pill warn">返工 ${esc(r.round)}</span>` : ""}
+        ${r.events ? `<span class="meta" title="执行流水回放：anthill runs ${esc(String(r.task_id || "").slice(-6))} --trace">${esc(r.events)} 事件</span>` : ""}
         <span class="pill ${r.finished ? "ok" : ""}">${r.finished ? "已完成" : "进行中"}</span>
       </div>
       <div class="steps">

@@ -26,6 +26,7 @@ from anthill.core.outbox import Outbox
 from anthill.core.paths import NodeLayout
 from anthill.discovery.registry import PeerRegistry
 from anthill.orchestrator.state import RunStore
+from anthill.orchestrator.trace import event_count
 from anthill.security.approvals import ApprovalStore
 
 DEFAULT_EVENT_LIMIT = 80
@@ -127,6 +128,8 @@ def _runs(layout: NodeLayout) -> list[dict[str, Any]]:
             "round": run.round,
             "finished": run.finished,
             "result": run.result,
+            # 只给「N 条事件」不给全文 —— 流水回放走 `anthill runs <id> --trace`
+            "events": event_count(layout.blackboard / "tasks" / run.task_id),
             "steps": [
                 {
                     "id": step.id,
