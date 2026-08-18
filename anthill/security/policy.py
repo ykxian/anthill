@@ -61,6 +61,14 @@ MIN_TRUST_TO_ALLOW: dict[RiskLevel, TrustLevel] = {
     RiskLevel.MEDIUM: TrustLevel.LOCAL_AGENT,
 }
 
+RISK_ORDER: dict[RiskLevel, int] = {
+    RiskLevel.LOW: 0,
+    RiskLevel.MEDIUM: 1,
+    RiskLevel.HIGH: 2,
+}
+"""风险档位的全序。RiskLevel 是 StrEnum 没有大小 —— ②的白名单、③的
+每 Agent 上限都要比档，比较一律走这张表，别在各处自造次序。"""
+
 ALWAYS_CONFIRM = frozenset({RiskLevel.HIGH})
 """high 风险无论谁派的活都要人点头 —— 这是「远端 agent 能跑命令但危险命令要本人同意」的落点。"""
 

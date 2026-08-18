@@ -21,6 +21,7 @@ from anthill.core.errors import BudgetExceeded, HopLimitExceeded, ProviderError
 from anthill.core.payloads import (
     ChatPayload,
     MessageType,
+    RiskLevel,
     TaskErrorPayload,
     TaskRequestPayload,
     TaskResultPayload,
@@ -85,6 +86,7 @@ class LlmHandler:
         confirm: Confirmer | None = None,
         chat_turns: int = 0,
         mcp_servers: dict[str, McpSection] | None = None,
+        max_risk: RiskLevel = RiskLevel.HIGH,
     ) -> None:
         self._provider = provider
         self._tools = tools
@@ -97,6 +99,7 @@ class LlmHandler:
         self._chat_turns = chat_turns
         self._mcp_servers = mcp_servers or {}
         self._mcp: McpToolset | None = None
+        self._max_risk = max_risk
 
     async def setup(self, ctx: HandlerContext) -> None:
         """连外部 MCP server，把它们的工具挂进来。
@@ -168,6 +171,7 @@ class LlmHandler:
             max_steps=self._max_steps,
             token_budget=self._token_budget,
             confirm=self._confirm,
+            max_risk=self._max_risk,
         )
 
         try:

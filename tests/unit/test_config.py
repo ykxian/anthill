@@ -174,3 +174,23 @@ def test_unattended_allow_rejects_typos_instead_of_ignoring_them(tmp_path: Path)
 
     with pytest.raises(ConfigError, match="hgih"):
         Config.load_from(layout)
+
+
+def test_max_tool_risk_accepts_the_full_vocabulary(tmp_path: Path):
+    layout = write_config(
+        tmp_path,
+        '[node]\nname = "n1"\n[agents.capped]\nrole = "worker"\nmax_tool_risk = "low"\n',
+    )
+
+    assert Config.load_from(layout).agents["capped"].max_tool_risk == "low"
+
+
+def test_max_tool_risk_rejects_typos(tmp_path: Path):
+    """拼错的档位静默当默认 = 帽子没戴上还不报 —— 炸在启动期。"""
+    layout = write_config(
+        tmp_path,
+        '[node]\nname = "n1"\n[agents.capped]\nrole = "worker"\nmax_tool_risk = "midium"\n',
+    )
+
+    with pytest.raises(ConfigError, match="midium"):
+        Config.load_from(layout)

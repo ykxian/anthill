@@ -22,6 +22,7 @@ from anthill.core.config import Config, brain_of
 from anthill.core.mailbox import Mailbox
 from anthill.core.outbox import Outbox
 from anthill.core.paths import NodeLayout
+from anthill.core.payloads import RiskLevel
 from anthill.security import secrets
 from anthill.web.agents import running_pid
 
@@ -54,6 +55,7 @@ def doctor_command(
         *_check_backlog(layout, config),
         *_check_freshness(layout, config),
         *_check_security_posture(config),
+        *_check_agent_caps(config),
     ]
 
     console.print(f"[bold]{config.node.name}[/bold] [dim]{layout.workspace}[/dim]\n")
@@ -66,6 +68,34 @@ def doctor_command(
         return
     console.print("\n[red]有阻断性问题 —— 上面标 ✗ 的那些会让对应功能直接用不了。[/red]")
     raise typer.Exit(code=1)
+
+
+def _check_agent_caps(config: Config) -> list[Finding]:
+    """帽子和工具单打架要点名：静态风险超 max_tool_risk 的工具会被遮蔽，
+    模型根本见不到 —— 配置写了等于没写，不该静默。"""
+    from anthill.agent.tools.registry import build_toolset
+    from anthill.security.policy import RISK_ORDER
+
+    out: list[Finding] = []
+    for name, agent in sorted(config.agents.items()):
+        cap = RiskLevel(agent.max_tool_risk)
+        if cap is RiskLevel.HIGH or not agent.tools:
+            continue
+        try:
+            tools = build_toolset(agent.tools)
+        except Exception:  # 工具名不存在等归 config 校验管，这里只看风险冲突
+            continue
+        shaded = [t.name for t in tools if RISK_ORDER[t.risk] > RISK_ORDER[cap]]
+        if shaded:
+            out.append(
+                Finding(
+                    WARN,
+                    f"「{name}」的工具单里有它用不了的：{', '.join(shaded)}"
+                    f"（静态风险超出 max_tool_risk = {agent.max_tool_risk}，已被遮蔽）",
+                    fix="要么抬高 max_tool_risk，要么把这些工具从 tools 里拿掉",
+                )
+            )
+    return out
 
 
 def _check_security_posture(config: Config) -> list[Finding]:

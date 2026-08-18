@@ -458,3 +458,20 @@ def test_doctor_flags_a_loosened_security_posture(workspace: Path) -> None:
 
     assert "unattended_allow" in result.output
     assert "medium" in result.output
+
+
+def test_doctor_flags_tools_an_agent_cannot_use(workspace: Path) -> None:
+    """帽子和工具单打架是配置冲突：静态风险超上限的工具模型根本见不到，
+    doctor 要点名，不许静默。"""
+    layout = NodeLayout(workspace)
+    toml = layout.node_toml.read_text(encoding="utf-8")
+    layout.node_toml.write_text(
+        toml + '\n[agents.capped]\nrole = "worker"\ntools = ["run_shell", "read_file"]\n'
+        'max_tool_risk = "medium"\n',
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["doctor", "-w", str(workspace)])
+
+    assert "capped" in result.output
+    assert "run_shell" in result.output

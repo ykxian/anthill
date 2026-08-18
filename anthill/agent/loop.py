@@ -22,8 +22,9 @@ from typing import Any
 from anthill.agent.tools.base import Confirmer, Tool, ToolContext, ToolResult
 from anthill.core.errors import BudgetExceeded, ToolError
 from anthill.core.logging import EventLog
+from anthill.core.payloads import RiskLevel
 from anthill.providers.base import ChatProvider, Msg, ToolCall, Turn, Usage, estimate_tokens
-from anthill.security.policy import PolicyEngine, TrustLevel
+from anthill.security.policy import RISK_ORDER, PolicyEngine, TrustLevel
 
 MAX_TOOL_RESULT_CHARS = 16_000
 
@@ -57,10 +58,20 @@ class AgentLoop:
         max_steps: int,
         token_budget: int,
         confirm: Confirmer | None = None,
+        max_risk: RiskLevel = RiskLevel.HIGH,
     ) -> None:
         self._provider = provider
         self._tools = {tool.name: tool for tool in tools}
-        self._specs = [tool.spec for tool in tools]
+        # 静态风险超上限的工具不给模型看，免得它反复撞墙。**有意保守**：
+        # 按静态标签遮蔽，所以 run_shell（静态 high）对 cap=medium 的 Agent
+        # 整个不可见 —— 哪怕白名单命令按 risk_for 只算 medium、本可合规。
+        # 想给这种 Agent 开 shell 的路是抬 cap，不是把遮蔽改成按动态风险。
+        # MCP 外部工具同理：McpTool.risk 默认 high、只能由人显式降级，
+        # 所以戴帽 Agent 天然看不到未经人降级的外部工具 —— 语义同向。
+        # 工具表本身留全：真被点名调用时由 _execute 按 risk_for 执法。
+        self._specs = [
+            tool.spec for tool in tools if RISK_ORDER[tool.risk] <= RISK_ORDER[max_risk]
+        ]
         self._policy = policy
         self._ctx = tool_ctx
         self._log = log
@@ -68,6 +79,7 @@ class AgentLoop:
         self._max_steps = max_steps
         self._token_budget = token_budget
         self._confirm = confirm
+        self._max_risk = max_risk
 
     async def run(self, messages: list[Msg], *, sink: MessageSink | None = None) -> LoopOutcome:
         """跑完一次任务。
@@ -148,6 +160,20 @@ class AgentLoop:
             return ToolResult.failed(f"未知工具 {call.name}；你可用的工具是：{known}")
 
         risk = tool.risk_for(call.arguments, self._ctx)
+        if RISK_ORDER[risk] > RISK_ORDER[self._max_risk]:
+            # cap 是 Agent 自身的特权边界，先于一切放宽生效 ——
+            # 放在 authorize 之前，②的无人值守白名单越不过它
+            self._log.warn(
+                "policy.capped",
+                tool=tool.name,
+                risk=str(risk),
+                cap=str(self._max_risk),
+                thread=self._ctx.thread,
+            )
+            return ToolResult.failed(
+                f"{tool.name} 这次调用的风险是 {risk}，超出你的上限 {self._max_risk}"
+                "（max_tool_risk）。请换一个更安全的做法。"
+            )
         verdict = await self._policy.authorize(
             tool=tool.name,
             risk=risk,

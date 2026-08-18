@@ -138,6 +138,20 @@ class AgentSection(_Section):
 
     max_steps: int = Field(default=DEFAULT_MAX_STEPS, gt=0)
     token_budget: int = Field(default=DEFAULT_TOKEN_BUDGET, gt=0)
+
+    max_tool_risk: str = "high"
+    """这只 Agent 允许碰的最高工具风险档（low/medium/high，与
+    [security] unattended_allow 同一套词表）。默认 high = 不设限。
+
+    这是**收紧**方向的旋钮：cap 是 Agent 自身的特权边界，先于一切放宽
+    生效 —— 超上限的调用连策略矩阵都到不了，②的白名单更越不过它。"""
+
+    @field_validator("max_tool_risk")
+    @classmethod
+    def _known_risk_tier(cls, value: str) -> str:
+        if value not in ("low", "medium", "high"):
+            raise ValueError(f"max_tool_risk 里认不出 {value!r}（可选：low、medium、high）")
+        return value
     chat_turns: int = Field(default=DEFAULT_CHAT_TURNS, ge=0)
     """同一话题里最多接几轮对话。
 

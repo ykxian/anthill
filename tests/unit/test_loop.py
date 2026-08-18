@@ -12,6 +12,7 @@ from anthill.agent.tools.registry import build_toolset
 from anthill.core.config import SecuritySection
 from anthill.core.errors import BudgetExceeded, ProviderError
 from anthill.core.logging import EventLog
+from anthill.core.payloads import RiskLevel
 from anthill.providers.base import Msg, Role, ToolCall, Turn, Usage
 from anthill.providers.fake import FakeProvider
 from anthill.security.policy import PolicyEngine, TrustLevel
@@ -360,3 +361,150 @@ async def test_auto_allowed_tool_calls_are_loudly_logged(
     assert hits, "白名单放行必须记 policy.auto_allowed"
     assert hits[0]["tool"] == "write_file"
     assert hits[0]["risk"] == "medium"
+
+
+# ---------- 每 Agent 风险上限（max_tool_risk）----------
+
+
+def _logged_loop(
+    tool_ctx: ToolContext,
+    provider: FakeProvider,
+    log_path: Path,
+    *,
+    tools: tuple[str, ...],
+    max_risk: RiskLevel,
+    trust: TrustLevel = TrustLevel.USER,
+) -> AgentLoop:
+    return AgentLoop(
+        provider=provider,
+        tools=build_toolset(tools),
+        policy=PolicyEngine(tool_ctx.security),
+        tool_ctx=tool_ctx,
+        log=EventLog(log_path, agent="coder", echo=False),
+        trust=trust,
+        max_steps=5,
+        token_budget=100_000,
+        confirm=None,
+        max_risk=max_risk,
+    )
+
+
+def _events(log_path: Path) -> list[dict]:
+    import json
+
+    return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+
+
+async def test_a_capped_agent_cannot_call_an_over_cap_tool(
+    tool_ctx: ToolContext, tmp_path: Path
+) -> None:
+    """cap 是 Agent 自身的特权边界：超上限的调用直接拒，且响 policy.capped。"""
+    provider = FakeProvider(
+        [
+            Turn(
+                tool_calls=(
+                    ToolCall(
+                        id="c1", name="write_file", arguments={"path": "a.py", "content": "x"}
+                    ),
+                )
+            ),
+            finish_turn("算了"),
+        ]
+    )
+    log_path = tmp_path / "capped.jsonl"
+    loop = _logged_loop(
+        tool_ctx, provider, log_path, tools=("write_file", "finish"), max_risk=RiskLevel.LOW
+    )
+
+    outcome = await loop.run([Msg.user("写个文件")])
+
+    assert outcome.finished
+    assert not (tool_ctx.workspace / "a.py").exists(), "超上限的写入不许发生"
+    hits = [e for e in _events(log_path) if e.get("event") == "policy.capped"]
+    assert hits and hits[0]["tool"] == "write_file"
+
+
+async def test_the_cap_precedes_the_unattended_allowlist(tmp_path: Path) -> None:
+    """两个旋钮同时开：cap=low 且 unattended_allow=[medium] —— 更严者先行，
+    medium 调用要被 capped，绝不能被②的白名单放行。"""
+    from anthill.core.config import SecuritySection
+
+    (tmp_path / "ws").mkdir()
+    (tmp_path / "bb").mkdir()
+    ctx = ToolContext(
+        workspace=tmp_path / "ws",
+        blackboard=tmp_path / "bb",
+        security=SecuritySection(unattended_allow=("medium",)),
+        thread=THREAD,
+    )
+    provider = FakeProvider(
+        [
+            Turn(
+                tool_calls=(
+                    ToolCall(
+                        id="c1", name="write_file", arguments={"path": "a.py", "content": "x"}
+                    ),
+                )
+            ),
+            finish_turn("算了"),
+        ]
+    )
+    log_path = tmp_path / "order.jsonl"
+    loop = _logged_loop(
+        ctx,
+        provider,
+        log_path,
+        tools=("write_file", "finish"),
+        max_risk=RiskLevel.LOW,
+        trust=TrustLevel.TRUSTED_PEER,
+    )
+
+    await loop.run([Msg.user("写个文件")])
+
+    events = [e.get("event") for e in _events(log_path)]
+    assert "policy.capped" in events
+    assert "policy.auto_allowed" not in events, "白名单不许越过 cap"
+    assert not (ctx.workspace / "a.py").exists()
+
+
+async def test_static_shading_hides_over_cap_tools_from_the_model(
+    tool_ctx: ToolContext, tmp_path: Path
+) -> None:
+    """静态风险超上限的工具不进给模型看的 specs —— 免得它反复撞墙。"""
+    loop = _logged_loop(
+        tool_ctx,
+        FakeProvider([finish_turn("啥也不干")]),
+        tmp_path / "shade.jsonl",
+        tools=("read_file", "write_file", "finish"),
+        max_risk=RiskLevel.LOW,
+    )
+
+    shown = {spec.name for spec in loop._specs}
+    assert "read_file" in shown and "finish" in shown
+    assert "write_file" not in shown
+
+
+async def test_risk_for_escalation_is_caught_at_call_time(
+    tool_ctx: ToolContext, tmp_path: Path
+) -> None:
+    """执法看的是 risk_for 的产出，不是静态标签：run_shell 非白名单命令
+    升到 high，cap=medium 的 Agent 要被拦下。"""
+    provider = FakeProvider(
+        [
+            Turn(
+                tool_calls=(
+                    ToolCall(id="c1", name="run_shell", arguments={"command": "rm -rf build"}),
+                )
+            ),
+            finish_turn("算了"),
+        ]
+    )
+    log_path = tmp_path / "escalate.jsonl"
+    loop = _logged_loop(
+        tool_ctx, provider, log_path, tools=("run_shell", "finish"), max_risk=RiskLevel.MEDIUM
+    )
+
+    await loop.run([Msg.user("清一下")])
+
+    hits = [e for e in _events(log_path) if e.get("event") == "policy.capped"]
+    assert hits and hits[0]["risk"] == "high"

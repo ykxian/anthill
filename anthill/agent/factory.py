@@ -17,6 +17,7 @@ from anthill.agent.tools.base import Confirmer
 from anthill.agent.tools.registry import build_toolset
 from anthill.core.config import Config
 from anthill.core.paths import NodeLayout
+from anthill.core.payloads import RiskLevel
 from anthill.orchestrator.board import Blackboard
 from anthill.orchestrator.coordinator import CoordinatorHandler, CoordinatorSettings
 from anthill.providers.registry import TapeMode, provider_for_agent
@@ -95,4 +96,5 @@ def build_handler(
         confirm=confirm,
         chat_turns=agent.chat_turns,
         mcp_servers=servers,
+        max_risk=RiskLevel(agent.max_tool_risk),
     )
