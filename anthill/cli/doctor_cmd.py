@@ -29,6 +29,8 @@ from anthill.web.agents import running_pid
 OK = "[green]✓[/green]"
 WARN = "[yellow]![/yellow]"
 BAD = "[red]✗[/red]"
+INFO = "[cyan]i[/cyan]"
+"""知道就行、不必行动的那类发现 —— 和 WARN 分开，警报才保得住注意力。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +56,7 @@ def doctor_command(
         *_check_mailboxes(layout, config),
         *_check_backlog(layout, config),
         *_check_freshness(layout, config),
+        *_check_config_drift(layout, config),
         *_check_security_posture(config),
         *_check_agent_caps(config),
     ]
@@ -96,6 +99,42 @@ def _check_agent_caps(config: Config) -> list[Finding]:
                 )
             )
     return out
+
+
+def _check_config_drift(layout: NodeLayout, config: Config) -> list[Finding]:
+    """node.toml 比在跑的 agentd 新。**INFO 不 WARN**：面板每加一个人都会
+    动 node.toml，报警就是狼来了 —— 而「加人」这个最高频场景已被路由层
+    热感知覆盖、无需重启；只有大脑/工具/persona/provider 的变更才需要。
+    将来若实战显示这类变更频繁到需要精确提示，再升级成按节区 diff 判定。"""
+    import json
+    from datetime import datetime
+
+    from anthill.web.agents import running_pid, runtime_path
+
+    try:
+        toml_mtime = layout.node_toml.stat().st_mtime
+    except OSError:
+        return []
+    behind: list[str] = []
+    for name in sorted(config.agents):
+        if running_pid(layout, name) is None:
+            continue
+        try:
+            data = json.loads(runtime_path(layout, name).read_text(encoding="utf-8"))
+            started = datetime.fromisoformat(str(data.get("started_at", "")))
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+        if started.timestamp() < toml_mtime:
+            behind.append(name)
+    if not behind:
+        return []
+    return [
+        Finding(
+            INFO,
+            f"node.toml 晚于这些 agentd 启动：{', '.join(behind)} —— "
+            "加人已由路由热感知覆盖，无需重启；改了大脑/工具/persona/provider 才需要",
+        )
+    ]
 
 
 def _check_security_posture(config: Config) -> list[Finding]:

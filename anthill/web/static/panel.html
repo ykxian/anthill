@@ -217,9 +217,11 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
 #ask #ask-body { font-size: 13px; line-height: 1.7; color: var(--muted); }
 #ask #ask-body b { color: var(--text); }
 #ask .actions { margin-top: 18px; justify-content: flex-end; flex-wrap: wrap; }
-/* 删除按钮平时压低存在感 —— 它旁边就是「接着这段说」，误点的代价不对称 */
+/* 删除按钮常年压低存在感 —— 点一段对话是为了「接着说」，不是为了删。
+   以前悬停/点选整段就把它点亮，看起来像「一点对话就冒出个删除」；
+   现在只有指针落在按钮本身上才亮，误点的代价不对称，就让它难一点。 */
 .convo button.tiny { opacity: .35; }
-.convo:hover button.tiny, .convo button.tiny:focus-visible { opacity: 1; }
+.convo button.tiny:hover, .convo button.tiny:focus-visible { opacity: 1; }
 
 .actions { display: flex; gap: 8px; align-items: center; }
 .actions input, .actions select { flex: 1; min-width: 0; }

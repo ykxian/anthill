@@ -592,3 +592,49 @@ async def test_the_cluster_view_is_refused_to_anyone_else(local: Bundle) -> None
     for path in ("/panel/api/cluster", "/panel/api/state"):
         async with client_for(local, host="10.0.8.99") as client:
             assert (await client.get(path)).status_code == 403, path
+
+
+# ---------- 离线对端的日志纪律：翻转才响，不随轮询刷屏 ----------
+
+
+async def test_unreachable_is_logged_per_outage_not_per_poll(
+    local: Bundle, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """对端离线一小时 = 面板每轮一次失败 —— 同一句 warn 把日志刷成瀑布
+    （实机 serve:cs 连不上 collab-clean 时每 20 秒一条）。
+    正确纪律：断了响一声、恢复响一声，期间静默（面板照常标不可用）。"""
+    from anthill.discovery.registry import PeerRecord
+    from anthill.web import cluster as cluster_mod
+
+    _layout, config, peers = local
+    log_path = tmp_path / "serve-log.jsonl"
+    log = EventLog(log_path, agent="serve", echo=False)
+    cluster_mod._UNREACHABLE.clear()
+    peer = PeerRecord(node="win", endpoint="http://10.0.0.9:1")
+
+    async def boom(*args: object, **kwargs: object) -> bytes:
+        raise ConnectionError("All connection attempts failed")
+
+    monkeypatch.setattr(cluster_mod, "_pull", boom)
+    for _ in range(3):
+        result = await cluster_mod._fetch(peer, config, peers, log)
+        assert result["reachable"] is False
+
+    def events() -> list[dict]:
+        return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+
+    assert sum(e.get("event") == "cluster.unreachable" for e in events()) == 1
+
+    # 能拉到字节就算可达（内容不合法是另一回事）—— 恢复也只响一声
+    async def alive(*args: object, **kwargs: object) -> bytes:
+        return b"not-json"
+
+    monkeypatch.setattr(cluster_mod, "_pull", alive)
+    await cluster_mod._fetch(peer, config, peers, log)
+    await cluster_mod._fetch(peer, config, peers, log)
+    assert sum(e.get("event") == "cluster.recovered" for e in events()) == 1
+
+    # 再断：新一轮故障，重新响一声
+    monkeypatch.setattr(cluster_mod, "_pull", boom)
+    await cluster_mod._fetch(peer, config, peers, log)
+    assert sum(e.get("event") == "cluster.unreachable" for e in events()) == 2

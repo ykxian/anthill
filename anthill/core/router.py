@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import re
+from contextlib import suppress
 
 from anthill.core.config import Config
 from anthill.core.envelope import BROADCAST, ROLE_PREFIX, Address, Envelope
@@ -45,11 +46,38 @@ def parse_address(raw: str, *, default_node: str) -> Address:
 
 
 class Router:
-    """无状态解析器（负载信息实时读磁盘），可以随便新建。"""
+    """近乎无状态的解析器（负载信息实时读磁盘），可以随便新建。
+
+    唯一的状态是**配置热感知**：agentd 的成员名单以前是启动时载入死的 ——
+    面板上刚加的 Agent，别人发信给它会被「本节点没有 xxx」拒成死信，
+    直到手动重启 agentd（实战里 battle_plan → mzq 就这么被拒了两次）。
+    现在每次 resolve 先看一眼 node.toml 的 mtime，改过就重读；
+    一次 stat 的成本，广播/角色/具名三条路径都因此见得到新人。
+    """
 
     def __init__(self, config: Config, layout: NodeLayout) -> None:
         self._config = config
         self._layout = layout
+        self._config_mtime = self._toml_mtime()
+
+    def _toml_mtime(self) -> int:
+        try:
+            return self._layout.node_toml.stat().st_mtime_ns
+        except OSError:
+            return 0
+
+    def _fresh_config(self) -> Config:
+        """node.toml 改过就重读。读失败（正在编辑/改坏了）继续用旧配置 ——
+        路由层不许崩、也不许把在跑的投递断掉；坏文件记下 mtime 不反复重试，
+        等它被改好（mtime 再变）自然接上，坏配置本身由 doctor 负责点名。"""
+        mtime = self._toml_mtime()
+        if mtime == self._config_mtime or mtime == 0:
+            return self._config
+        self._config_mtime = mtime
+        # ConfigError/OSError/编码问题一视同仁：保住旧配置
+        with suppress(Exception):
+            self._config = Config.load_from(self._layout)
+        return self._config
 
     @property
     def node_name(self) -> str:
@@ -63,6 +91,7 @@ class Router:
 
         广播会产生多条（每个收件人一条独立信封，各自有 id，便于分别追踪回执）。
         """
+        self._fresh_config()
         target = env.to
         if not self.is_local(target):
             return (env,)  # 跨节点：由传输层按 peer 配置投递，不在本地展开

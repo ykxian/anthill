@@ -571,3 +571,25 @@ def test_fork_of_an_unknown_step_names_the_real_ones(workspace: Path) -> None:
 
     assert result.exit_code != 0
     assert "s1" in result.output and "s2" in result.output
+
+
+def test_doctor_hints_when_config_is_newer_than_running_agentds(workspace: Path) -> None:
+    """加人已由路由热感知覆盖、无需重启；大脑/工具/persona 变更才需要 ——
+    doctor 用 INFO 轻声提示。不 WARN：面板每加一个人都会动 node.toml，
+    报警会狼来了，三天就没人看了。"""
+    import json as _json
+    import os
+
+    layout = NodeLayout(workspace)
+    rt = layout.agent_dir("boss") / "runtime.json"
+    rt.parent.mkdir(parents=True, exist_ok=True)
+    rt.write_text(
+        _json.dumps({"pid": os.getpid(), "started_at": "2020-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["doctor", "-w", str(workspace)])
+
+    assert "boss" in result.output
+    assert "热感知" in result.output
+    assert "无需重启" in result.output

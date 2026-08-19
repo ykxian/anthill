@@ -211,6 +211,16 @@ async def build_cluster(
     }
 
 
+_UNREACHABLE: set[str] = set()
+"""已经报过「够不着」的对端。对端离线一小时 = 面板每轮一次失败，同一句
+warn 会把日志刷成瀑布（实机 serve:cs 连不上 collab-clean 时每 20 秒一条）。
+纪律：断了响一声（cluster.unreachable）、恢复响一声（cluster.recovered），
+期间静默 —— 面板照常把它标成不可用，展示与日志是两回事。
+serve 进程内存态，重启后重新响一次，正好也是「它现在还断着」的提醒。
+按节点名**全局**去重：serve 照看多个工作区时，断线只在先撞见的那个
+工作区日志里响 —— serve 级视角是有意的，单看某工作区日志别因无痕起疑。"""
+
+
 async def _fetch(
     peer: PeerRecord, config: Config, peers: PeerRegistry, log: EventLog
 ) -> dict[str, Any]:
@@ -219,8 +229,16 @@ async def _fetch(
     try:
         raw = await asyncio.wait_for(_pull(peer, config, peers), timeout=timeout)
     except Exception as exc:  # 一个节点出问题不该让整张面板打不开
-        log.warn("cluster.unreachable", node=peer.node, error=f"{type(exc).__name__}: {exc}")
-        return _down(peer, f"{type(exc).__name__}: {exc}")
+        detail = f"{type(exc).__name__}: {exc}"
+        if peer.node not in _UNREACHABLE:
+            _UNREACHABLE.add(peer.node)
+            log.warn("cluster.unreachable", node=peer.node, error=detail)
+        return _down(peer, detail)
+
+    # 能拉到字节就算「够得着」了 —— 内容合不合法是另一回事，分开报
+    if peer.node in _UNREACHABLE:
+        _UNREACHABLE.discard(peer.node)
+        log.info("cluster.recovered", node=peer.node)
 
     try:
         status = NodeStatus.model_validate_json(raw)

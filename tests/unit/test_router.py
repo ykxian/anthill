@@ -104,3 +104,52 @@ def test_check_hops_refuses_overflow(addr):
 
     with pytest.raises(HopLimitExceeded):
         Router.check_hops(env.model_copy(update={"hops": 9}))
+
+
+# ---------- 配置热感知：面板刚加的 Agent 立刻能收信 ----------
+
+
+def test_router_picks_up_agents_added_after_startup(config, layout, make_task):
+    """agentd 的成员名单以前是启动时载入死的 —— 面板上刚加的 Agent，
+    别人发信给它会被「本节点没有 xxx」拒成死信，直到手动重启 agentd。
+    实战里 battle_plan:agent1 → mzq 就是这么被拒了两次。"""
+    router = Router(config, layout)
+    env = make_task().model_copy(update={"to": Address(node="testnode", agent="mzq")})
+    with pytest.raises(UnknownRecipient):
+        router.resolve(env)
+
+    toml = layout.node_toml.read_text(encoding="utf-8")
+    layout.node_toml.write_text(toml + '\n[agents.mzq]\nrole = "worker"\n', encoding="utf-8")
+
+    resolved = router.resolve(env)  # 同一个 Router 实例，不重建不重启
+
+    assert [e.to.agent for e in resolved] == ["mzq"]
+
+
+def test_router_sees_new_role_members_too(config, layout, make_task):
+    router = Router(config, layout)
+    env = make_task().model_copy(update={"to": Address(node="testnode", agent="role:reviewer")})
+    with pytest.raises(UnknownRecipient):
+        router.resolve(env)
+
+    toml = layout.node_toml.read_text(encoding="utf-8")
+    layout.node_toml.write_text(toml + '\n[agents.rev]\nrole = "reviewer"\n', encoding="utf-8")
+
+    resolved = router.resolve(env)
+
+    assert [e.to.agent for e in resolved] == ["rev"]
+
+
+def test_router_keeps_the_old_config_when_the_edit_is_broken(config, layout, make_task):
+    """有人正把 node.toml 改到一半：路由层不许崩、也不许把在跑的投递断掉 ——
+    继续用旧配置，等文件改好（mtime 再变）自然接上。"""
+    router = Router(config, layout)
+    router.resolve(make_task())  # 先热身一次
+
+    layout.node_toml.write_text("[node\n这不是合法 TOML", encoding="utf-8")
+
+    resolved = router.resolve(make_task())  # 老收件人照常可达
+    assert resolved[0].to.agent == "beta"
+    env = make_task().model_copy(update={"to": Address(node="testnode", agent="ghost")})
+    with pytest.raises(UnknownRecipient):  # 未知的还是干净地拒，不是崩
+        router.resolve(env)
