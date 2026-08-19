@@ -230,6 +230,178 @@ def test_bridge_ack_with_an_unknown_id_fails(tmp_path: Path):
     assert result.exit_code != 0
 
 
+# ---------- bridge --text-file：一条不经 shell 的正文入口 ----------
+#
+# `--text` 的正文要穿过 shell：反引号是命令替换、`${…}` 是变量替换，
+# 内容被吃掉一截**还不报错，消息照发**。已经咬过两次（一次把审查回复里的
+# JS 代码片段截断，只好补发更正）。文件这条路上，正文一个字节都不过 shell。
+
+TRICKY = "改这行：`const x = ${y}` —— 还有 $(whoami) 和 \"引号\" 和 'single'"
+"""专挑会被 shell 吃掉的东西：反引号、${}、$()、两种引号。"""
+
+
+def test_bridge_reply_from_a_file_keeps_the_body_byte_for_byte(tmp_path: Path):
+    workspace = bridge_workspace(tmp_path)
+    bridge = seed_pending(workspace)
+    note = tmp_path / "reply.md"
+    note.write_text(TRICKY, encoding="utf-8")
+
+    result = runner.invoke(
+        app, ["bridge", "cc", "--reply", "00AAAA", "--text-file", str(note), "-w", str(workspace)]
+    )
+
+    assert result.exit_code == 0, result.output
+    draft = bridge / "outbox" / "01KZ000000000000000000AAAA.md"
+    assert draft.read_text(encoding="utf-8") == TRICKY, "正文没有原样落到草稿里"
+
+
+def test_bridge_send_from_a_file_keeps_the_body_byte_for_byte(tmp_path: Path):
+    """`--to` 那条路和 `--reply` 一样要能用 —— 两边都在拼 `_draft` 的正文。"""
+    workspace = bridge_workspace(tmp_path)
+    note = tmp_path / "say.md"
+    note.write_text(TRICKY, encoding="utf-8")
+
+    result = runner.invoke(
+        app, ["bridge", "cc", "--to", "box:cli", "--text-file", str(note), "-w", str(workspace)]
+    )
+
+    assert result.exit_code == 0, result.output
+    drafts = list((NodeLayout(workspace).agent_dir("cc") / "bridge" / "outbox").glob("*.md"))
+    assert len(drafts) == 1
+    assert TRICKY in drafts[0].read_text(encoding="utf-8")
+
+
+def test_bridge_reply_reads_the_body_from_stdin(tmp_path: Path):
+    """`-` 读 stdin，走 Unix 老规矩 —— 人在终端里配引号定界的 heredoc 用。"""
+    workspace = bridge_workspace(tmp_path)
+    bridge = seed_pending(workspace)
+
+    result = runner.invoke(
+        app,
+        ["bridge", "cc", "--reply", "00AAAA", "--text-file", "-", "-w", str(workspace)],
+        input=TRICKY,
+    )
+
+    assert result.exit_code == 0, result.output
+    draft = bridge / "outbox" / "01KZ000000000000000000AAAA.md"
+    assert draft.read_text(encoding="utf-8").rstrip("\n") == TRICKY
+
+
+def test_bridge_refuses_both_text_and_text_file(tmp_path: Path):
+    """同时给两个正文来源 —— 不猜哪个优先，直接报错。"""
+    workspace = bridge_workspace(tmp_path)
+    bridge = seed_pending(workspace)
+    note = tmp_path / "reply.md"
+    note.write_text("从文件来的", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "bridge",
+            "cc",
+            "--reply",
+            "00AAAA",
+            "--text",
+            "从命令行来的",
+            "--text-file",
+            str(note),
+            "-w",
+            str(workspace),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert not list((bridge / "outbox").glob("*.md")), "报错时不该留下半条草稿"
+
+
+def test_bridge_text_file_that_is_missing_says_which_path(tmp_path: Path):
+    """读不到就得说清是哪个路径 —— 空正文静默发出去比报错难查得多。"""
+    workspace = bridge_workspace(tmp_path)
+    seed_pending(workspace)
+    missing = tmp_path / "nope.md"
+
+    result = runner.invoke(
+        app,
+        ["bridge", "cc", "--reply", "00AAAA", "--text-file", str(missing), "-w", str(workspace)],
+    )
+
+    assert result.exit_code != 0
+    assert "nope.md" in result.output
+
+
+def test_bridge_text_file_that_is_not_utf8_says_so_instead_of_a_traceback(tmp_path: Path):
+    """非 UTF-8 的文件要和其他错误路径一样干净地报错。
+
+    `UnicodeDecodeError` 是 `ValueError` 的子类**不是 `OSError`** —— 只 catch
+    OSError 的话它会溜过去，用户看到的是裸 traceback、`result.output` 是空的。
+    偏偏「传日志片段、二进制样本」正是这个选项存在的理由之一，那类文件最
+    可能不是 UTF-8，撞上的就是最难看的那条路。
+    """
+    workspace = bridge_workspace(tmp_path)
+    bridge = seed_pending(workspace)
+    note = tmp_path / "binary.bin"
+    note.write_bytes(b"\xff\xfe\x00\x01\x80\x81")
+
+    result = runner.invoke(
+        app, ["bridge", "cc", "--reply", "00AAAA", "--text-file", str(note), "-w", str(workspace)]
+    )
+
+    assert result.exit_code != 0
+    assert "binary.bin" in result.output, "没说是哪个文件"
+    assert not isinstance(result.exception, UnicodeDecodeError), "漏出了裸 traceback"
+    assert not list((bridge / "outbox").glob("*.md"))
+
+
+def test_bridge_text_file_that_is_a_directory_fails(tmp_path: Path):
+    workspace = bridge_workspace(tmp_path)
+    seed_pending(workspace)
+
+    result = runner.invoke(
+        app,
+        ["bridge", "cc", "--reply", "00AAAA", "--text-file", str(tmp_path), "-w", str(workspace)],
+    )
+
+    assert result.exit_code != 0
+    assert "目录" in result.output
+
+
+def test_bridge_text_file_does_not_scrub_control_characters(tmp_path: Path):
+    """**协议层对控制字符保持透明。**
+
+    实测裸 NUL 能从草稿一路原样抵达对话日志（信封、JSON 往返、渲染全保真），
+    全仓送件路径也没有任何控制字符过滤。这条钉子防的是「以后有人顺手加清洗」——
+    真要清洗该在显示层做（面板的 md 渲染已经在剥 NUL），不是在这儿。
+    """
+    workspace = bridge_workspace(tmp_path)
+    bridge = seed_pending(workspace)
+    raw = "前\x00后\x07还有\ttab"
+    note = tmp_path / "raw.md"
+    note.write_text(raw, encoding="utf-8")
+
+    result = runner.invoke(
+        app, ["bridge", "cc", "--reply", "00AAAA", "--text-file", str(note), "-w", str(workspace)]
+    )
+
+    assert result.exit_code == 0, result.output
+    draft = bridge / "outbox" / "01KZ000000000000000000AAAA.md"
+    assert draft.read_text(encoding="utf-8") == raw, "控制字符被清洗了 —— 协议层该透明"
+
+
+def test_bridge_text_file_that_is_empty_is_refused(tmp_path: Path):
+    """空文件跟空 --text 一个待遇：不发。"""
+    workspace = bridge_workspace(tmp_path)
+    bridge = seed_pending(workspace)
+    note = tmp_path / "empty.md"
+    note.write_text("   \n", encoding="utf-8")
+
+    result = runner.invoke(
+        app, ["bridge", "cc", "--reply", "00AAAA", "--text-file", str(note), "-w", str(workspace)]
+    )
+
+    assert result.exit_code != 0
+    assert not list((bridge / "outbox").glob("*.md"))
+
+
 def test_cli_send_shows_up_in_the_chat_records(workspace: Path):
     """`anthill send` 发的消息也得进对话记录 —— 以前只有面板发的才记，
     于是对话页上只见对方的回音、不见你发出去的那半句，

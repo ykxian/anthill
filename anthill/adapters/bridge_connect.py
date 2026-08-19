@@ -71,8 +71,8 @@ def watch_prompt(layout: NodeLayout, agent: str) -> str:
         "\n"
         "被唤起后：读那条消息 → 回复 → **再往后台放一条同样的命令**，如此循环：\n"
         f'  {exe} bridge {agent} --reply <消息id> --text "你的回复" -w {workspace}\n'
-        "回复正文含代码/反引号/$ 时**别用 --text**（shell 会吃转义且不报错），"
-        "直接在 outbox/<消息id>.md 写正文。\n"
+        "回复正文含代码/反引号/$ 时**别用 --text**（shell 会吃转义且不报错）：\n"
+        "把正文写进一个文件，再用 --text-file <路径> 发，全程不过 shell。\n"
         "纯回执（「收到」「无需回复」这类）**别回** —— 回了对方还得再回执，没有终点；\n"
         f"用 --ack 清掉它再重新挂监听：{exe} bridge {agent} --ack <消息id> -w {workspace}\n"
         "\n"

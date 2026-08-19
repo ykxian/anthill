@@ -12,6 +12,7 @@ Agent 那边的 thread 记忆自然就接上了。
 from __future__ import annotations
 
 import asyncio
+import sys
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -237,6 +238,11 @@ def bridge_command(
         "", "--ack", help="无声确认哪一条：直接归档，不发任何回复（纯回执类消息用）"
     ),
     text: str = typer.Option("", "--text", help="回复正文；留空则只列出待办"),
+    text_file: Path | None = typer.Option(
+        None,
+        "--text-file",
+        help="从文件读正文（`-` = 读 stdin）。正文含反引号或 ${…} 时用它，别用 --text",
+    ),
     to: str = typer.Option("", "--to", help="主动发一条：收件人"),
     kind: str = typer.Option("chat", "--kind", help="主动发一条时：chat 或 task"),
     as_json: bool = typer.Option(False, "--json", help="输出 JSON，给 hook / 脚本用"),
@@ -275,6 +281,11 @@ def bridge_command(
         print(watch_prompt(layout, agent))
         return
 
+    # 两个选项互斥先验掉 —— 正文本身**按需**再读：`--text-file -` 要读 stdin，
+    # 而只列待办、只 --wait 的时候没人往 stdin 里写，读了就是干等
+    if text and text_file is not None:
+        fail("--text 和 --text-file 只能给一个；同时给了不知道该听谁的")
+
     handler = BridgeHandler(root=layout.agent_dir(agent), agent_name=agent)
 
     if wait != 0 and not (to or reply or ack):
@@ -288,7 +299,7 @@ def bridge_command(
         _draft(
             handler,
             f"cli-{new_thread_id()[-8:]}.md",
-            f"---\nto: {to}\ntype: {kind}\n---\n\n{text}\n",
+            f"---\nto: {to}\ntype: {kind}\n---\n\n{_body_text(text, text_file)}\n",
         )
         console.print(f"[bold green]✓[/bold green] 已写好草稿，发给 {to}（下一轮 tick 发出）")
         return
@@ -297,7 +308,7 @@ def bridge_command(
         match = [p for p in pending if p.stem.endswith(reply) or p.stem == reply]
         if len(match) != 1:
             fail(f"{reply!r} 匹配到 {len(match)} 条待回复；用 `anthill bridge {agent}` 看看列表")
-        _draft(handler, match[0].name, text or "")
+        _draft(handler, match[0].name, _body_text(text, text_file))
         console.print(f"[bold green]✓[/bold green] 已写好回复 {match[0].stem[-6:]}")
         return
     if ack:
@@ -368,9 +379,42 @@ def _pending_json(handler: BridgeHandler, agent: str) -> dict[str, Any]:
     }
 
 
+def _body_text(text: str, text_file: Path | None) -> str:
+    """正文从哪来：`--text` 还是 `--text-file`。
+
+    **`--text` 会静默损坏正文。** 走 shell 的那条路上，正文里的反引号是命令替换、
+    `${…}` 是变量替换 —— 内容被吃掉一截，还不报错，消息照发。这已经咬过两次
+    （一次把审查回复里的 JS 代码片段截断，只好补发更正）。以前唯一的活路是
+    「记得改去 outbox 手写 .md」，靠的是每个人每次自觉；发出去的消息撤不回，
+    这种失败模式不该挂在记性上。
+
+    所以给一条不经 shell 的路：Agent 用写文件工具落盘再 `--text-file <路径>`，
+    全程零 shell 参与；人在终端里用 `--text-file -` 配引号定界的 heredoc
+    （`<<'EOF'` 不做任何展开）。
+
+    **这里不做任何「清洗」。** 全链路对控制字符是透明的（实测裸 NUL 从草稿
+    一路原样抵达对话日志），协议层就该继续保持透明 —— 要传日志片段、二进制
+    样本的人不该被这一层挡住。该清洗的是显示层（面板的 md 渲染已经在做）。
+    """
+    if text_file is None:
+        return text
+    if str(text_file) == "-":
+        return sys.stdin.read()
+    if text_file.is_dir():
+        fail(f"{text_file} 是个目录，读不出正文")
+    try:
+        return text_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # 说清楚是哪个路径出的事 —— 空正文静默发出去比报错难查得多。
+        # UnicodeDecodeError 是 ValueError 的子类**不是 OSError**，漏掉它
+        # 就会漏出裸 traceback 而一句说明都没有 —— 而上面刚说了「传日志
+        # 片段、二进制样本的人不该被挡住」，那类文件恰恰最可能不是 UTF-8
+        fail(f"读不出 {text_file}：{exc}")
+
+
 def _draft(handler: BridgeHandler, name: str, text: str) -> None:
     if not text.strip():
-        fail("正文不能为空；用 --text 写点什么")
+        fail("正文不能为空；用 --text 或 --text-file 写点什么")
     (handler.dir("outbox") / name).write_text(text, encoding="utf-8")
 
 
