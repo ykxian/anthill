@@ -217,12 +217,6 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
 #ask #ask-body { font-size: 13px; line-height: 1.7; color: var(--muted); }
 #ask #ask-body b { color: var(--text); }
 #ask .actions { margin-top: 18px; justify-content: flex-end; flex-wrap: wrap; }
-/* 删除按钮常年压低存在感 —— 点一段对话是为了「接着说」，不是为了删。
-   以前悬停/点选整段就把它点亮，看起来像「一点对话就冒出个删除」；
-   现在只有指针落在按钮本身上才亮，误点的代价不对称，就让它难一点。 */
-.convo button.tiny { opacity: .35; }
-.convo button.tiny:hover, .convo button.tiny:focus-visible { opacity: 1; }
-
 .actions { display: flex; gap: 8px; align-items: center; }
 .actions input, .actions select { flex: 1; min-width: 0; }
 .hint { font-size: 12px; color: var(--dim); padding-top: 8px; }
@@ -295,25 +289,104 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
 .event.warn .what { color: var(--warn); }
 .event.error .what { color: var(--bad); }
 
-/* ---- 对话：气泡靠对齐与底色区分，不用头像不用花边 ---- */
-#pane-chat:not([hidden]) { display: flex; flex-direction: column; padding-bottom: 0; }
-#chat-body { flex: 1; overflow: auto; display: flex; flex-direction: column; }
-#chat-body .empty { margin: auto 0; }
-.msg { padding: 9px 13px; border-radius: var(--r-lg); margin: 3px 0; max-width: 74%; }
-.msg .who { display: block; font-size: 11px; color: var(--dim); margin-bottom: 3px; }
-.msg .text { white-space: pre-wrap; word-break: break-word; font-size: 14px; }
-.msg.them { background: var(--surface); border: 1px solid var(--line-soft); align-self: flex-start; }
+/* ---- 对话：左列会话清单，右侧消息流 —— 找那段归左边，读与说归右边。
+   以前是「每段一张卡、卡里摊开全部消息」的日志式排版，段一多整页就是一堵墙；
+   清单/详情各自滚动之后，密度给清单，呼吸感给消息。 ---- */
+#pane-chat:not([hidden]) { display: flex; flex-direction: column; padding-bottom: 20px; }
+.chat-shell {
+  flex: 1; min-height: 0; display: flex; overflow: hidden;
+  border: 1px solid var(--line-soft); border-radius: var(--r-lg);
+  background: var(--surface); box-shadow: var(--shadow);
+}
+.chat-side {
+  flex: 0 0 300px; min-width: 0; display: flex; flex-direction: column;
+  border-right: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--surface-2) 42%, var(--surface));
+}
+.chat-tools { padding: 12px 12px 10px; display: grid; gap: 7px; border-bottom: 1px solid var(--line-soft); }
+.chat-tools .pair { display: flex; gap: 6px; }
+.chat-tools select { flex: 1; min-width: 0; font-size: 12px; padding: 4px 7px; }
+.chat-tools .peers-only { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+#chat-body { flex: 1; overflow-y: auto; padding: 8px; }
+.chat-side-foot { padding: 9px 12px; border-top: 1px solid var(--line-soft); display: flex; gap: 8px; align-items: center; }
+
+/* 会话行：标题是「谁跟谁」，下面一行掐头的最后一句 —— 扫一眼就知道聊到哪了 */
+.th-row {
+  padding: 8px 11px; border-radius: var(--r); cursor: pointer;
+  border: 1px solid transparent;
+  transition: background var(--fast), border-color var(--fast);
+}
+.th-row:hover { background: var(--surface); border-color: var(--line-soft); }
+.th-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.th-row.picked {
+  background: var(--surface);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent) inset;
+}
+.th-row .top { display: flex; gap: 8px; align-items: baseline; }
+.th-row .peers {
+  font-weight: 600; font-size: 12.5px; flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.th-row .when { font-size: 10.5px; color: var(--dim); font-family: var(--mono); flex: none; }
+.th-row .peek {
+  margin-top: 2px; font-size: 12px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.th-row .peek .n { color: var(--dim); }
+
+/* 右侧：会话头 + 消息流 + 常驻输入栏 */
+.chat-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.chat-head {
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  padding: 11px 18px; min-height: 50px; border-bottom: 1px solid var(--line-soft);
+}
+.chat-head .peers { font-family: var(--serif); font-size: 15.5px; }
+#chat-msgs { flex: 1; overflow-y: auto; padding: 16px 18px; display: flex; flex-direction: column; }
+#chat-msgs .empty { margin: auto 40px; border: none; background: none; }
+.day { align-self: center; margin: 12px 0 4px; font-size: 11px; color: var(--dim); font-family: var(--mono); letter-spacing: .05em; }
+.msg { padding: 8px 13px; border-radius: var(--r-lg); margin: 2px 0; max-width: 76%; }
+.msg .who { display: flex; gap: 8px; align-items: baseline; font-size: 11px; color: var(--dim); margin-bottom: 2px; }
+.msg .who b { color: var(--accent); font-family: var(--mono); font-weight: 600; }
+.msg.them { background: var(--surface-2); border: 1px solid var(--line-soft); align-self: flex-start; border-top-left-radius: var(--r-sm); }
 .msg.mine {
   align-self: flex-end; background: var(--accent-soft);
-  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-top-right-radius: var(--r-sm);
 }
-.msg.sys {
-  align-self: center; max-width: 100%; background: none; border: none;
-  color: var(--dim); font-size: 11.5px; padding: 2px;
+.chat-bar { border-top: 1px solid var(--line-soft); padding: 12px 14px; background: var(--surface); }
+.chat-bar form { align-items: flex-end; }
+#chat-input {
+  flex: 1; resize: none; font-family: var(--sans); font-size: 13.5px;
+  line-height: 1.5; min-height: 34px; max-height: 160px;
 }
-.chat-bar {
-  border-top: 1px solid var(--line-soft); padding: 12px 0 16px;
-  background: var(--paper); position: sticky; bottom: 0;
+
+/* 消息正文：迷你 Markdown 的产物（.mdown 走到哪跟到哪 —— 对话气泡和桥接页
+   共用一套）。段落保留换行（Agent 的话大多是随手敲的），
+   代码块/清单/引用是结构化块，间距由块自己管 */
+.msg .text { font-size: 13.5px; }
+.mdown { line-height: 1.55; word-break: break-word; }
+.mdown > * + * { margin-top: 6px; }
+.mdown p { margin: 0; white-space: pre-wrap; }
+.mdown .md-code {
+  margin: 0; padding: 8px 11px; overflow-x: auto;
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  border-radius: var(--r-sm); font-family: var(--mono);
+  font-size: 12px; line-height: 1.55; white-space: pre;
+}
+.mdown code { background: color-mix(in srgb, var(--ink) 8%, transparent); padding: 0 4px; border-radius: 4px; }
+.mdown .md-h { font-weight: 700; }
+.mdown ul, .mdown ol { margin: 0; padding-left: 20px; }
+.mdown li { margin: 1px 0; }
+.mdown blockquote {
+  margin: 0; padding: 1px 0 1px 10px; border-left: 3px solid var(--line);
+  color: var(--muted); white-space: pre-wrap;
+}
+.mdown a { color: var(--accent); }
+
+@media (max-width: 900px) {
+  .chat-shell { flex-direction: column; }
+  .chat-side { flex: none; max-height: 42vh; border-right: none; border-bottom: 1px solid var(--line-soft); }
 }
 
 /* ---- 桥接：那个「人」的收件箱 ---- */
@@ -323,7 +396,7 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
   box-shadow: var(--shadow);
 }
 .waiting .from { font-weight: 600; }
-.waiting .said { margin: 8px 0 10px; white-space: pre-wrap; word-break: break-word; }
+.waiting .said { margin: 8px 0 10px; }
 .waiting textarea { width: 100%; min-height: 76px; font-family: var(--sans); font-size: 13.5px; }
 /* 往来记录：已经聊完的也要看得见 —— 不然接上 Claude Code 之后页面永远是空的，
    会话几秒就回完了。左边一道竖线把「谁说的」和「回了什么」串成一条对话。 */
@@ -333,47 +406,21 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
 }
 .xchg.out { border-left-color: var(--accent); }
 .xchg.unanswered { border-left-color: var(--warn); }
-.convo.picked { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
-.convo[data-thread] { cursor: pointer; }
-/* 对话按工作区分组的组头 —— 名字 + 一道贯穿线，像书页里的小节标题 */
+/* 对话清单按工作区分组的组头 —— 名字 + 一道贯穿线，像书页里的小节标题 */
 .chat-ws {
   display: flex; gap: 8px; align-items: baseline;
-  margin: 16px 0 8px; font-size: 12px; font-weight: 600; color: var(--muted);
+  margin: 12px 4px 4px; font-size: 11px; font-weight: 600;
+  color: var(--dim); letter-spacing: .05em;
 }
-.chat-ws:first-child { margin-top: 0; }
-.chat-ws .count { font-weight: 400; color: var(--dim); }
+.chat-ws:first-child { margin-top: 2px; }
+.chat-ws .count { font-weight: 400; }
 .chat-ws::after { content: ""; flex: 1; border-top: 1px solid var(--line-soft); align-self: center; }
 .xchg .head { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
 .xchg .who { font-weight: 600; }
-.xchg .line { margin: 5px 0 0; white-space: pre-wrap; word-break: break-word; font-size: 13px; }
+.xchg .line { margin: 5px 0 0; font-size: 13px; }
 .xchg .line.said { color: var(--text); }
 .xchg .line.back { color: var(--muted); }
 .xchg .line.back::before { content: "↳ "; color: var(--accent); }
-
-/* Agent 往来：一段 thread 一张卡，读起来得像对话而不是像日志表格。
-   同一个人连着说的话不重复标名字（.cont），名字列右对齐让正文起始位置对齐。 */
-.convo {
-  border: 1px solid var(--line-soft); border-radius: var(--r);
-  background: var(--surface); padding: 12px 16px 14px; margin-bottom: 12px;
-  box-shadow: var(--shadow);
-}
-.convo .head {
-  display: flex; gap: 8px; align-items: baseline;
-  padding-bottom: 8px; margin-bottom: 6px; border-bottom: 1px solid var(--line-soft);
-}
-.convo .peers { font-weight: 600; font-size: 13.5px; }
-.turn { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; }
-.turn.cont { padding-top: 0; }
-.turn .who {
-  flex: 0 0 86px; text-align: right; font-weight: 600; font-size: 12px;
-  color: var(--accent); font-family: var(--mono);
-}
-.turn .text { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; font-size: 13px; }
-.turn .when { flex: 0 0 auto; font-size: 11px; font-family: var(--mono); }
-.convo .day {
-  margin: 8px 0 4px 96px; font-size: 11px; color: var(--muted);
-  font-family: var(--mono); letter-spacing: .04em;
-}
 
 .copy-line {
   display: flex; gap: 8px; align-items: flex-start;
@@ -522,25 +569,38 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
 
     <section class="pane" id="pane-chat" hidden>
       <div class="eyebrow">对话 <span class="count" id="chat-count"></span></div>
-      <p class="why" style="margin:0 0 10px">
-        这个节点上的所有对话 —— <b>你跟 Agent 说的，和 Agent 之间说的，在一处</b>。
-        点某一段就接着它往下说；不点就是开一段新的。
-      </p>
-      <div class="actions" style="margin-bottom:10px">
-        <input id="chat-q" placeholder="过滤：Agent 名，或话里的一段字…" autocomplete="off" class="grow" />
-        <label class="meta" style="display:flex;gap:6px;align-items:center;white-space:nowrap">
-          <input type="checkbox" id="chat-peers" /> 只看 Agent 之间的
-        </label>
-        <button class="ghost danger" id="chat-wipe" type="button" hidden>清空全部记录</button>
-      </div>
-      <div id="chat-body"></div>
-      <div class="chat-bar">
-        <form class="actions" id="chat-form" hidden>
-          <select id="chat-to" aria-label="跟谁说" style="flex:0 0 200px"></select>
-          <input id="chat-input" placeholder="说点什么，回车发送…" autocomplete="off" />
-          <button type="submit">发送</button>
-        </form>
-        <div class="hint" id="chat-hint" hidden></div>
+      <div class="chat-shell">
+        <div class="chat-side">
+          <div class="chat-tools">
+            <input id="chat-q" placeholder="搜索 Agent 或消息内容…" autocomplete="off" />
+            <div class="pair">
+              <select id="chat-ws-filter" aria-label="按工作区筛选" hidden></select>
+              <select id="chat-agent-filter" aria-label="按 Agent 筛选"></select>
+            </div>
+            <label class="peers-only">
+              <input type="checkbox" id="chat-peers" /> 只看 Agent 之间的
+            </label>
+          </div>
+          <div id="chat-body"></div>
+          <div class="chat-side-foot">
+            <button class="ghost" id="chat-new" type="button" hidden>开一段新对话</button>
+            <span class="grow"></span>
+            <button class="ghost danger tiny" id="chat-wipe" type="button" hidden>清空全部</button>
+          </div>
+        </div>
+        <div class="chat-main">
+          <div class="chat-head" id="chat-head"></div>
+          <div id="chat-msgs"></div>
+          <div class="chat-bar">
+            <form class="actions" id="chat-form" hidden>
+              <select id="chat-to" aria-label="跟谁说" style="flex:0 0 190px"></select>
+              <textarea id="chat-input" rows="1"
+                placeholder="说点什么… Enter 发送，Shift+Enter 换行，支持 Markdown"></textarea>
+              <button type="submit">发送</button>
+            </form>
+            <div class="hint" id="chat-hint" hidden></div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -1165,12 +1225,96 @@ function connect() {
   socket.onerror = () => socket.close();
 }
 
+// ---- 迷你 Markdown ----
+// 面板「不能引外部资源」是硬约束（文件头写着），所以自己养一个最小集：
+// 代码块、行内代码、**粗体**、[链接](http…)、-/1. 清单、> 引用、# 标题。
+// 单星斜体故意不做 —— *.py 这类通配符太容易被误伤。
+//
+// 安全模型：**先整体 esc 转义，再在转义后的文本上织标签** —— 输出里每一个
+// '<' 都是这里亲手写的，消息原文永远进不了 DOM；链接只放行 http(s)。
+function mdInline(s) {
+  // 行内代码先摘走再处理其余语法 —— `**这种**` 在代码里就该原样待着。
+  // 占位符是 NUL 包着的序号；正文里的字面 NUL 先剥掉，否则一段
+  // 「NUL + 数字 + NUL」就能伪造占位符，把同条消息里别处的 code 复制过来
+  // （stash 里存的本就是自己生成的安全 HTML，不是安全问题，是显示错乱）
+  const stash = [];
+  const keep = (html) => `\u0000${stash.push(html) - 1}\u0000`;
+  return s
+    .replace(/\u0000/g, "")
+    .replace(/`([^`\n]+)`/g, (whole, c) => keep(`<code>${c}</code>`))
+    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
+    .replace(/\u0000(\d+)\u0000/g, (whole, i) => stash[i]);
+}
+
+function md(raw) {
+  const lines = esc(raw).split("\n");
+  const out = [];
+  let para = [];
+  const flush = () => {
+    if (para.length) { out.push(`<p>${para.map(mdInline).join("\n")}</p>`); para = []; }
+  };
+  // 从第 i 行起连续吃下匹配 re 的行 —— 清单和引用都是「一段连续的行」
+  const run = (i, re) => {
+    const got = [];
+    for (; i < lines.length; i++) {
+      const m = lines[i].match(re);
+      if (!m) break;
+      got.push(m[1]);
+    }
+    return got;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^```/.test(line)) {
+      flush();
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) buf.push(lines[i++]);
+      out.push(`<pre class="md-code">${buf.join("\n")}</pre>`);
+      continue;
+    }
+    if (!line.trim()) { flush(); continue; }
+    const h = line.match(/^#{1,4}\s+(.*)$/);
+    if (h) { flush(); out.push(`<div class="md-h">${mdInline(h[1])}</div>`); continue; }
+    const ul = run(i, /^\s*[-*]\s+(.*)$/);
+    if (ul.length) {
+      flush();
+      out.push(`<ul>${ul.map((t) => `<li>${mdInline(t)}</li>`).join("")}</ul>`);
+      i += ul.length - 1;
+      continue;
+    }
+    const ol = run(i, /^\s*\d+[.、)]\s+(.*)$/);
+    if (ol.length) {
+      flush();
+      out.push(`<ol>${ol.map((t) => `<li>${mdInline(t)}</li>`).join("")}</ol>`);
+      i += ol.length - 1;
+      continue;
+    }
+    const q = run(i, /^&gt;\s?(.*)$/);   // '>' 这时已经被 esc 成 &gt; 了
+    if (q.length) {
+      flush();
+      out.push(`<blockquote>${q.map(mdInline).join("\n")}</blockquote>`);
+      i += q.length - 1;
+      continue;
+    }
+    para.push(line);
+  }
+  flush();
+  return out.join("");
+}
+
 // ---- 对话：选一个 Agent 就是一个会话，接着同一个 thread 往下说 ----
 // `mine` = 本机那个「人的代理」Agent 的名字（role = user，通常叫 cli）。
 // 用来判断一段对话里「另一头是谁」，好把发送框的收件人填对。
 // chat.node = 选中那段对话属于哪个工作区 —— 回复要以**它**的身份发出，
 // 不是顶栏正在操作的那个
-const chat = { to: "", thread: "", node: "", seen: "", q: "", peersOnly: false, mine: "cli", data: { threads: [] } };
+const chat = {
+  to: "", thread: "", node: "", seen: "",
+  q: "", ws: "", agent: "", peersOnly: false,   // 清单的四个筛选维度
+  mine: "cli", data: { threads: [] },
+};
 
 function agentOptions() {
   // 一台机器好几个工作区时，各家的 echo/coordinator 重名 —— 收件人的取值
@@ -1220,8 +1364,12 @@ function syncAgentPicker() {
 //
 // 合起来还白捡一件事：点一段 Agent 之间的对话就能**插进去说一句** ——
 // 「人随时能插进正在进行的协作里」本来就是桥接设计里写着的目标。
+//
+// 布局是清单/详情两栏：左边管「找到那段」（搜索 + 工作区/Agent 筛选 + 分组），
+// 右边管「读与说」。以前每段一张卡、卡里摊开全部消息，段一多整页就是一堵墙。
 function renderChat() {
   const all = chat.data.threads || [];
+  syncChatFilters(all);
   const shown = all.filter(matchesChat);
   // 「读不到」空对话时也要说 —— 段数栏平时只在有对话时说话，
   // 空的时候不说这一句，人会以为真的什么都没有
@@ -1230,8 +1378,6 @@ function renderChat() {
   $("chat-count").textContent = all.length
     ? `${shown.length} 段` + (chat.data.truncated ? "（只读了最近一批）" : "") + brokenNote
     : brokenNote;
-  const body = $("chat-body");
-  const pinned = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
   // 好几个工作区时按工作区分组 —— 各家的 cli/echo 重名，一屏「cli ↔ echo」
   // 根本分不清是谁家的。只有一个工作区就不摆这层壳。
   const wsNames = [...new Set(all.map((t) => t.ws || ""))];
@@ -1240,66 +1386,135 @@ function renderChat() {
         const inWs = shown.filter((t) => (t.ws || "") === ws);
         if (!inWs.length) return "";
         return `<div class="chat-ws">${esc(ws || "?")}<span class="count">${inWs.length} 段</span></div>`
-          + inWs.map(renderThread).join("");
+          + inWs.map(renderThreadRow).join("");
       }).join("")
-    : shown.map(renderThread).join("");
-  const changed = paint(body, shown.length
+    : shown.map(renderThreadRow).join("");
+  // 重画把原来那一行销毁了，键盘用户的焦点会掉回 body —— 每选一段就得从头
+  // Tab 回来。记下焦点在哪一行，重画后找回同名的那行（对鼠标点击无感）。
+  // 侧栏折叠头部那边是同一套做法。
+  const focused = document.activeElement?.closest?.(".th-row[data-thread]");
+  const refocus = focused?.dataset.thread;
+  const changed = paint($("chat-body"), shown.length
     ? grouped
     : `<div class="empty">${all.length
         ? "没有匹配的对话"
-        : "还没有对话 —— 下面选一个 Agent，说点什么"}</div>`);
-  // 消息流那边同款守卫：没变就别动 scrollTop —— 人停在离底不到 60px 的地方
-  // 看东西时，每 2 秒被拽到底一次
-  if (changed && pinned) body.scrollTop = body.scrollHeight;
+        : "还没有对话 —— 右边选个收件人，说点什么"}</div>`);
+  if (changed && refocus) {
+    $("chat-body").querySelector(`.th-row[data-thread="${CSS.escape(refocus)}"]`)?.focus();
+  }
+  renderChatMain();
+}
+
+// 筛选下拉的选项从**数据本身**长出来（有哪些工作区、谁说过话），不是配置。
+// 和收件人下拉同一套纪律：内容没变不重建，别把人正在选的下拉框换掉。
+function syncChatFilters(all) {
+  const wsNames = [...new Set(all.map((t) => t.ws || ""))].filter(Boolean).sort();
+  const wsPick = $("chat-ws-filter");
+  wsPick.hidden = wsNames.length < 2;   // 单工作区没什么可筛
+  if (wsPick.dataset.sig !== wsNames.join(",")) {
+    wsPick.dataset.sig = wsNames.join(",");
+    wsPick.innerHTML = `<option value="">全部工作区</option>`
+      + wsNames.map((w) => `<option value="${esc(w)}">${esc(w)}</option>`).join("");
+    if (!wsNames.includes(chat.ws)) chat.ws = "";
+    wsPick.value = chat.ws;
+  }
+  const agents = [...new Set(all.flatMap((t) => t.peers || []))].sort();
+  const agPick = $("chat-agent-filter");
+  if (agPick.dataset.sig !== agents.join(",")) {
+    agPick.dataset.sig = agents.join(",");
+    const label = (a) => (wsNames.length > 1 ? a.replace(":", " · ") : shortName(a));
+    agPick.innerHTML = `<option value="">全部 Agent</option>`
+      + agents.map((a) => `<option value="${esc(a)}">${esc(label(a))}</option>`).join("");
+    if (!agents.includes(chat.agent)) chat.agent = "";
+    agPick.value = chat.agent;
+  }
 }
 
 function matchesChat(t) {
   if (chat.peersOnly && t.with_human) return false;
+  if (chat.ws && (t.ws || "") !== chat.ws) return false;
+  if (chat.agent && !(t.peers || []).includes(chat.agent)) return false;
   const q = chat.q.trim().toLowerCase();
   if (!q) return true;
   return (t.peers || []).some((p) => p.toLowerCase().includes(q))
     || (t.messages || []).some((m) => (m.body || "").toLowerCase().includes(q));
 }
 
-function renderThread(t) {
-  // 同工作区的显示短名；**别家的必须带完整 node:agent** —— 三个工作区
-  // 都有个 cli，短名分不清是谁
-  const wsName = (addr) => {
-    const s = String(addr || "");
-    return s.includes(":") && s.split(":")[0] !== t.ws ? s : shortName(s);
-  };
+// 同工作区的显示短名；**别家的必须带完整 node:agent** —— 三个工作区
+// 都有个 cli，短名分不清是谁
+function peerName(addr, ws) {
+  const s = String(addr || "");
+  return s.includes(":") && s.split(":")[0] !== ws ? s : shortName(s);
+}
+
+// 清单里的一行：谁跟谁 + 掐头去尾的最后一句 —— 扫一眼知道每段聊到哪了
+function renderThreadRow(t) {
+  const title = (t.peers || []).map((p) => peerName(p, t.ws)).join(" ↔ ");
+  const msgs = t.messages || [];
+  const tail = msgs[msgs.length - 1];
+  const peek = tail
+    ? `<span class="n">${esc(shortName(tail.frm))}：</span>${esc(String(tail.body || "").slice(0, 90))}`
+    : `<span class="n">（还没有消息）</span>`;
+  // tabindex/role 不是装饰：**读消息必须先选中**，选中就不能只有鼠标一条路。
+  // 少了这两个属性，键盘用户从「能读到全部消息」退化成「读不到」
+  return `
+    <div class="th-row ${t.thread === chat.thread ? "picked" : ""}"
+         tabindex="0" role="button" aria-pressed="${t.thread === chat.thread}"
+         data-thread="${esc(t.thread)}" data-ws="${esc(t.ws || "")}">
+      <div class="top">
+        <span class="peers">${esc(title)}</span>
+        <span class="when">${esc(fmtWhen(t.last))}</span>
+      </div>
+      <div class="peek">${peek}</div>
+    </div>`;
+}
+
+// 右侧详情：选中那段的完整消息流。删除按钮也住在这儿 —— 想删得先选中，
+// 破坏性操作天然多一步，清单里再也没有半隐形的危险点击区。
+function renderChatMain() {
+  const t = (chat.data.threads || []).find((x) => x.thread === chat.thread);
+  if (!t) {
+    paint($("chat-head"), `<span class="peers">新对话</span>
+      <span class="meta">你说的和 Agent 之间说的都在这一页 —— 左边挑一段接着聊，或直接选个收件人开新的</span>`);
+    paint($("chat-msgs"), `<div class="empty">还没选中对话</div>`);
+    // 记号跟着清掉：不清的话，等下选回刚才那段会被当成「还在同一段」，
+    // 落底只能靠「空态必然贴底」这个巧合兜住
+    delete $("chat-msgs").dataset.thread;
+    return;
+  }
+  paint($("chat-head"), `
+    <span class="peers">${esc((t.peers || []).map((p) => peerName(p, t.ws)).join(" ↔ "))}</span>
+    ${t.ws ? `<span class="pill">${esc(t.ws)}</span>` : ""}
+    <span class="meta">${t.count} 条${t.receipts ? ` · ${t.receipts} 回执` : ""} · ${esc(t.short)}</span>
+    <span class="grow"></span>
+    ${canWrite ? `<button class="ghost danger tiny" type="button"
+            data-wipe="${esc(t.thread)}" title="删掉这段的记录">删除记录</button>` : ""}`);
+  const humans = new Set(chat.data.humans || [chat.mine]);
   let last = "";
   let day = "";
-  const lines = (t.messages || []).map((m) => {
-    const same = m.frm === last;          // 连着说的不重复标名字，读起来才像对话
-    last = m.frm;
+  const html = (t.messages || []).map((m) => {
     // 日期只在**变了**的时候插一行。一段对话通常在同一天，
     // 每行都重复年月日是纯噪音；但跨天的对话不标日期就会读错先后。
     const d = fmtDay(m.ts);
     const sep = d && d !== day ? `<div class="day">${esc(d)}</div>` : "";
     if (d) day = d;
+    const cont = m.frm === last && !sep;   // 连着说的不重复标名字
+    last = m.frm;
+    const side = humans.has(shortName(m.frm)) ? "mine" : "them";
     return `${sep}
-      <div class="turn ${same && !sep ? "cont" : ""}">
-        <span class="who">${same && !sep ? "" : esc(wsName(m.frm))}</span>
-        <span class="text">${esc(m.body) || `<i class="meta">（空）</i>`}${m.clipped ? `<span class="meta">（截断，原文更长）</span>` : ""}</span>
-        <span class="when meta">${esc(fmtTime(m.ts))}</span>
+      <div class="msg ${side}">
+        ${cont ? "" : `<span class="who"><b>${esc(peerName(m.frm, t.ws))}</b><span>${esc(fmtTime(m.ts))}</span></span>`}
+        <span class="text mdown">${md(m.body) || `<p class="meta">（空）</p>`}${m.clipped ? `<p class="meta">（截断，原文更长）</p>` : ""}</span>
       </div>`;
   }).join("");
-  const here = t.thread === chat.thread;
-  return `
-    <div class="convo ${here ? "picked" : ""}" data-thread="${esc(t.thread)}" data-ws="${esc(t.ws || "")}">
-      <div class="head">
-        <span class="peers">${esc((t.peers || []).map(wsName).join(" ↔ "))}</span>
-        <span class="pill">${t.count} 条</span>
-        ${t.receipts ? `<span class="meta">另有 ${t.receipts} 条回执</span>` : ""}
-        <span class="grow"></span>
-        ${here ? `<span class="pill ok">接着这段说 → ${esc(chat.to || "?")}</span>` : ""}
-        <span class="meta">最后 ${esc(fmtStamp(t.last))} · ${esc(t.short)}</span>
-        ${canWrite ? `<button class="ghost danger tiny" type="button"
-                data-wipe="${esc(t.thread)}" title="删掉这段的记录">删除</button>` : ""}
-      </div>
-      ${lines}
-    </div>`;
+  const box = $("chat-msgs");
+  // 换了一段就直接落底；同一段只有人本来就在底部附近时才跟着新消息走 ——
+  // 人往上翻旧消息时，别每 2 秒被拽回底部
+  const swapped = box.dataset.thread !== t.thread;
+  box.dataset.thread = t.thread;
+  const pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  const changed = paint(box, html || `<div class="empty">这段还没有消息</div>`);
+  if (swapped || (changed && pinned)) box.scrollTop = box.scrollHeight;
 }
 
 function fmtDay(ts) {
@@ -1312,6 +1527,15 @@ function fmtStamp(ts) {
   return d && !isNaN(d)
     ? `${d.toLocaleDateString("zh-CN")} ${d.toLocaleTimeString("zh-CN", { hour12: false })}`
     : "";
+}
+
+// 清单列的窄时间戳：今天只给时分，更早只给月/日 —— 一列的宽度装得下的信息量
+function fmtWhen(ts) {
+  const d = ts ? new Date(ts) : null;
+  if (!d || isNaN(d)) return "";
+  return d.toDateString() === new Date().toDateString()
+    ? d.toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
 }
 
 function shortName(addr) {
@@ -1499,15 +1723,26 @@ async function wipeRecords(thread) {
 
 $("chat-wipe").addEventListener("click", () => wipeRecords(""));
 
-// 点一段就接着它说 —— thread 带上，对方的 thread 记忆才连得上。
-// 再点一次取消，回到「开一段新的」。
-$("chat-body").addEventListener("click", (event) => {
+// 详情头部的「删除记录」—— 它不在 #chat-body 里，得自己接住
+$("chat-head").addEventListener("click", (event) => {
   const kill = event.target.closest?.("[data-wipe]");
-  if (kill) { wipeRecords(kill.dataset.wipe); return; }   // 删除按钮不该顺带选中这段
+  if (kill) wipeRecords(kill.dataset.wipe);
+});
+
+// 回到「开一段新的」：清掉选中，收件人保持原样，光标直接落进输入框
+$("chat-new").addEventListener("click", () => {
+  chat.thread = "";
+  chat.node = "";
+  renderChat();
+  $("chat-input").focus();
+});
+
+// 点一段就接着它说 —— thread 带上，对方的 thread 记忆才连得上。
+// 再点同一段不取消（聊天软件的惯例：选中就是选中）；想开新的用左下角按钮。
+$("chat-body").addEventListener("click", (event) => {
   const card = event.target.closest?.("[data-thread]");
-  if (!card) return;
+  if (!card || chat.thread === card.dataset.thread) return;
   const picked = card.dataset.thread;
-  if (chat.thread === picked) { chat.thread = ""; chat.node = ""; renderChat(); return; }
   chat.thread = picked;
   chat.node = card.dataset.ws || "";   // 回复以这段对话所在的工作区身份发出
   const picker = $("chat-to");
@@ -1529,7 +1764,7 @@ $("chat-body").addEventListener("click", (event) => {
   renderChat();
 });
 
-// 两个筛选都只作用在**已经拿到手**的数据上，不重新请求 —— 打字和勾选立刻见效
+// 筛选都只作用在**已经拿到手**的数据上，不重新请求 —— 打字和选择立刻见效
 $("chat-q").addEventListener("input", (event) => {
   chat.q = event.target.value;
   renderChat();
@@ -1540,12 +1775,39 @@ $("chat-peers").addEventListener("change", (event) => {
   renderChat();
 });
 
+$("chat-ws-filter").addEventListener("change", (event) => {
+  chat.ws = event.target.value;
+  renderChat();
+});
+
+$("chat-agent-filter").addEventListener("change", (event) => {
+  chat.agent = event.target.value;
+  renderChat();
+});
+
 $("chat-to").addEventListener("change", (event) => {
   chat.to = event.target.value;
   // 换成**这段对话里的另一位**，意思是「还在这段里，改成跟他说」（tst1↔tst2 里
   // 转头对 tst2 说一句）；换成一个跟这段无关的人，才是开一段新的。
   if (chat.thread && !candidates(chat.thread).includes(chat.to)) chat.thread = "";
   renderChat();
+});
+
+// 输入框是多行的（消息支持 Markdown，多行才有意义）：Enter 发送、
+// Shift+Enter 换行 —— textarea 的回车默认是换行，得自己接管。
+// isComposing 挡住输入法组合中的回车：中文选字的那下确认不该把话发出去。
+$("chat-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    $("chat-form").requestSubmit();
+  }
+});
+
+// 跟着内容长高，封顶交给 CSS 的 max-height
+$("chat-input").addEventListener("input", (event) => {
+  const box = event.target;
+  box.style.height = "auto";
+  box.style.height = `${box.scrollHeight + 2}px`;
 });
 
 $("chat-form").addEventListener("submit", async (event) => {
@@ -1566,6 +1828,7 @@ $("chat-form").addEventListener("submit", async (event) => {
     });
     chat.thread = sent.thread;
     input.value = "";
+    input.style.height = "";
     await loadChat();
   } catch (err) {
     say("chat-hint", String(err.message || err), "bad");
@@ -1724,8 +1987,8 @@ function renderLog(history) {
           <span class="grow"></span>
           <span class="meta">${esc(fmtStamp(x.ts))} ${esc(x.short || "")}</span>
         </div>
-        ${x.incoming ? `<div class="line said">${esc(x.incoming)}</div>` : ""}
-        ${x.reply ? `<div class="line back">${esc(x.reply)}</div>` : ""}
+        ${x.incoming ? `<div class="line said mdown">${md(x.incoming)}</div>` : ""}
+        ${x.reply ? `<div class="line back mdown">${md(x.reply)}</div>` : ""}
       </div>`;
       }).join("")
     : `<div class="empty">还没有往来记录 —— 聊过的消息会归档到这里</div>`);
@@ -1752,7 +2015,7 @@ function renderBridge(info) {
           <span class="grow"></span>
           <span class="meta">${esc(w.short)}</span>
         </div>
-        <div class="said">${esc(w.body)}</div>
+        <div class="said mdown">${md(w.body)}</div>
         ${w.clipped ? `<div class="meta">……原文更长，这里只显示前一段（完整的在它的 inbox 文件里）</div>` : ""}
         <textarea data-reply="${esc(w.id)}" placeholder="替它回一句…"></textarea>
         <div class="actions" style="margin-top:8px">
@@ -2156,12 +2419,12 @@ document.addEventListener("click", (event) => {
   if (answer) sendBridgeReply(answer.dataset.sendReply, answer);
 });
 
-// 侧栏头部是 div 装成的按钮 —— 键盘的回车/空格得跟点击一个效果，
-// 不然 Tab 到了也按不动。真按钮（配对等）浏览器自己会处理，别掺和。
+// 侧栏头部、对话清单行都是 div 装成的按钮 —— 键盘的回车/空格得跟点击一个
+// 效果，不然 Tab 到了也按不动。真按钮（配对等）浏览器自己会处理，别掺和。
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") return;
   if (event.target.closest?.("button, input, select, textarea, a")) return;
-  const head = event.target.closest?.("[data-focus-node], [data-toggle-node]");
+  const head = event.target.closest?.("[data-focus-node], [data-toggle-node], [data-thread]");
   if (!head) return;
   event.preventDefault();  // 空格默认滚动页面
   head.click();
@@ -2312,6 +2575,7 @@ async function enableActions() {
   $("run-form").hidden = false;
   $("chat-form").hidden = false;
   $("chat-wipe").hidden = false;
+  $("chat-new").hidden = false;
   for (const name of ["setup", "config"]) {
     const tab = document.querySelector(`.tab[data-pane="${name}"]`);
     if (tab) tab.hidden = false;

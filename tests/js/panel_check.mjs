@@ -91,7 +91,7 @@ const panel = new Function(
   "setTimeout",
   // setWrite：写权限开着时拓扑会多画启停/删除按钮和「加 Agent」表单，
   // 那几处也把外部数据拼进了 HTML，必须一起验
-  `${script}\nreturn { state, local, topoOpen, draw, applyCluster, applyLocal, renderWorkspaces, chat, renderChat, patchToml, diffLines, renderDiff, setWrite: (v) => { canWrite = v; } };`,
+  `${script}\nreturn { state, local, topoOpen, draw, applyCluster, applyLocal, renderWorkspaces, chat, renderChat, md, patchToml, diffLines, renderDiff, setWrite: (v) => { canWrite = v; } };`,
 )(document, window, localStorage, history, URL, location, fetch, WebSocket, noop, noop);
 
 // ---- 数据 ----
@@ -432,6 +432,58 @@ assert.ok(
   $("chat-count").textContent.includes("坏了的家"),
   "空对话时读不到的工作区被静默了",
 );
+
+// ---- 迷你 Markdown：先转义再织标签 —— 恶意消息永远进不了 DOM ----
+assert.ok(!panel.md(EVIL).includes("<img"), "md 没把恶意 HTML 转义掉");
+assert.ok(panel.md("**加粗**").includes("<b>加粗</b>"), "粗体没渲染");
+assert.ok(panel.md("`x < 1`").includes("<code>x &lt; 1</code>"), "行内代码没渲染或没转义");
+const fenced = panel.md("```py\nif a<b: pass\n```");
+assert.ok(fenced.includes('class="md-code"') && fenced.includes("a&lt;b"), "代码块没渲染或没转义");
+assert.ok(panel.md("- 甲\n- 乙").includes("<ul><li>甲</li><li>乙</li></ul>"), "无序清单没渲染");
+assert.ok(panel.md("1. 甲\n2. 乙").includes("<ol>"), "有序清单没渲染");
+assert.ok(panel.md("[说明](https://a.b/c)").includes('href="https://a.b/c"'), "http 链接没渲染");
+assert.ok(!panel.md("[x](javascript:alert(1))").includes("<a"), "非 http(s) 链接不该成为 <a>");
+assert.ok(panel.md("> 引用行").includes("<blockquote>"), "引用没渲染");
+assert.ok(panel.md("`**a**` 和 **b**").includes("<code>**a**</code>"),
+  "行内代码里的星号被当成了粗体 —— 代码该先摘走再处理其余语法");
+// 占位符不能被正文伪造：NUL 包着序号是 mdInline 的内部记号，正文里带字面 NUL
+// （JSON 里合法）就能冒充它，渲染出 undefined 或错位复制同条消息里的 code
+assert.ok(!panel.md("\u00000\u0000").includes("undefined"), "正文伪造的占位符没被剥掉");
+assert.ok(panel.md("`真代码` 与 \u00000\u0000").includes("<code>真代码</code>"),
+  "剥 NUL 不该把真的行内代码一起弄坏");
+
+// ---- 详情窗格：消息经 md 渲染，恶意正文照样进不了 DOM ----
+panel.chat.data = {
+  threads: [
+    {
+      thread: "t1", short: "T1", ws: "alpha-ws", count: 1, last: "",
+      peers: ["alpha-ws:cli", "alpha-ws:echo"],
+      messages: [msg("alpha-ws:echo", EVIL)],
+    },
+    {
+      thread: "t2", short: "T2", ws: "beta-ws", count: 1, last: "",
+      peers: ["beta-ws:cli", "beta-ws:tst9"],
+      messages: [msg("beta-ws:tst9", "乙家的话")],
+    },
+  ],
+};
+panel.chat.thread = "t1";
+panel.renderChat();
+assert.ok(!$("chat-msgs").innerHTML.includes("<img"), "详情消息里有没转义的正文");
+assert.ok($("chat-msgs").innerHTML.includes('class="msg them"'), "详情没按气泡渲染");
+
+// ---- 工作区 / Agent 筛选：筛掉的段不该再出现在清单里 ----
+panel.chat.ws = "beta-ws";
+panel.renderChat();
+let listed = $("chat-body").innerHTML;
+assert.ok(listed.includes("tst9") && !listed.includes("echo"), "工作区筛选没生效");
+panel.chat.ws = "";
+panel.chat.agent = "alpha-ws:echo";
+panel.renderChat();
+listed = $("chat-body").innerHTML;
+assert.ok(listed.includes("echo") && !listed.includes("tst9"), "Agent 筛选没生效");
+panel.chat.agent = "";
+panel.chat.thread = "";
 
 panel.chat.data = { threads: [] };
 panel.renderChat();

@@ -24,7 +24,13 @@ from pathlib import Path
 
 import pytest
 
+from datetime import timedelta
+
+from anthill.core.envelope import Envelope
+from anthill.core.ids import new_id, now
 from anthill.core.paths import NodeLayout
+from anthill.core.payloads import ChatPayload, MessageType
+from anthill.core.router import Address
 from anthill.core.workspace import create_workspace
 
 REQUIRE = os.environ.get("ANTHILL_REQUIRE_BROWSER") == "1"
@@ -121,6 +127,37 @@ def panel(tmp_path: Path) -> Iterator[str]:
     """一个已经配好工作区的 serve。"""
     workspace = tmp_path / "ws"
     create_workspace(NodeLayout(workspace), node_name="browserbox")
+    yield from serve(workspace, home=tmp_path / "home")
+
+
+@pytest.fixture
+def panel_with_peer_chat(tmp_path: Path) -> Iterator[str]:
+    """一个**已经有 Agent↔Agent 对话**的工作区。
+
+    没有这个 fixture，「只看 Agent 之间的」那条测试是**空转**的：全新工作区
+    一段对话都没有，查出来是空集合，`for` 循环体一次都不执行照样绿。
+    数据按真实路径落盘 —— `Mailbox.archive` 把处理完的信封放进收件方的
+    `inbox/done/<日期>/`，对话页就是从那里把话拼回来的。
+    """
+    workspace = tmp_path / "ws"
+    layout = NodeLayout(workspace)
+    create_workspace(layout, node_name="browserbox")
+    thread = new_id()
+    start = now()
+    lines = [("tst1", "tst2", "这段接口我改完了"), ("tst2", "tst1", "收到，我这就审")]
+    for index, (frm, to, body) in enumerate(lines):
+        env = Envelope(
+            id=new_id(),
+            ts=start + timedelta(seconds=index),
+            from_=Address(node="browserbox", agent=frm),
+            to=Address(node="browserbox", agent=to),
+            type=MessageType.CHAT,
+            thread=thread,
+            payload=ChatPayload(body=body),
+        )
+        done = layout.mailbox_dir(to) / "inbox" / "done" / "2026-08-19"
+        done.mkdir(parents=True, exist_ok=True)
+        (done / f"{env.id}.json").write_bytes(env.to_json_bytes())
     yield from serve(workspace, home=tmp_path / "home")
 
 
@@ -300,26 +337,70 @@ def test_talking_to_an_agent_from_the_page(browser: object, panel: str) -> None:
     page.fill("#chat-input", "从浏览器发的一条")
     page.click('#chat-form button[type="submit"]')
 
-    # 对话页现在显示的是**所有**会话（含 Agent 之间的），一段一张卡；
-    # 刚发的那条要立刻出现 —— 哪怕对方还没归档它（靠本机记的发件兜底）
-    page.wait_for_selector("#chat-body .convo .turn", timeout=15000)
-    assert "从浏览器发的一条" in page.text_content("#chat-body")
+    # 对话页现在是清单/详情两栏：发出去之后那段自动选中，
+    # 刚发的那条要立刻出现在右侧消息流里 —— 哪怕对方还没归档它
+    # （靠本机记的发件兜底），清单里也得有这段的行
+    page.wait_for_selector("#chat-msgs .msg", timeout=15000)
+    assert "从浏览器发的一条" in page.text_content("#chat-msgs")
+    page.wait_for_selector("#chat-body .th-row", timeout=15000)
     assert errors == []
     page.close()
 
 
-def test_the_page_shows_what_two_agents_said_to_each_other(browser: object, panel: str) -> None:
+def test_the_page_shows_what_two_agents_said_to_each_other(
+    browser: object, panel_with_peer_chat: str
+) -> None:
     """**这一页存在的理由。** 只显示「你参与的」的话，Agent 之间聊了什么就没处看。"""
-    page, errors = open_panel(browser, panel)
+    page, errors = open_panel(browser, panel_with_peer_chat)
     page.wait_for_selector("#topo-body .card", timeout=15000)
     page.click('.tab[data-pane="chat"]')
-    page.wait_for_timeout(600)
+    page.wait_for_selector("#chat-body .th-row", timeout=15000)
 
     # 勾上之后剩下的每一段都不该有「人的代理」参与
     page.check("#chat-peers")
     page.wait_for_timeout(400)
-    for card in page.query_selector_all("#chat-body .convo .peers"):
+    rows = page.query_selector_all("#chat-body .th-row .peers")
+    # **非空断言不能省**：查空集时 for 循环体一次都不执行，照样绿 ——
+    # 这条测试以前就是这么空转的
+    assert rows, "预置的 Agent↔Agent 对话没显示出来"
+    for card in rows:
         assert "cli" not in card.inner_text()
+
+    # 点开能读到正文 —— 「看得见这段存在」和「读得到聊了什么」是两回事
+    rows[0].click()
+    page.wait_for_selector("#chat-msgs .msg", timeout=15000)
+    assert "这段接口我改完了" in page.text_content("#chat-msgs")
+    assert errors == []
+    page.close()
+
+
+def test_a_conversation_can_be_opened_with_the_keyboard(
+    browser: object, panel_with_peer_chat: str
+) -> None:
+    """清单行是 div 装的按钮，**读消息又必须先选中** —— 只有鼠标一条路的话，
+    键盘用户从「能读到全部消息」直接退化成「读不到」。
+
+    以前每段对话把消息摊在卡片里，不选中也读得到；改成清单/详情两栏之后
+    这条路就断了，所以焦点与回车必须补上。
+    """
+    page, errors = open_panel(browser, panel_with_peer_chat)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+    page.click('.tab[data-pane="chat"]')
+    row = page.wait_for_selector("#chat-body .th-row", timeout=15000)
+
+    row.focus()
+    assert page.evaluate(
+        "() => document.activeElement.classList.contains('th-row')"
+    ), "清单行拿不到焦点 —— tabindex 掉了"
+    page.keyboard.press("Enter")
+
+    page.wait_for_selector("#chat-msgs .msg", timeout=15000)
+    assert "这段接口我改完了" in page.text_content("#chat-msgs")
+    # 重画（每几秒一次）不该把焦点甩回 body，否则每选一段都要重新 Tab 回来
+    page.wait_for_timeout(2500)
+    assert page.evaluate(
+        "() => document.activeElement.classList.contains('th-row')"
+    ), "重画之后焦点掉了"
     assert errors == []
     page.close()
 
@@ -683,7 +764,7 @@ def test_chat_groups_conversations_by_workspace(
     page.select_option("#chat-to", "collab:echo")
     page.fill("#chat-input", "第一家的消息")
     page.click('#chat-form button[type="submit"]')
-    page.wait_for_selector("#chat-body .convo", timeout=15000)
+    page.wait_for_selector("#chat-body .th-row", timeout=15000)
     assert page.query_selector("#chat-body .chat-ws") is None, "只有一家有对话时不该出组头"
 
     # 第二家：切到 collab-tst 再发一条
@@ -744,8 +825,8 @@ def test_cancelling_a_wipe_really_does_nothing(browser: object, panel: str) -> N
     page.select_option("#chat-to", "echo")
     page.fill("#chat-input", "留着给删除测试用")
     page.click('#chat-form button[type="submit"]')
-    page.wait_for_selector("#chat-body .convo .turn", timeout=15000)
-    before = page.text_content("#chat-body")
+    page.wait_for_selector("#chat-msgs .msg", timeout=15000)
+    before = page.text_content("#chat-body") + page.text_content("#chat-msgs")
 
     for dismiss in (
         lambda: page.click('#ask-choices [data-pick="cancel"]'),
@@ -757,7 +838,8 @@ def test_cancelling_a_wipe_really_does_nothing(browser: object, panel: str) -> N
         assert page.evaluate("document.activeElement.dataset.pick") == "cancel"
         dismiss()
         page.wait_for_timeout(800)
-        assert page.text_content("#chat-body") == before, "取消之后内容变了"
+        now = page.text_content("#chat-body") + page.text_content("#chat-msgs")
+        assert now == before, "取消之后内容变了"
 
     assert errors == []
     page.close()
