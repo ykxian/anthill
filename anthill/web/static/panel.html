@@ -2142,7 +2142,9 @@ document.addEventListener("click", (event) => {
   }
   const switchTo = event.target.closest?.("[data-ws-node]");
   if (switchTo) { switchNode(switchTo.dataset.wsNode); return; }
-  const ws = event.target.closest?.("[data-ws]");
+  // 认 data-ws-op 而不是 data-ws —— 对话卡片也背着 data-ws（标这段属于哪个
+  // 工作区），按 data-ws 认，点一段对话就会被当成「移出工作区」弹确认框
+  const ws = event.target.closest?.("[data-ws-op]");
   if (ws) {
     if (ws.dataset.wsOp === "adopt") { adoptWorkspace(ws.dataset.ws); return; }
     removeWorkspace(ws.dataset.ws, ws.dataset.wsOp === "purge");
