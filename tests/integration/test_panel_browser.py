@@ -20,11 +20,10 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
-
-from datetime import timedelta
 
 from anthill.core.envelope import Envelope
 from anthill.core.ids import new_id, now
