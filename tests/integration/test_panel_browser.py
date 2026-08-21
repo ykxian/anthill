@@ -373,6 +373,110 @@ def test_the_page_shows_what_two_agents_said_to_each_other(
     page.close()
 
 
+def test_the_chat_layout_does_not_overlap_at_any_width(
+    browser: object, panel_with_peer_chat: str
+) -> None:
+    """对话页在常见宽度下不许有元素溢出到容器外面。
+
+    修的那次实测：`.chat-tools` 是 grid，子项默认 `min-width: auto`，装着两个
+    下拉的 `.pair` 缩不到内容宽度以下，把 300px 的侧栏撑破 34px —— 「全部 Agent」
+    那个下拉直接压在右边消息区上面。`.add-agent` 早就踩过同一个坑并留了注释，
+    这里还是重犯了，所以钉一颗钉子：光靠注释提醒不住。
+
+    只报 `overflow: visible` 的元素 —— `.peek` / `.truncate` 那种
+    `overflow: hidden` + 省略号是**故意**截断，不是 bug。
+
+    **必须先造出两个工作区**：工作区筛选那个下拉在单工作区时是隐藏的，
+    只有一个下拉时 `.pair` 装得下，测试就成了空转（这条第一版正是这么
+    绿着放过 bug 的）。数据直接塞进 `chat.data` —— 要验的是纯布局，
+    不必绕真实投递。
+    """
+    two_ws = """
+    () => {
+      const msg = (frm, body) => ({ id: frm + body, frm, to: 'x', ts: '2026-08-21T00:00:00Z',
+                                    kind: 'chat', body });
+      chat.data = {
+        threads: [
+          { thread: 'a', short: 'AAA', ws: 'alpha-workspace', count: 1, last: '2026-08-21T00:00:00Z',
+            peers: ['alpha-workspace:cli', 'alpha-workspace:某个名字很长的agent'],
+            messages: [msg('alpha-workspace:某个名字很长的agent', '甲家的一句话')] },
+          { thread: 'b', short: 'BBB', ws: 'beta-workspace', count: 1, last: '2026-08-21T00:01:00Z',
+            peers: ['beta-workspace:cli', 'beta-workspace:另一个挺长的agent名'],
+            messages: [msg('beta-workspace:另一个挺长的agent名', '乙家的一句话')] },
+        ],
+        humans: ['cli'],
+      };
+      chat.thread = 'a';
+      renderChat();
+      return !document.getElementById('chat-ws-filter').hidden;
+    }
+    """
+    detect = """
+    () => {
+      const bad = [];
+      for (const el of document.querySelectorAll('#pane-chat *')) {
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height) continue;
+        const s = getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden') continue;
+        const over = el.scrollWidth - el.clientWidth;
+        if (over > 1 && s.overflowX === 'visible') {
+          bad.push((el.id ? '#' + el.id : el.tagName.toLowerCase())
+                   + '.' + String(el.className).trim().split(/\\s+/)[0] + ' 溢出 ' + over + 'px');
+        }
+      }
+      return bad;
+    }
+    """
+    page, errors = open_panel(browser, panel_with_peer_chat)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+    page.click('.tab[data-pane="chat"]')
+    page.wait_for_selector("#chat-body .th-row", timeout=15000)
+    assert page.evaluate(two_ws), "两个筛选下拉没同时出现 —— 这条测试会空转"
+    page.wait_for_selector("#chat-msgs .msg", timeout=15000)
+
+    for width in (1440, 1280, 1024, 900, 768):
+        page.set_viewport_size({"width": width, "height": 900})
+        page.wait_for_timeout(250)
+        assert page.evaluate(detect) == [], f"{width}px 宽时对话页有元素溢出"
+        # 输入框的提示文字被裁过：placeholder 折行而框只有一行高。
+        # scrollHeight 明显超过 clientHeight 就是有字看不见
+        clipped = page.evaluate(
+            "() => { const t = document.getElementById('chat-input');"
+            " return t.scrollHeight - t.clientHeight; }"
+        )
+        assert clipped <= 2, f"{width}px 宽时输入框有 {clipped}px 的内容被裁掉"
+
+    assert errors == []
+    page.close()
+
+
+def test_narrow_screens_still_leave_room_to_read_messages(
+    browser: object, panel_with_peer_chat: str
+) -> None:
+    """窄屏堆成上下两段时，消息区不能被侧栏挤没。
+
+    只给侧栏写 `max-height: 42vh` 而不给消息区兜下限时，量出来消息区只剩
+    149px —— 一条消息都放不下，等于这一页在窄屏上不能用。
+    """
+    page, errors = open_panel(browser, panel_with_peer_chat)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+    page.click('.tab[data-pane="chat"]')
+    page.wait_for_selector("#chat-body .th-row", timeout=15000)
+    page.click("#chat-body .th-row")
+    page.wait_for_selector("#chat-msgs .msg", timeout=15000)
+
+    page.set_viewport_size({"width": 768, "height": 900})
+    page.wait_for_timeout(300)
+    height = page.evaluate(
+        "() => Math.round(document.getElementById('chat-msgs').getBoundingClientRect().height)"
+    )
+
+    assert height >= 220, f"窄屏下消息区只有 {height}px，读不了"
+    assert errors == []
+    page.close()
+
+
 def test_a_conversation_can_be_opened_with_the_keyboard(
     browser: object, panel_with_peer_chat: str
 ) -> None:
