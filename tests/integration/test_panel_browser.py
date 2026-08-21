@@ -435,7 +435,8 @@ def test_the_chat_layout_does_not_overlap_at_any_width(
     assert page.evaluate(two_ws), "两个筛选下拉没同时出现 —— 这条测试会空转"
     page.wait_for_selector("#chat-msgs .msg", timeout=15000)
 
-    for width in (1440, 1280, 1024, 900, 768):
+    # 480 不能漏 —— 最窄的那一档最容易出事，却最容易在写循环时忘掉
+    for width in (1440, 1280, 1024, 900, 768, 480):
         page.set_viewport_size({"width": width, "height": 900})
         page.wait_for_timeout(250)
         assert page.evaluate(detect) == [], f"{width}px 宽时对话页有元素溢出"

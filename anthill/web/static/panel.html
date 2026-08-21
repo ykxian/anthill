@@ -310,6 +310,9 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
   padding: 12px 12px 10px; display: grid; grid-template-columns: minmax(0, 1fr);
   gap: 7px; border-bottom: 1px solid var(--line-soft);
 }
+/* 这行和上面的 minmax(0, 1fr) 是同一根因的两个修法，**各自单独都够** ——
+   两条都留是保险，不是冗余，别顺手清理掉一条（真删了测试也不会报红：
+   剩下那条还兜着）。 */
 .chat-tools .pair { display: flex; gap: 6px; min-width: 0; }
 .chat-tools select { flex: 1 1 0; min-width: 0; font-size: 12px; padding: 4px 7px; }
 .chat-tools .peers-only { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
@@ -369,7 +372,11 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
 /* 会换行的一行：窄起来时收件人下拉自己掉到第二行，而不是把输入框挤成
    一条缝（量过：1024 宽时输入框只剩 84px，placeholder 折行后被裁掉 162px） */
 .chat-bar form { align-items: flex-end; flex-wrap: wrap; }
-#chat-to { flex: 1 1 150px; min-width: 0; }
+/* 不长、可缩、基准 190 —— 宽屏还是原来那个宽度，窄屏能让路。
+   这条以前写在 HTML 的行内 style 里（`flex:0 0 190px`），行内样式盖过
+   任何选择器，于是样式表里改它一个字节都不生效：真正救回输入框的是上面
+   那句 `flex-wrap: wrap`。挪到这里来，改哪儿生效就一目了然。 */
+#chat-to { flex: 0 1 190px; min-width: 0; }
 #chat-input {
   /* 220px 的基准 + 可换行 = 永远不会被压到读不了；overflow-y 兜住超过
      max-height 的长正文，让它滚而不是被切掉 */
@@ -623,7 +630,7 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
           <div id="chat-msgs"></div>
           <div class="chat-bar">
             <form class="actions" id="chat-form" hidden>
-              <select id="chat-to" aria-label="跟谁说" style="flex:0 0 190px"></select>
+              <select id="chat-to" aria-label="跟谁说"></select>
               <textarea id="chat-input" rows="1" placeholder="说点什么…"></textarea>
               <button type="submit">发送</button>
             </form>
