@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 from contextlib import suppress
+from typing import TypedDict
 
 _STILL_ACTIVE = 259
 """GetExitCodeProcess 对还在跑的进程返回的哨兵值（winbase.h 的 STILL_ACTIVE）。
@@ -91,7 +92,20 @@ def kill_tree(pid: int, *, force: bool) -> None:
         os.killpg(os.getpgid(pid), sig)
 
 
-def detach_kwargs() -> dict[str, object]:
+class DetachKwargs(TypedDict, total=False):
+    """`detach_kwargs()` 的形状：两个键**按平台二选一**，所以都是可选的。
+
+    以前这里写的是 `dict[str, object]`。`object` splat 进 `Popen` /
+    `create_subprocess_exec` 就对不上它们那一长串精确的关键字类型，
+    mypy 会把每个重载变体都报一遍 —— 三个调用点合起来 36 个错误里占了 26 个。
+    换成 TypedDict 之后类型是真的对上了，而不是拿 `Any` 把检查关掉。
+    """
+
+    creationflags: int
+    start_new_session: bool
+
+
+def detach_kwargs() -> DetachKwargs:
     """让子进程「脱离本进程独活」的 Popen 参数，按平台给对的那套。
 
     POSIX 是 start_new_session（setsid，自成进程组，超时才能整组杀干净）；

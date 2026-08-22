@@ -61,8 +61,8 @@ def test_kill_tree_tolerates_a_dead_pid() -> None:
 
     gone = subprocess.Popen([sys.executable, "-c", "pass"])
     gone.wait()
-    kill_tree(gone.pid, force=False)   # 不该抛
-    kill_tree(-1, force=True)          # 非法 pid 也不该抛
+    kill_tree(gone.pid, force=False)  # 不该抛
+    kill_tree(-1, force=True)  # 非法 pid 也不该抛
 
 
 def test_no_raw_killpg_outside_procs() -> None:
@@ -108,9 +108,7 @@ def test_no_raw_kill_zero_probe_outside_procs() -> None:
                 and isinstance(func.value, ast.Name)
                 and func.value.id == "os"
             )
-            second_is_zero = (
-                isinstance(node.args[1], ast.Constant) and node.args[1].value == 0
-            )
+            second_is_zero = isinstance(node.args[1], ast.Constant) and node.args[1].value == 0
             if named_kill and second_is_zero:
                 offenders.append(f"{path.relative_to(SRC.parent)}:{node.lineno}")
     assert not offenders, f"裸的 os.kill(pid, 0) 探测又出现了：{offenders}"

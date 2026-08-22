@@ -69,9 +69,7 @@ class AgentLoop:
         # MCP 外部工具同理：McpTool.risk 默认 high、只能由人显式降级，
         # 所以戴帽 Agent 天然看不到未经人降级的外部工具 —— 语义同向。
         # 工具表本身留全：真被点名调用时由 _execute 按 risk_for 执法。
-        self._specs = [
-            tool.spec for tool in tools if RISK_ORDER[tool.risk] <= RISK_ORDER[max_risk]
-        ]
+        self._specs = [tool.spec for tool in tools if RISK_ORDER[tool.risk] <= RISK_ORDER[max_risk]]
         self._policy = policy
         self._ctx = tool_ctx
         self._log = log

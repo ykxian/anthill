@@ -278,9 +278,7 @@ def test_a_repaint_does_not_eat_what_you_are_typing(browser: object, panel: str)
     page.close()
 
 
-def test_pairing_asks_in_the_page_dialog_not_a_native_prompt(
-    browser: object, panel: str
-) -> None:
+def test_pairing_asks_in_the_page_dialog_not_a_native_prompt(browser: object, panel: str) -> None:
     """配对的两个方向拆成两个按钮，各自把「哪个节点」写在脸上。
 
     以前一个「配对」按钮里塞二选一，生成的 PIN 悄悄开在「当前焦点」的
@@ -297,13 +295,18 @@ def test_pairing_asks_in_the_page_dialog_not_a_native_prompt(
         " { node: '陌生机', local: false, reachable: false, pairable: true,"
         "   reason: '见过，还没配对', agents: [] }] })"
     )
-    page.click("[data-pair]")
+    # **按节点名点，不要点「第一个 data-pair」。** 组播发现默认开着：跑测试的
+    # 机器上但凡还有别的 AntHill 节点在跑，它们会被这台 serve 发现、同样以
+    # 「见过还没配对」出现在拓扑里，于是「第一个」可能是别人。开发机上实测
+    # 撞到过真实节点 battle_plan，而 CI 是干净机器、永远撞不到 —— 一个只在
+    # 本地偶发、CI 永远绿的失败，最难查。
+    page.click('[data-pair="陌生机"]')
     page.wait_for_selector("#ask[open]", timeout=5000)
 
     # 带输入的问法：焦点直接落在输入框里（无输入的才落「取消」）
-    assert page.evaluate(
-        "document.activeElement === document.getElementById('ask-input')"
-    ), "输入型对话框的焦点该落在输入框里"
+    assert page.evaluate("document.activeElement === document.getElementById('ask-input')"), (
+        "输入型对话框的焦点该落在输入框里"
+    )
     # 对话框里写明「以谁的身份、连谁」
     body_text = page.text_content("#ask-body") or ""
     assert "陌生机" in body_text, "连谁得写在对话框里"
@@ -314,8 +317,10 @@ def test_pairing_asks_in_the_page_dialog_not_a_native_prompt(
     assert (page.text_content("#ask-hint") or "").strip(), "空输入该在框里提示"
     page.keyboard.press("Escape")
 
-    # 本机节点的「配对码」：真的调 api/pair/open，码和**节点名**一起摆在对话框里
-    page.click("[data-pair-open]")
+    # 本机节点的「配对码」：真的调 api/pair/open，码和**节点名**一起摆在对话框里。
+    # 同样按名字点：这个按钮只长在本机节点上，眼下只有一个，但别把「只有一个」
+    # 当成测试的前提 —— 下面那句断言正是要验它开在**哪个**节点上
+    page.click('[data-pair-open="browserbox"]')
     page.wait_for_function(
         "() => document.getElementById('ask-title').textContent.includes('配对码')",
         timeout=15000,
@@ -493,18 +498,18 @@ def test_a_conversation_can_be_opened_with_the_keyboard(
     row = page.wait_for_selector("#chat-body .th-row", timeout=15000)
 
     row.focus()
-    assert page.evaluate(
-        "() => document.activeElement.classList.contains('th-row')"
-    ), "清单行拿不到焦点 —— tabindex 掉了"
+    assert page.evaluate("() => document.activeElement.classList.contains('th-row')"), (
+        "清单行拿不到焦点 —— tabindex 掉了"
+    )
     page.keyboard.press("Enter")
 
     page.wait_for_selector("#chat-msgs .msg", timeout=15000)
     assert "这段接口我改完了" in page.text_content("#chat-msgs")
     # 重画（每几秒一次）不该把焦点甩回 body，否则每选一段都要重新 Tab 回来
     page.wait_for_timeout(2500)
-    assert page.evaluate(
-        "() => document.activeElement.classList.contains('th-row')"
-    ), "重画之后焦点掉了"
+    assert page.evaluate("() => document.activeElement.classList.contains('th-row')"), (
+        "重画之后焦点掉了"
+    )
     assert errors == []
     page.close()
 
@@ -852,9 +857,7 @@ def test_a_stale_peer_can_be_swept_from_the_sidebar(
     page.close()
 
 
-def test_chat_groups_conversations_by_workspace(
-    browser: object, two_workspaces: str
-) -> None:
+def test_chat_groups_conversations_by_workspace(browser: object, two_workspaces: str) -> None:
     """一台机器好几个工作区，各家的 cli/echo 重名 —— 对话页把所有工作区的
     对话拼成一页、按工作区分组，组里才敢用短名。
 
@@ -949,9 +952,7 @@ def test_cancelling_a_wipe_really_does_nothing(browser: object, panel: str) -> N
     page.close()
 
 
-def test_saving_the_config_shows_a_git_style_diff_first(
-    browser: object, panel: str
-) -> None:
+def test_saving_the_config_shows_a_git_style_diff_first(browser: object, panel: str) -> None:
     """保存配置前把「改了什么」摆出来 —— 删行红、加行绿，像 git diff。
     看不见 diff 的保存等于闭眼签字：node.toml 改坏了所有 agentd 都起不来。
     取消必须一个字都不写。"""
@@ -978,7 +979,7 @@ def test_saving_the_config_shows_a_git_style_diff_first(
     # 取消：磁盘没动
     page.click('#ask-choices [data-pick="cancel"]')
     page.click("#config-reload")
-    page.wait_for_selector("#ask[open]", timeout=5000)   # 有脏改动，先问丢不丢
+    page.wait_for_selector("#ask[open]", timeout=5000)  # 有脏改动，先问丢不丢
     page.click('#ask-choices [data-pick="0"]')
     page.wait_for_function(
         "() => !document.getElementById('config-text').value.includes('测试注释')", timeout=5000

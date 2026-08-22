@@ -155,9 +155,7 @@ def connect_recipes(layout: NodeLayout, agent: str) -> dict[str, Any]:
         # 一个会话挂多个工作区：**再加一台 server 就行**，名字不同即可。
         # MCP 客户端按 server 名给工具分命名空间，两套 anthill_* 不会撞；
         # 而每台 server 的自我介绍里都写着自己是哪个节点、哪个工作区。
-        "multi": (
-            f"claude mcp add anthill-{Path(workspace).name} -- {qexe} mcp serve -w {qws}"
-        ),
+        "multi": (f"claude mcp add anthill-{Path(workspace).name} -- {qexe} mcp serve -w {qws}"),
     }
 
 

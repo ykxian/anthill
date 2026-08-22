@@ -129,7 +129,10 @@ def _fork(layout: NodeLayout, state: RunState, from_step: str) -> None:
         fail(f"没有步骤 {from_step!r}；这条任务有：{', '.join(r.id for r in state.steps)}")
 
     events = read_trace(layout.blackboard / "tasks" / state.task_id)
-    last_seq = int(events[-1].get("seq", 0)) if events else 0  # 纯出处记录：源流水落笔处
+    # 纯出处记录：源流水落笔处。流水是磁盘上的 JSON，`seq` 的类型只是**约定**
+    # 而不是保证 —— 文件被人手改过、或旧版本写过别的形状时，`int()` 会当场
+    # 抛 TypeError 把 fork 整个搞砸。它只是条出处信息，取不到就记 0
+    last_seq = _int_or_zero(events[-1].get("seq")) if events else 0
     forked = state.fork(
         from_step, task_id=new_id(), root_thread=new_thread_id(), root_msg_id=new_id()
     )
@@ -309,3 +312,13 @@ def _elapsed(start: str, end: str) -> str:
 def _clip(text: str, limit: int = 46) -> str:
     flat = " ".join(text.split())
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+def _int_or_zero(value: object) -> int:
+    """磁盘上读回来的数字，取不成整数就当 0。
+
+    JSON 里的类型是**约定**不是保证：文件被手改过、或换了个版本写的，
+    `int()` 就会当场抛异常。这里的调用点只是记一条出处信息，为它把整个
+    fork 搞砸不值得。
+    """
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0

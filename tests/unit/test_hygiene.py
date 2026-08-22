@@ -55,7 +55,8 @@ def _deliver(layout: NodeLayout, agent: str, *, kind: MessageType, age_hours: fl
         type=kind,
         thread=new_id(),
         payload=(
-            ReceiptPayload(ref="01X") if kind is MessageType.RECEIPT_ACCEPTED
+            ReceiptPayload(ref="01X")
+            if kind is MessageType.RECEIPT_ACCEPTED
             else ChatPayload(body="正文在这")
         ),
     )
@@ -100,11 +101,7 @@ def test_old_results_are_archived_and_stay_visible_in_conversations(tmp_path: Pa
 
     assert moved == 1
     assert Mailbox(layout.mailbox_dir("cli")).list_new() == []
-    bodies = [
-        m["body"]
-        for t in conversations(layout)["threads"]
-        for m in t["messages"]
-    ]
+    bodies = [m["body"] for t in conversations(layout)["threads"] for m in t["messages"]]
     assert "正文在这" in bodies, "归档进 done 之后对话页必须照常可见"
     assert env.thread in [t["thread"] for t in conversations(layout)["threads"]]
 
