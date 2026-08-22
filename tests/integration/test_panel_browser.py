@@ -59,6 +59,50 @@ def free_port() -> int:
         return int(probe.getsockname()[1])
 
 
+def quiet_workspace(layout: NodeLayout, *, node_name: str) -> None:
+    """建一个工作区，并且**把组播发现关掉**。浏览器测试一律用这个，别用裸的
+    `create_workspace`。
+
+    组播发现默认是开的（「默认可见，但默认不可通信」）。于是跑测试的机器上
+    但凡还有别的 AntHill 节点在跑 —— 开发机上通常有 —— 它们会被测试起的
+    serve 发现，以「见过还没配对 / 连不上」混进拓扑里，测试就在一个**不受
+    控的全局状态**上做断言了。两处实际中招的：
+
+    - 配对那条点 `[data-pair]`（第一个可配对节点），点到了真实节点 battle_plan；
+    - `test_both_workspaces_show_up_and_can_be_switched` 里
+      `assert "连不上" not in ...` 扫的是整个侧栏文本，而「连不上」是
+      **任何**不可达远端节点都会渲染的（panel.html 的 `!local && !reachable`）。
+
+    这类失败最坏的地方不是挂掉，是**误导**：后者报的是「本机的另一个工作区被
+    当成对端了」，会把人送去查一个根本不存在的合并 bug。而 CI 是干净机器、
+    永远碰不到，于是它只在本地偶发。
+
+    关掉之后按 DiscoverySection 的说法是「零发包零监听」。**每个节点一个
+    Beacon、各读自己那份 config**（serve_cmd 的 `beacons` 列表），所以照看
+    几个工作区就得关几个，不能只关主节点那个。
+
+    真正要验发现本身的测试不在这个文件里（`test_pairing.py` 等），不受影响；
+    这个文件里唯一碰对端的 `test_a_stale_peer_can_be_swept_from_the_sidebar`
+    是拿 `PeerRegistry.observe()` 显式写进去的，不靠组播。
+    """
+    create_workspace(layout, node_name=node_name)
+    toml = layout.node_toml
+    lines = toml.read_text(encoding="utf-8").splitlines(keepends=True)
+    section = ""
+    hits = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            section = stripped
+        elif section == "[discovery]" and stripped.startswith("enabled"):
+            lines[i] = "enabled = false\n"
+            hits += 1
+    # 模板哪天改了、这里没跟上，会静默变成「以为关了其实没关」——
+    # 那比现在的偶发失败更难查，所以宁可当场炸
+    assert hits == 1, f"[discovery] 段里没找到唯一的 enabled 行（找到 {hits} 处）"
+    toml.write_text("".join(lines), encoding="utf-8")
+
+
 @pytest.fixture(scope="module")
 def browser() -> Iterator[object]:
     if playwright_api is None:
@@ -125,7 +169,7 @@ def serve(
 def panel(tmp_path: Path) -> Iterator[str]:
     """一个已经配好工作区的 serve。"""
     workspace = tmp_path / "ws"
-    create_workspace(NodeLayout(workspace), node_name="browserbox")
+    quiet_workspace(NodeLayout(workspace), node_name="browserbox")
     yield from serve(workspace, home=tmp_path / "home")
 
 
@@ -140,7 +184,7 @@ def panel_with_peer_chat(tmp_path: Path) -> Iterator[str]:
     """
     workspace = tmp_path / "ws"
     layout = NodeLayout(workspace)
-    create_workspace(layout, node_name="browserbox")
+    quiet_workspace(layout, node_name="browserbox")
     thread = new_id()
     start = now()
     lines = [("tst1", "tst2", "这段接口我改完了"), ("tst2", "tst1", "收到，我这就审")]
@@ -173,7 +217,7 @@ def bridge_panel(tmp_path: Path) -> Iterator[str]:
     """一个装着桥接 Agent、并且已经有人在等它回话的工作区。"""
     workspace = tmp_path / "ws"
     layout = NodeLayout(workspace)
-    create_workspace(layout, node_name="bridgebox")
+    quiet_workspace(layout, node_name="bridgebox")
     layout.node_toml.write_text(
         layout.node_toml.read_text(encoding="utf-8")
         + '\n[agents.cc]\nrole = "worker"\nbridge = true\n',
@@ -691,7 +735,7 @@ def test_clearing_the_workspace_list_from_the_page(
     一条条点太蠢。但**只清清单，不删文件** —— 网页上的一次误点没有 undo。
     """
     junk = tmp_path / "junk"
-    create_workspace(NodeLayout(junk), node_name="junkbox")
+    quiet_workspace(NodeLayout(junk), node_name="junkbox")
     registry = tmp_path / "home" / ".anthill" / "workspaces.json"
     registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text(
@@ -729,7 +773,7 @@ def test_purging_workspaces_from_the_page_spares_the_current_one(
     """
     # 造一个「别的工作区」，并让 serve 那边的清单认得它
     junk = tmp_path / "junk"
-    create_workspace(NodeLayout(junk), node_name="junkbox")
+    quiet_workspace(NodeLayout(junk), node_name="junkbox")
     keepsake = junk / "我自己的笔记.md"
     keepsake.write_text("别删我", encoding="utf-8")
     registry = tmp_path / "home" / ".anthill" / "workspaces.json"
@@ -767,8 +811,8 @@ def two_workspaces(tmp_path: Path) -> Iterator[str]:
     home = tmp_path / "home"
     (home / ".anthill").mkdir(parents=True, exist_ok=True)
     first, second = tmp_path / "collab", tmp_path / "collab-tst"
-    create_workspace(NodeLayout(first), node_name="collab")
-    create_workspace(NodeLayout(second), node_name="collab-tst")
+    quiet_workspace(NodeLayout(first), node_name="collab")
+    quiet_workspace(NodeLayout(second), node_name="collab-tst")
     (home / ".anthill" / "workspaces.json").write_text(
         json.dumps([{"path": str(second), "port": 45778}]), encoding="utf-8"
     )
@@ -818,9 +862,9 @@ def bridge_in_second(tmp_path: Path) -> Iterator[str]:
     home = tmp_path / "home"
     (home / ".anthill").mkdir(parents=True, exist_ok=True)
     first, second = tmp_path / "collab", tmp_path / "collab-tst"
-    create_workspace(NodeLayout(first), node_name="collab")
+    quiet_workspace(NodeLayout(first), node_name="collab")
     layout = NodeLayout(second)
-    create_workspace(layout, node_name="collab-tst")
+    quiet_workspace(layout, node_name="collab-tst")
     layout.node_toml.write_text(
         layout.node_toml.read_text(encoding="utf-8")
         + '\n[agents.cc]\nrole = "worker"\nbridge = true\n',
