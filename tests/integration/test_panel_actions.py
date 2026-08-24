@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from anthill.cli.main import app as cli_app
-from anthill.core.config import Config
+from anthill.core.config import Config, brain_of
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
@@ -48,7 +48,14 @@ def node(tmp_path: Path) -> tuple[NodeLayout, Config, PeerRegistry]:
     layout.node_toml.write_text(NODE_TOML, encoding="utf-8")
     for name in ("cli", "boss", "coder"):
         Mailbox(layout.mailbox_dir(name)).ensure()
-    return layout, Config.load_from(layout), PeerRegistry(layout.root)
+    config = Config.load_from(layout)
+    # **把「凭什么资格」写成会炸的断言。** 这些测试断言「任务送到了 boss」，
+    # 可真正让 boss 当得起 coordinator 的是「它有大脑」—— 这个前提以前一个字
+    # 都没写，于是 boss 是个复读机时测试照样绿，锁住的正是 bug 存在时的行为。
+    # 写下来之后，谁把 command 改没了会当场炸，而不是静默退回那个状态。
+    for name in ("boss", "coder"):
+        assert brain_of(config.agents[name]) != "echo", f"{name} 得有大脑，否则这些测试没意义"
+    return layout, config, PeerRegistry(layout.root)
 
 
 def client_for(
