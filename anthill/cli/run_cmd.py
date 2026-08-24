@@ -84,6 +84,16 @@ def run_command(
     except ConfigError as exc:
         fail(str(exc))
 
+    # 桥接 coordinator 的「模型」是个人，而人可以等得比这条命令久。不说一声的话，
+    # 现象是「跑了十分钟报超时」，而其实编排好好的，只是还没人去回那个问题。
+    if config.agent(coordinator).bridge and config.runtime.ask_timeout > timeout:
+        console.print(
+            f"[dim]{coordinator} 是桥接 coordinator —— 拆解要等人回答"
+            f"（最多 {config.runtime.ask_timeout:.0f} 秒），而这条命令只等 {timeout:.0f} 秒。\n"
+            f"没人回的话它先退出，协作照常在后台跑；"
+            f"想等久一点用 --timeout，或另开一个终端 anthill runs 看进度。[/dim]"
+        )
+
     try:
         asyncio.run(
             _run(

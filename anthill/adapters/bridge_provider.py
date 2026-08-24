@@ -33,9 +33,24 @@ BridgeHandler 的投递逻辑不会把回答当成一条要发出去的消息。
 ## 阻塞是有意的，但必须有界
 
 `complete()` 会一直等到人回答。agentd 的消费循环是串行的，所以等待期间这只
-coordinator 处理不了别的消息 —— 这可以接受，因为两次调用的时机都很安全：
-拆解在派活之前（此时没有别的消息要处理），判定在所有步骤都完成之后。
-而 `tick()` 跑在另一个 task 上，超时与催办照常。
+coordinator 处理不了别的消息。这可以接受，但**理由要说准**，因为它比看上去
+脆弱：
+
+- **拆解那次**真的安全：`_start_run` 先 `generate_plan` 再落盘，阻塞期间这个
+  run 还不在 `_store.active()` 里，`tick()` 根本看不见它。
+- **判定那次**靠的不是「tick 在另一个 task 上所以互不干扰」—— 恰恰相反，那是
+  风险不是保障。`_judge` 是在 `_advance` 里被调用的，而 `_advance` 结尾会
+  `self._store.save(state)`；消费循环阻塞这半小时里握着的是一份**旧快照**，
+  真让 tick 期间的 `_advance` 存了盘，判定回来那句 save 就会把它覆盖掉。
+
+  真正兜住的是 `tick()` 里那道守卫：`if updated is not state or
+  updated.ready_steps()`。进判定时所有步骤都已落定 —— `_sweep_timeouts`
+  无事可做（`updated is state`）、`ready_steps()` 为空 —— 于是 tick 直接
+  跳过 `_advance`，一个字节都不写。
+
+  **所以这条安全性依赖那道守卫的具体形状。** 谁要放宽它（注释里说为了让
+  「卡在等审批」也能被推一把，已经改过一次），就会真的丢更新，而且只在
+  桥接大脑这条路上现形 —— 因为只有它等得够久，把理论窗口撑成了实际窗口。
 
 真正不能接受的是**无界**等待：人走开了就把 coordinator 永远焊死。所以有
 `timeout`，超时抛 `ProviderError` —— `generate_plan` 会把它变成一条
@@ -49,12 +64,10 @@ from contextlib import suppress
 from pathlib import Path
 
 from anthill.adapters.bridge import BRIDGE_DIR, DONE, INBOX, OUTBOX, STABLE_SECONDS, parse_note
+from anthill.core.config import DEFAULT_ASK_TIMEOUT
 from anthill.core.errors import ProviderError
 from anthill.core.ids import new_id, now
 from anthill.providers.base import ChatProvider, Msg, Role, ToolSpec, Turn
-
-DEFAULT_ASK_TIMEOUT = 1800.0
-"""默认等半小时。比模型超时长得多是故意的 —— 另一头是人，去泡杯咖啡很正常。"""
 
 POLL_INTERVAL = 0.5
 
@@ -71,11 +84,32 @@ id: {ask_id}
 下面是编排要问你的问题。**按它要求的格式回答**（通常是「只输出一个 JSON」），
 你的回答会被直接解析，所以别加寒暄、别加代码块以外的解释。
 
-{body}
+## 怎么回答
 
-<!-- 回答：把内容写进 ../outbox/{ask_id}.md，或者跑
-     anthill bridge {agent} --reply {ask_id} --text-file <文件>
-     （正文含反引号或 ${{…}} 时务必用 --text-file，别用 --text）。 -->
+先把答案写成一个文件，再跑：
+
+    anthill bridge {agent} --reply {ask_id} --text-file <那个文件>
+
+**别用 `--text`** —— 它要穿过 shell，答案里的反引号和 `${{…}}` 会被吃掉一截
+还不报错。而这份答案会被直接解析：吃掉一截就成了不合法的 JSON，你会收到
+「上次错在哪」再问一遍，可你写的其实是对的。也可以直接往
+`../outbox/{ask_id}.md` 里写。
+
+## 问题
+
+{body}
+"""
+"""**回答指引必须留在可见正文里，不能放 HTML 注释。**
+
+普通消息的 `REQUEST_TEMPLATE` 是把回复说明放在注释里的，照抄看着很自然 ——
+但 `parse_note` 会 `_strip_comments`，于是每条经它的路径都看不见那段：
+`anthill bridge <名字> --json`、MCP 的 `anthill_inbox`、面板的桥接页。而
+`--json` 恰恰是「让常驻会话自动收发最便宜的那条路」。实测确认过：值守会话
+拿到的 body 里 `--text-file` 一个字都没有。
+
+两者后果不一样，所以这里不跟着照抄：普通消息丢掉的是「往 outbox 写」这种
+`reply_hint` 已经覆盖的话；ask 丢掉的是**格式安全警告**，而活下来的
+`reply_hint` 偏偏推荐 `--text` —— 正是那段警告所指的不安全选项。
 """
 
 _ROLE_LABEL = {

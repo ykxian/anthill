@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from anthill.adapters.bridge import BRIDGE_DIR, DONE, INBOX, OUTBOX
+from anthill.adapters.bridge import BRIDGE_DIR, DONE, INBOX, OUTBOX, parse_note
 from anthill.adapters.bridge_provider import BridgeProvider, render_ask
 from anthill.agent.factory import build_handler
 from anthill.core.config import Config
@@ -142,6 +142,35 @@ async def test_the_question_is_readable_and_says_how_to_answer(
     await asker
 
 
+async def test_the_answering_instructions_survive_parse_note(
+    node: tuple[NodeLayout, Config],
+) -> None:
+    """**指引不能放 HTML 注释里** —— `parse_note` 会把注释剥掉。
+
+    普通消息的 REQUEST_TEMPLATE 就是那么写的，照抄很自然，但后果不一样：
+    值守会话看到的 body 经过 `parse_note`（`--json` / MCP / 面板都是），
+    注释里那段格式安全警告会一个字都不剩，而活下来的 `reply_hint` 偏偏推荐
+    `--text` —— 正是警告所指的不安全选项。链条是：照 hint 用 --text →
+    shell 吃掉反引号 → JSON 不合法 → 编排说「你上次错了」→ 而他写的是对的。
+    """
+    layout, _ = node
+    provider = provider_for(layout)
+
+    asker = asyncio.create_task(provider.complete([Msg.user("问题")], []))
+    inbox = bridge_dir(layout, INBOX)
+    for _ in range(200):
+        if sorted(inbox.glob("*.md")):
+            break
+        await asyncio.sleep(0.02)
+    _, body = parse_note(sorted(inbox.glob("*.md"))[0].read_text(encoding="utf-8"))
+
+    assert "--text-file" in body, "会话看到的正文里没有指引 —— 多半又被注释吃了"
+    assert "别用" in body, "没警告 --text 会吃掉转义"
+
+    await answer_when_asked(layout, "答案")
+    await asker
+
+
 async def test_both_sides_of_the_exchange_are_archived(node: tuple[NodeLayout, Config]) -> None:
     """答过的问题不能留在 inbox 里 —— 值守会话会把它当成一条新待办反复看见。"""
     layout, _ = node
@@ -226,6 +255,47 @@ async def test_waiting_is_bounded(node: tuple[NodeLayout, Config]) -> None:
         await provider.complete([Msg.user("没人会回答的问题")], [])
 
     assert sorted(bridge_dir(layout, INBOX).glob("*.md")), "超时后问题该留着，让人还能看到"
+
+
+def test_how_long_to_wait_for_a_human_comes_from_the_config(tmp_path: Path) -> None:
+    """「等人多久」是部署策略不是代码常量：一个人守着的机器和一屋子人轮值的
+    机器，合理值差一个数量级。以前它是写死的 1800，既不可配也和别处的默认
+    值（task_timeout 600）不自洽。"""
+    layout = NodeLayout(tmp_path).ensure_base()
+    layout.node_toml.write_text(NODE_TOML + "\n[runtime]\nask_timeout = 42.0\n", encoding="utf-8")
+    config = Config.load_from(layout)
+
+    handler = build_handler(layout=layout, config=config, agent_name="boss")
+
+    assert handler._provider._timeout == 42.0, "node.toml 里的 ask_timeout 没接上"
+
+
+def test_run_warns_when_the_coordinator_is_a_human(tmp_path: Path) -> None:
+    """桥接 coordinator 的「模型」是个人，可以等得比 `anthill run` 久。
+
+    不说一声的话，现象是「跑了十分钟报超时」，而其实编排好好的、只是还没人
+    去回那个问题 —— 发起方会以为编排坏了。
+    """
+    from typer.testing import CliRunner
+
+    from anthill.cli.main import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["init", str(tmp_path), "--node-name", "n"])
+    assert result.exit_code == 0, result.output
+    toml = NodeLayout(tmp_path).node_toml
+    toml.write_text(
+        toml.read_text(encoding="utf-8") + '\n[agents.boss]\nrole = "coordinator"\nbridge = true\n',
+        encoding="utf-8",
+    )
+
+    # 只等 1 秒：提示要在派活**之前**打印，所以超时不影响这条断言
+    result = runner.invoke(
+        app, ["run", "干活", "--to", "boss", "--plain", "--timeout", "1", "-w", str(tmp_path)]
+    )
+
+    assert "要等人回答" in result.output, "没告诉发起方这次要等人"
+    assert "anthill runs" in result.output, "没给出「去哪看进度」的出路"
 
 
 async def test_tools_are_refused_instead_of_silently_ignored(

@@ -22,6 +22,9 @@ DEFAULT_MULTICAST_GROUP = "239.77.77.7"
 DEFAULT_DISCOVERY_PORT = 45777
 DEFAULT_POLL_INTERVAL = 2.0
 DEFAULT_TASK_TIMEOUT = 600.0
+DEFAULT_ASK_TIMEOUT = 1800.0
+"""桥接 coordinator 等人回答的默认上限。比 task_timeout 长得多是故意的 ——
+那一头是人，不是模型。"""
 DEFAULT_KEEP_DAYS = 7
 DEFAULT_DEAD_KEEP_DAYS = 30
 DEFAULT_LOG_MAX_MB = 32
@@ -314,6 +317,17 @@ class McpSection(_Section):
 class RuntimeSection(_Section):
     poll_interval: float = Field(default=DEFAULT_POLL_INTERVAL, gt=0)
     task_timeout: float = Field(default=DEFAULT_TASK_TIMEOUT, gt=0)
+    ask_timeout: float = Field(default=DEFAULT_ASK_TIMEOUT, gt=0)
+    """桥接 coordinator 等人回答的上限（秒）。默认比 `task_timeout` 长得多 ——
+    另一头是人，去泡杯咖啡很正常。
+
+    「等人多久」是**部署策略**不是代码常量：一个人守着的机器和一屋子人轮值的
+    机器，合理值差一个数量级。超时后抛 ProviderError，编排把它变成一条
+    「拆解任务失败」回给发起方，而不是让人对着空白看板等下去。
+
+    **注意它可能比 `anthill run` 的默认等待（600 秒）长。** 那时编排照常往下
+    跑，只是发起方那条命令先走了 —— `anthill run` 会在派活前提醒一句，
+    面板那条路不受影响（发起即返回，看板自己轮询）。"""
     watch_mode: Literal["auto", "inotify", "poll"] = "auto"
     # 定期卫生（core/hygiene.py）：role=user 信箱的保留时长与记录类文件的保留天数
     mailbox_keep_hours: float = Field(default=24.0, gt=0)

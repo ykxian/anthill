@@ -47,7 +47,11 @@ def build_handler(
         # 现在让那个常驻会话去当**大脑**：编排状态机照常跑，只是问模型的那
         # 一步改成问人。状态机一行没改，见 adapters/bridge_provider.py。
         return CoordinatorHandler(
-            provider=BridgeProvider(root=layout.agent_dir(agent_name), agent_name=agent_name),
+            provider=BridgeProvider(
+                root=layout.agent_dir(agent_name),
+                agent_name=agent_name,
+                timeout=config.runtime.ask_timeout,
+            ),
             blackboard=Blackboard(layout.blackboard),
             settings=CoordinatorSettings(step_timeout=config.runtime.task_timeout),
         )
