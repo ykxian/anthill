@@ -24,11 +24,25 @@
 一条消息。少了它，`--reply` 依然能匹配（它按 inbox 里的文件名匹配），而
 BridgeHandler 的投递逻辑不会把回答当成一条要发出去的消息。
 
-## 谁也不会跟谁抢
+## 谁也不会跟谁抢 —— 靠的是一条全仓不变式
 
-桥接 coordinator 的 handler 是 `CoordinatorHandler`（见 agent/factory.py），
-**不是** `BridgeHandler` —— 所以没有第二个 tick 循环在扫这个 outbox，回答只会
-被这里读走。普通桥接 worker 那条路完全不受影响。
+**这个 outbox 只能有一个消费者。** 多一个，回答就会被当成一条消息投递出去，
+而 `complete()` 这边只会一直等到超时 —— 人看到的又是一次「假装成功」。
+
+不变式：**除了 agentd 的 runtime 之外没有人驱动 `tick()`，也没有第二处消费
+outbox 草稿（`BridgeHandler.drafts()`）。** 现状对得上：`drafts()` 全仓只有
+一个调用点（bridge.py 的 `tick` 里），而驱动 tick 的只有 runtime。
+
+这么写而不写「桥接 coordinator 的 handler 是 CoordinatorHandler 所以没有
+第二个 BridgeHandler」——后者只在当下为真。全仓有四处构造 BridgeHandler
+（factory / mcp / web / cli），它们只写草稿、只列待办，从不调 tick 也从不调
+drafts；真正该守的是「没人消费」，不是「没人构造」。
+
+真正可能破坏它的也不是「有人又调了 tick」，而是**有人绕过 tick 直接消费
+outbox** —— 比如面板加一个「立即发送」按钮。那种改动看着跟 tick 毫无关系，
+后果却一模一样。
+
+普通桥接 worker 那条路完全不受影响。
 
 ## 阻塞是有意的，但必须有界
 
