@@ -21,7 +21,7 @@ from anthill.agent.handlers import HandlerContext, MessageHandler
 from anthill.agent.sender import Sender
 from anthill.agent.tools.base import Confirmer
 from anthill.agent.watcher import MailboxWatcher, WatchMode
-from anthill.core.config import Config, check_runtime
+from anthill.core.config import COORDINATOR_ROLE, Config, check_runtime
 from anthill.core.envelope import Address, Envelope
 from anthill.core.errors import AntHillError, MailboxError, ProtocolError
 from anthill.core.ids import now
@@ -39,7 +39,6 @@ from anthill.providers.registry import TapeMode
 from anthill.security.signing import verify_envelope
 from anthill.transport.registry import TransportRegistry
 
-COORDINATOR_ROLE = "coordinator"
 STATUS_FILE = "runtime.json"
 DEFAULT_TICK_INTERVAL = 5.0
 SWEEP_INTERVAL = 3600.0

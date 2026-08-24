@@ -12,8 +12,8 @@ import pytest
 from typer.testing import CliRunner
 
 from anthill.cli.main import app
-from anthill.cli.run_cmd import RunWatcher, _find_coordinator, _steps_table
-from anthill.core.config import Config
+from anthill.cli.run_cmd import RunWatcher, _steps_table
+from anthill.core.config import Config, find_coordinator
 from anthill.core.envelope import Address, Envelope
 from anthill.core.errors import ConfigError
 from anthill.core.ids import new_id, new_thread_id
@@ -84,7 +84,7 @@ def test_coordinator_is_found_by_role() -> None:
         }
     )
 
-    assert _find_coordinator(config) == "boss"
+    assert find_coordinator(config) == "boss"
 
 
 def test_a_brainless_coordinator_is_refused_instead_of_pretending_to_succeed() -> None:
@@ -103,14 +103,14 @@ def test_a_brainless_coordinator_is_refused_instead_of_pretending_to_succeed() -
     )
 
     with pytest.raises(ConfigError, match="没有大脑"):
-        _find_coordinator(config)
+        find_coordinator(config)
 
 
 def test_missing_coordinator_gives_an_actionable_error() -> None:
     config = Config.model_validate({"node": {"name": "n"}, "agents": {"cli": {"role": "user"}}})
 
     with pytest.raises(ConfigError, match="coordinator"):
-        _find_coordinator(config)
+        find_coordinator(config)
 
 
 def test_run_without_a_coordinator_exits_with_a_hint(tmp_path: Path) -> None:

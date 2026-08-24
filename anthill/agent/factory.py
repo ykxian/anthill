@@ -15,7 +15,7 @@ from anthill.agent.handlers import EchoHandler, MessageHandler
 from anthill.agent.llm_handler import LlmHandler
 from anthill.agent.tools.base import Confirmer
 from anthill.agent.tools.registry import build_toolset
-from anthill.core.config import Config
+from anthill.core.config import COORDINATOR_ROLE, Config
 from anthill.core.paths import NodeLayout
 from anthill.core.payloads import RiskLevel
 from anthill.orchestrator.board import Blackboard
@@ -23,7 +23,6 @@ from anthill.orchestrator.coordinator import CoordinatorHandler, CoordinatorSett
 from anthill.providers.registry import TapeMode, build_provider, provider_for_agent
 from anthill.security.policy import PolicyEngine
 
-COORDINATOR_ROLE = "coordinator"
 DEFAULT_CONTEXT_WINDOW = 128_000
 
 

@@ -29,11 +29,16 @@ workspace = "."
 [agents.cli]
 role = "user"
 
+# 这两个都得**有大脑**（`command` 非空即可，不必配 provider，也就不用 API key）。
+# 以前它们是裸的 role，于是「发起任务能到达 coordinator」那条测试其实在给 bug
+# 背书：面板当时不检查大脑，任务确实「到达」了 —— 到达的是一个只会回显的 Agent。
 [agents.boss]
 role = "coordinator"
+command = ["claude", "-p"]
 
 [agents.coder]
 role = "worker"
+command = ["claude", "-p"]
 """
 
 
@@ -113,6 +118,81 @@ async def test_a_run_without_a_coordinator_says_what_to_do(tmp_path: Path) -> No
 
     assert response.status_code == 400
     assert "coordinator" in response.json()["detail"]
+
+
+async def test_the_panel_picks_the_coordinator_that_has_a_brain(tmp_path: Path) -> None:
+    """**面板挑 coordinator 得和 CLI 一个规矩。**
+
+    以前面板自带一份 `find_coordinator`，只 `sorted(names)[0]`。默认模板里那个
+    没大脑的 `coordinator` 排在 `planner` 前面，于是同一份配置下 CLI 挑 planner、
+    面板挑 coordinator —— 人在面板上点「发起」，看到「已交给 coordinator」，
+    任务看板却永远空着，不报错也不解释。名字排序决定派给谁，这本身就是错的。
+    """
+    layout = NodeLayout(tmp_path).ensure_base()
+    layout.node_toml.write_text(
+        '[node]\nname = "n"\nworkspace = "."\n\n'
+        '[agents.cli]\nrole = "user"\n\n'
+        # 字典序在前、但没有大脑 —— 正是 init 默认模板生成的那个
+        '[agents.coordinator]\nrole = "coordinator"\n\n'
+        # 字典序在后、有大脑：人自己加的那个通常长这样
+        '[agents.planner]\nrole = "coordinator"\ncommand = ["claude", "-p"]\n',
+        encoding="utf-8",
+    )
+    for name in ("cli", "coordinator", "planner"):
+        Mailbox(layout.mailbox_dir(name)).ensure()
+    bundle = (layout, Config.load_from(layout), PeerRegistry(layout.root))
+
+    async with client_for(bundle) as client:
+        response = await client.post("/panel/api/run", json={"task": "干活"})
+
+    assert response.status_code == 202
+    assert response.json()["to"] == "planner", "面板挑了没大脑的那个"
+    assert inbox(layout, "planner") == [MessageType.TASK_REQUEST]
+    assert inbox(layout, "coordinator") == [], "任务不该落到复读机手里"
+
+
+async def test_a_brainless_coordinator_is_refused_by_the_panel_too(tmp_path: Path) -> None:
+    """只有一个 coordinator 且它没大脑时，面板要当场说清楚，别假装受理。
+
+    CLI 早就拦了（「还没有大脑 —— 它现在只会把你的话原样回显」），面板这条路
+    一直没接上同一道闸：它回 202 加一句「已交给 coordinator」，看着像成功。
+    """
+    layout = NodeLayout(tmp_path).ensure_base()
+    layout.node_toml.write_text(
+        '[node]\nname = "n"\nworkspace = "."\n\n'
+        '[agents.cli]\nrole = "user"\n\n'
+        '[agents.coordinator]\nrole = "coordinator"\n',
+        encoding="utf-8",
+    )
+    for name in ("cli", "coordinator"):
+        Mailbox(layout.mailbox_dir(name)).ensure()
+    bundle = (layout, Config.load_from(layout), PeerRegistry(layout.root))
+
+    async with client_for(bundle) as client:
+        response = await client.post("/panel/api/run", json={"task": "干活"})
+
+    assert response.status_code == 400
+    assert "没有大脑" in response.json()["detail"]
+    assert inbox(layout, "coordinator") == [], "被拒之后不该还是把任务发出去了"
+
+
+async def test_naming_a_brainless_agent_explicitly_is_refused_too(
+    node: tuple[NodeLayout, Config, PeerRegistry],
+) -> None:
+    """请求里点名 `to` 也要过同一道闸 —— 否则绕开选择逻辑就等于绕开检查。"""
+    layout, _, _ = node
+    Mailbox(layout.mailbox_dir("dumb")).ensure()
+    layout.node_toml.write_text(
+        layout.node_toml.read_text(encoding="utf-8") + '\n[agents.dumb]\nrole = "worker"\n',
+        encoding="utf-8",
+    )
+    bundle = (layout, Config.load_from(layout), PeerRegistry(layout.root))
+
+    async with client_for(bundle) as client:
+        response = await client.post("/panel/api/run", json={"task": "干活", "to": "dumb"})
+
+    assert response.status_code == 400
+    assert "没有大脑" in response.json()["detail"]
 
 
 @pytest.mark.parametrize("body", [{}, {"task": ""}, {"task": "x", "怪字段": 1}])

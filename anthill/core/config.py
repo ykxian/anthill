@@ -36,6 +36,10 @@ DEFAULT_SHELL_TIMEOUT = 120.0
 DEFAULT_CLI_TIMEOUT = 900.0
 DEFAULT_CHAT_TURNS = 6
 
+COORDINATOR_ROLE = "coordinator"
+"""派活那个角色的名字。以前 runtime / factory / CLI / 面板各写了一份同样的
+字面量，四处散着 —— 和 `find_coordinator` 一起收在这里。"""
+
 
 class _Section(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -488,6 +492,70 @@ def brain_of(agent: AgentSection) -> str:
     if agent.command:
         return agent.command[0]
     return agent.provider or "echo"
+
+
+def find_coordinator(config: Config) -> str:
+    """派活该交给谁。**CLI 与面板共用这一份** —— 各写一遍就会各错一遍。
+
+    以前确实是各写一遍的，而且面板那份漏了「优先挑有大脑的」和「没大脑就
+    拦下」两件事：同一个工作区里 `coordinator`（复读机）和 `planner`（有
+    provider）并存时，CLI 挑 planner，面板按字典序挑中 coordinator。人在
+    面板上点「发起」，看到的是「已交给 coordinator」这样一句像成功的提示，
+    然后任务看板**永远空着** —— 不报错、不解释。而这几乎是必然会踩的：
+    默认模板里那个 `coordinator` 就没有大脑，自己加的那个只要名字排在
+    它后面（planner / deepseek / zhipu…）就会被跳过。
+    """
+    candidates = sorted(a.name for a in config.agents_with_role(COORDINATOR_ROLE))
+    if not candidates:
+        raise ConfigError(
+            'node.toml 里没有 role = "coordinator" 的 Agent；'
+            "先配一个（并给它 provider），或者明确指定要交给谁"
+        )
+    # **优先挑有大脑的那个。** 默认模板里就带一个没配 provider 的 `coordinator`，
+    # 而人加自己的那个时未必改动它 —— 按字典序瞎挑会挑中复读机。
+    with_brain = [n for n in candidates if brain_of(config.agents[n]) != "echo"]
+    name = with_brain[0] if with_brain else candidates[0]
+    require_coordinator_brain(config, name)
+    return name
+
+
+def require_coordinator_brain(config: Config, name: str) -> None:
+    """coordinator 得真有个大脑，否则这次发起会**假装成功**。
+
+    这是本项目最恶劣的一次首跑体验：`init` 生成的默认模板里
+    `[agents.coordinator]` 只写了 `role = "coordinator"`，没有 provider ——
+    按项目自己的规则，没有 provider 就是 echo agent。而当初只按 role 找名字，
+    不看它有没有大脑。于是 `anthill run` 把任务派给一个只会回显的 Agent，
+    拿回一句复读，然后打印「完成（ok）」、退出码 0。
+
+    **这比卡住 600 秒糟糕得多** —— 卡住至少能让人意识到不对劲，
+    而新用户看到的是一次成功的运行：拆解、派活、汇总一样没发生，
+    却收到了成功信号。
+
+    代码里其实早就有这个意识：找不到 coordinator 时的报错专门写了「并给它
+    provider」。只是「找到了但它没大脑」这条路一直没人管 —— 后来 CLI 管上了，
+    面板又漏了一遍，所以这份才挪到这里让两边共用。
+    """
+    agent = config.agents.get(name)
+    if agent is None:
+        raise ConfigError(f"node.toml 里没有 Agent {name!r}")
+    if brain_of(agent) != "echo":
+        return
+    raise ConfigError(
+        f"coordinator「{name}」还没有大脑 —— 它现在只会把你的话原样回显，\n"
+        "  拆解、派活、汇总一样都不会发生。\n\n"
+        "  在 node.toml 里给它配一个 provider（模板里有注释示例）：\n\n"
+        "    [providers.deepseek]\n"
+        '    kind = "openai_compat"\n'
+        '    base_url = "https://api.deepseek.com"\n'
+        '    api_key_env = "DEEPSEEK_API_KEY"\n'
+        '    model = "deepseek-chat"\n\n'
+        f"    [agents.{name}]\n"
+        '    role = "coordinator"\n'
+        '    provider = "deepseek"\n\n'
+        "  然后 export DEEPSEEK_API_KEY=...。\n"
+        '  只想试试消息链路的话，用 `anthill send echo "在吗" --wait 8`。'
+    )
 
 
 def default_node_toml(node_name: str) -> str:

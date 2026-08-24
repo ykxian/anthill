@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from anthill.agent.sender import Sender
 from anthill.core.atomic import atomic_write
-from anthill.core.config import Config
+from anthill.core.config import Config, find_coordinator, require_coordinator_brain
 from anthill.core.envelope import Address
 from anthill.core.errors import AntHillError
 from anthill.core.ids import new_thread_id
@@ -35,7 +35,6 @@ from anthill.transport.registry import TransportRegistry
 from anthill.web.chat import record_outgoing
 
 CLI_AGENT = "cli"
-COORDINATOR_ROLE = "coordinator"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
 CONFIG_BACKUP = "node.toml.bak"
 MAX_BODY_CHARS = 32_000
@@ -114,20 +113,19 @@ def is_same_origin(origin: str | None, host_header: str | None) -> bool:
     return origin.split("://", 1)[-1].strip().lower() == host_header.strip().lower()
 
 
-def find_coordinator(config: Config) -> str:
-    names = sorted(a.name for a in config.agents_with_role(COORDINATOR_ROLE))
-    if not names:
-        raise AntHillError(
-            'node.toml 里没有 role = "coordinator" 的 Agent；先配一个，或在请求里指定 to'
-        )
-    return names[0]
-
-
 async def start_run(
     layout: NodeLayout, config: Config, request: RunRequest, log: EventLog
 ) -> dict[str, Any]:
-    """把任务交给 coordinator —— 和 `anthill run` 走的是同一条路。"""
+    """把任务交给 coordinator —— 和 `anthill run` 走的是同一条路。
+
+    「同一条路」以前只是这句注释里的愿望：这儿曾经自带一份 `find_coordinator`，
+    按字典序取第一个、也不检查它有没有大脑，于是面板会把任务派给默认模板里
+    那个复读机 `coordinator`，回一句「已交给 coordinator」，任务看板永远空着。
+    现在两边共用 `core.config` 那一份。
+    """
     target = request.to or find_coordinator(config)
+    # 请求里点名了谁也一样要过这道闸 —— 否则绕开选择逻辑就等于绕开检查
+    require_coordinator_brain(config, target)
     env = await _send(
         layout,
         config,

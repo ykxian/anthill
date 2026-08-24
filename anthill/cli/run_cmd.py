@@ -20,7 +20,7 @@ from rich.text import Text
 
 from anthill.agent.sender import Sender
 from anthill.cli.common import console, fail, load, read_body
-from anthill.core.config import Config, brain_of
+from anthill.core.config import Config, find_coordinator, require_coordinator_brain
 from anthill.core.envelope import Address, Envelope
 from anthill.core.errors import AntHillError, ConfigError
 from anthill.core.ids import new_thread_id, now
@@ -38,7 +38,6 @@ from anthill.core.states import DeliveryTracker
 from anthill.orchestrator.state import RunState, RunStore, StepState
 from anthill.transport.registry import TransportRegistry
 
-COORDINATOR_ROLE = "coordinator"
 DEFAULT_CLI_AGENT = "cli"
 POLL_INTERVAL = 0.3
 DEFAULT_TIMEOUT = 600.0
@@ -79,9 +78,9 @@ def run_command(
     else:
         fail("给一件事，或者用 --template <名字>；有哪些模板：anthill run --template ?")
     try:
-        coordinator = to or _find_coordinator(config)
+        coordinator = to or find_coordinator(config)
         if to:
-            _require_a_brain(config, to)  # --to 指定的也一样，别让它绕过检查
+            require_coordinator_brain(config, to)  # --to 指定的也一样，别让它绕过检查
     except ConfigError as exc:
         fail(str(exc))
 
@@ -103,59 +102,6 @@ def run_command(
             "\n[dim]已退出观察；协作仍在后台继续。"
             "看进展：`anthill runs`；看某一条的每一步：`anthill runs <任务号>`[/dim]"
         )
-
-
-def _find_coordinator(config: Config) -> str:
-    candidates = [a.name for a in config.agents_with_role(COORDINATOR_ROLE)]
-    if not candidates:
-        raise ConfigError(
-            'node.toml 里没有 role = "coordinator" 的 Agent；'
-            "先配一个（并给它 provider），或用 --to 指定"
-        )
-    # **优先挑有大脑的那个。** 默认模板里就带一个没配 provider 的 `coordinator`，
-    # 而人加自己的那个时未必改动它 —— 按字典序瞎挑会挑中复读机。
-    with_brain = [n for n in sorted(candidates) if brain_of(config.agents[n]) != "echo"]
-    name = with_brain[0] if with_brain else sorted(candidates)[0]
-    _require_a_brain(config, name)
-    return name
-
-
-def _require_a_brain(config: Config, name: str) -> None:
-    """coordinator 得真有个大脑，否则这条命令会**假装成功**。
-
-    这是本项目最恶劣的一次首跑体验：`init` 生成的默认模板里
-    `[agents.coordinator]` 只写了 `role = "coordinator"`，没有 provider ——
-    按项目自己的规则，没有 provider 就是 echo agent。而这里以前只按 role 找名字，
-    不看它有没有大脑。于是 `anthill run` 把任务派给一个只会回显的 Agent，
-    拿回一句复读，然后打印「完成（ok）」、退出码 0。
-
-    **这比卡住 600 秒糟糕得多** —— 卡住至少能让人意识到不对劲，
-    而现在新用户看到的是一次成功的运行：拆解、派活、汇总一样没发生，
-    却收到了成功信号。
-
-    代码里其实早就有这个意识：找不到 coordinator 时的报错专门写了「并给它 provider」。
-    只是「找到了但它没大脑」这条路一直没人管。
-    """
-    agent = config.agents.get(name)
-    if agent is None:
-        raise ConfigError(f"node.toml 里没有 Agent {name!r}")
-    if brain_of(agent) != "echo":
-        return
-    raise ConfigError(
-        f"coordinator「{name}」还没有大脑 —— 它现在只会把你的话原样回显，\n"
-        "  拆解、派活、汇总一样都不会发生。\n\n"
-        "  在 node.toml 里给它配一个 provider（模板里有注释示例）：\n\n"
-        "    [providers.deepseek]\n"
-        '    kind = "openai_compat"\n'
-        '    base_url = "https://api.deepseek.com"\n'
-        '    api_key_env = "DEEPSEEK_API_KEY"\n'
-        '    model = "deepseek-chat"\n\n'
-        f"    [agents.{name}]\n"
-        '    role = "coordinator"\n'
-        '    provider = "deepseek"\n\n'
-        "  然后 export DEEPSEEK_API_KEY=...。\n"
-        '  只想试试消息链路的话，用 `anthill send echo "在吗" --wait 8`。'
-    )
 
 
 async def _run(
