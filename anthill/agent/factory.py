@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from anthill.adapters.bridge import BridgeHandler
+from anthill.adapters.bridge_provider import BridgeProvider
 from anthill.adapters.cli_agent import CliAgentHandler, CliSpec
 from anthill.agent.context import ContextBuilder
 from anthill.agent.handlers import EchoHandler, MessageHandler
@@ -36,6 +37,21 @@ def build_handler(
     confirm: Confirmer | None = None,
 ) -> MessageHandler:
     agent = config.agent(agent_name)
+    if agent.bridge and agent.role == COORDINATOR_ROLE:
+        # **桥接 + coordinator 要走编排，不能走 BridgeHandler。**
+        # 以前这里只看 `agent.bridge`，于是桥接 coordinator 拿到的是
+        # BridgeHandler：任务被写成一个文件躺在某人的收件箱里，拆解、派活、
+        # 汇总一样都不会发生 —— 而两道闸都放行（`brain_of` 对桥接返回
+        # "bridge" ≠ "echo"），人只能对着空白看板等到超时。
+        #
+        # 现在让那个常驻会话去当**大脑**：编排状态机照常跑，只是问模型的那
+        # 一步改成问人。状态机一行没改，见 adapters/bridge_provider.py。
+        return CoordinatorHandler(
+            provider=BridgeProvider(root=layout.agent_dir(agent_name), agent_name=agent_name),
+            blackboard=Blackboard(layout.blackboard),
+            settings=CoordinatorSettings(step_timeout=config.runtime.task_timeout),
+        )
+
     if agent.bridge:
         # 人（或常驻的交互式会话）在回路里：收到的消息写成文件，回复从 outbox 捡
         return BridgeHandler(
