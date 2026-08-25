@@ -176,7 +176,11 @@ main { overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
 .card-block .why,
 .waiting .said,
 .xchg .line,
-.run-result { max-width: 68ch; }
+.run-result,
+/* `.hint` 装的是**任意错误信息**（`say(id, String(err.message || err), "bad")`），
+   而配置页保存失败走的是 pydantic 的校验错误 —— 又长又多行。不收的话它会
+   铺成 1500px 的一行，而这恰恰是最需要读进去的那句话。 */
+.hint { max-width: 68ch; }
 
 /* ---- 通用零件 ---- */
 .row { display: flex; align-items: center; gap: 9px; }
