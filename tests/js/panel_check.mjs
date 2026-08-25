@@ -519,6 +519,29 @@ assert.ok(preview.includes("先纠正一个前提"), `摘要丢了正文：${pre
 assert.ok(!preview.includes("本步所属目标"), "摘要里混进了脚手架段落");
 assert.ok(!preview.includes("blackboard://"), "摘要里混进了脚手架段落");
 
+// `_` **不能**当强调标记剥掉：这个项目的交付说明里 snake_case 标识符遍地都是，
+// 而 `_斜体_` 几乎没人写。实测真实语料曾经损坏三处（`test_calc` → `testcalc`、
+// `MAX_DEPTH` → `MAXDEPTH`），而标识符恰恰是扫看板时最需要认出来的东西。
+// 同一条理由让 md() 故意不支持单星斜体（`*.py` 会被误伤）——
+// **渲染器不认的语法，摘要不该替它剥。**
+const idents = panel.plainPreview("改了 test_calc.py，把 MAX_DEPTH 提到 100。");
+assert.ok(idents.includes("test_calc.py"), `标识符被剥坏了：${idents}`);
+assert.ok(idents.includes("MAX_DEPTH"), `标识符被剥坏了：${idents}`);
+
+// 全代码块 / 全表格的交付**不能得到空摘要** —— 空摘要会让看板显示
+// 「（没有交付说明）」，那是句假话：说明明明在，旁边还摆着展开箭头。
+// 而这两种形态恰恰最常见：pytest 全绿输出是一整个代码块，验收报告是表格密集型。
+const onlyCode = panel.plainPreview("```\npytest -q\n74 passed in 3.28s\n```");
+assert.ok(onlyCode.trim(), "纯代码块的交付得到了空摘要");
+const onlyTable = panel.plainPreview("| 深度 | exit |\n|---|---|\n| 246 | 2 |");
+assert.ok(onlyTable.trim(), "纯表格的交付得到了空摘要");
+
+// 表格分隔行 `|---|---|` 是纯格式产物，对人零信息 —— 渲染时丢掉
+assert.ok(
+  !panel.md("| a | b |\n|---|---|\n| 1 | 2 |").includes("---"),
+  "展开区里还留着表格分隔行",
+);
+
 const stripped = panel.stripScaffold(DELIVERY);
 assert.ok(stripped.includes("三档深度实测"), "正文被砍多了");
 assert.ok(!stripped.includes("你的产物放这里"), "脚手架没砍干净");

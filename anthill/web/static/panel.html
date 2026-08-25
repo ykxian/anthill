@@ -1107,13 +1107,34 @@ function stripScaffold(text) {
 // 这里走「别拿给人看」：摘要只要一行，标记洗掉。完整原文在展开区里
 // 用 md() 正经渲染。
 function plainPreview(text, limit = 160) {
-  const body = stripScaffold(text)
-    .replace(/```[\s\S]*?```/g, " ")      // 代码块整段拿掉：一行摘要放不下
-    .replace(/^\s*[#>|].*$/gm, " ")       // 标题、引用、表格行
-    .replace(/[*`_]/g, "")                // 粗体/行内代码的标记
-    .replace(/\s+/g, " ")
-    .trim();
-  return body.length > limit ? body.slice(0, limit - 1) + "…" : body;
+  const full = stripScaffold(text);
+  // **`_` 不能当强调标记剥掉。** 这个项目的交付说明里 snake_case 标识符遍地
+  // 都是，而 `_斜体_` 几乎没人写 —— 实测真实语料已经损坏了三处：
+  // `test_calc` → `testcalc`、`MAX_DEPTH` → `MAXDEPTH`。而标识符恰恰是扫
+  // 看板时最需要认出来的东西（哪个文件、哪个常量）。
+  //
+  // 这和 md() 故意不支持单星斜体是同一条理由（那边注释写着「`*.py` 这类
+  // 通配符太容易被误伤」）：**渲染器不认的语法，摘要不该替它剥。**
+  const clean = (s) => s.replace(/[*`]/g, "").replace(/\s+/g, " ").trim();
+  const body = clean(
+    full
+      .replace(/```[\s\S]*?```/g, " ")   // 代码块整段拿掉：一行摘要放不下
+      .replace(/^\s*[#>|].*$/gm, " "),   // 标题、引用、表格行
+  );
+  // 全代码块或全表格的交付，上面洗完会是空的 —— 而看板的兜底文案是
+  // 「（没有交付说明）」，那是句**假话**：说明明明在，旁边还摆着展开箭头。
+  // 这两种形态在这个项目里恰恰最常见：pytest 全绿输出是一整个代码块，
+  // 验收报告是表格密集型。所以退一步取正文第一行 —— 一行内容比一句解释有用。
+  // 退一步取第一行**有内容**的：跳过围栏（```）和表格分隔行，它们本身
+  // 不是内容。只找「第一个非空行」是不够的 —— 纯代码块交付的第一行正是
+  // 围栏，洗完还是空，兜底等于没兜（这条是被测试逼出来的：真实语料里
+  // 恰好没有纯代码块的交付，光靠灌语料发现不了）。
+  const meaningful = full
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line && !/^```/.test(line) && !/^\|[\s:|-]+\|$/.test(line));
+  const shown = body || clean(meaningful || "");
+  return shown.length > limit ? shown.slice(0, limit - 1) + "…" : shown;
 }
 
 // 有危险操作停在那里等人点头时，**至少要让人看见**。
@@ -1453,6 +1474,11 @@ function md(raw) {
       continue;
     }
     if (!line.trim()) { flush(); continue; }
+    // 表格分隔行 `|---|---|` 是纯格式产物，对人零信息量。这个渲染器不支持
+    // 表格（数据行会落进一个 <p>，靠 white-space: pre-wrap 保住换行，一行行
+    // 还读得下来），但那条分隔行留着只会是一串没意义的破折号 —— 丢掉它比
+    // 加一整个表格渲染器便宜得多，收益却占了大头。
+    if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) continue;
     const h = line.match(/^#{1,4}\s+(.*)$/);
     if (h) { flush(); out.push(`<div class="md-h">${mdInline(h[1])}</div>`); continue; }
     const ul = run(i, /^\s*[-*]\s+(.*)$/);
