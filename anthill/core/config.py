@@ -25,6 +25,13 @@ DEFAULT_TASK_TIMEOUT = 600.0
 DEFAULT_ASK_TIMEOUT = 1800.0
 """桥接 coordinator 等人回答的默认上限。比 task_timeout 长得多是故意的 ——
 那一头是人，不是模型。"""
+DEFAULT_BRIDGE_TASK_TIMEOUT = 1800.0
+"""派活给**桥接 worker** 的默认上限。和 ask_timeout 同样的道理、同样的数量级。
+
+以前只有 `task_timeout` 一个值，于是「那一头是人」这个道理只用在了
+coordinator 等大脑回答上，没用在派活给人上 —— 桥接 worker 拿的还是给模型
+定的 600 秒。一次真实事故里三步用时 600/594/604 秒全部贴着这条线，
+通过和判死只差 4 秒：不是谁慢了，是预算根本不够，通过的那两步同样是侥幸。"""
 DEFAULT_KEEP_DAYS = 7
 DEFAULT_DEAD_KEEP_DAYS = 30
 DEFAULT_LOG_MAX_MB = 32
@@ -317,6 +324,12 @@ class McpSection(_Section):
 class RuntimeSection(_Section):
     poll_interval: float = Field(default=DEFAULT_POLL_INTERVAL, gt=0)
     task_timeout: float = Field(default=DEFAULT_TASK_TIMEOUT, gt=0)
+    bridge_task_timeout: float = Field(default=DEFAULT_BRIDGE_TASK_TIMEOUT, gt=0)
+    """派活给桥接 worker 的上限（秒）。见 `DEFAULT_BRIDGE_TASK_TIMEOUT`。
+
+    步骤自己写了 `timeout` 就以步骤的为准 —— 这只是个更合身的默认值。
+    """
+
     ask_timeout: float = Field(default=DEFAULT_ASK_TIMEOUT, gt=0)
     """桥接 coordinator 等人回答的上限（秒）。默认比 `task_timeout` 长得多 ——
     另一头是人，去泡杯咖啡很正常。
@@ -591,7 +604,8 @@ port = 45777
 
 [runtime]
 poll_interval = 2.0        # watcher 降级为轮询时的扫描间隔（秒）
-task_timeout = 600.0
+task_timeout = 600.0       # 派活给模型 worker 的上限（秒）
+# bridge_task_timeout = 1800.0  # 派活给桥接 worker（背后是人/常驻会话）的上限；默认就是它
 watch_mode = "auto"        # auto | inotify | poll（NFS 上会自动降级为 poll）
 
 [security]

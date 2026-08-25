@@ -379,3 +379,94 @@ def test_fork_of_an_unknown_step_raises() -> None:
 
     with pytest.raises(KeyError):
         source.fork("ghost", task_id=new_id(), root_thread=new_thread_id(), root_msg_id=new_id())
+
+
+FALLBACK_PLAN = Plan.model_validate(
+    {
+        "goal": "跑通主路径，出岔子有兜底",
+        "steps": [
+            {"id": "s1", "assignee": "coder", "task": "写代码", "depends_on": []},
+            {
+                "id": "s2",
+                "assignee": "coder",
+                "task": "s1 失败时回滚",
+                "depends_on": ["s1"],
+                "run_if": "upstream_failed",
+            },
+        ],
+        "done_when": "代码写好了",
+    }
+)
+
+
+def _fallback_state() -> RunState:
+    return RunState.start(
+        task_id=new_id(),
+        plan=FALLBACK_PLAN,
+        requester="testnode:cli",
+        root_thread=new_thread_id(),
+        root_msg_id=new_id(),
+    )
+
+
+def test_fallback_step_settles_as_not_needed_when_upstream_succeeds() -> None:
+    """兜底步骤的上游成功了，这一步要就地了结 —— 否则整个 run 永久挂起。
+
+    真实事故：s1/s2/s3 全绿、只剩一个 run_if=upstream_failed 的 s4 停在 pending。
+    它既不就绪（等的失败没发生），也不被 block_unreachable 标记（没有死上游），
+    于是 all_settled 永远为假、_finalize 永远不触发 —— coordinator 不再派任何活，
+    看板上是一个不动的 pending，worker 那边看到的就是「没人理我了」。
+    """
+    # Arrange
+    state = _fallback_state()
+    state = state.dispatch("s1", thread=new_thread_id(), msg_id=new_id())
+    state = state.complete("s1", summary="写完了", artifacts=())
+
+    # Act
+    state = state.block_unreachable()
+
+    # Assert
+    assert state.step("s2").state is StepState.NOT_NEEDED
+    assert state.all_settled  # ← 这一条为假就是永久挂起
+    assert state.broken_ids == set()  # 没被触发的兜底不是失败
+
+
+def test_fallback_step_still_runs_when_upstream_actually_fails() -> None:
+    """反过来也得成立：上游真的失败时，兜底步骤照样要被派出去。"""
+    # Arrange
+    state = _fallback_state()
+    state = state.dispatch("s1", thread=new_thread_id(), msg_id=new_id())
+    state = state.fail("s1", error="炸了")
+
+    # Act
+    state = state.block_unreachable()
+
+    # Assert
+    assert state.step("s2").state is StepState.PENDING
+    assert state.ready_steps() == ("s2",)
+
+
+def test_retry_broken_returns_failed_step_and_its_collateral_to_pending() -> None:
+    """重跑要连「被失败连累而跳过的下游」一起放回去，不然那条支路永远没人做。"""
+    # Arrange
+    state = make_state()
+    state = state.dispatch("s1", thread=SUB_THREAD, msg_id=new_id())
+    state = state.fail("s1", error="超过 603s 未回复，判为失败")
+    state = state.block_unreachable()
+    assert state.step("s2").state is StepState.SKIPPED
+
+    # Act
+    retried = state.retry_broken()
+
+    # Assert
+    assert retried.step("s1").state is StepState.PENDING
+    assert retried.step("s2").state is StepState.PENDING
+    assert retried.step("s1").attempts == state.step("s1").attempts  # 刹车不清零
+    assert "603s" in retried.step("s1").error  # 上一轮为什么失败，留着给重跑的人看
+    assert retried.round == state.round + 1
+    assert retried.ready_steps() == ("s1",)  # 顺序仍由 DAG 保证
+
+
+def test_every_step_state_has_a_board_mark() -> None:
+    """加了新状态忘了填图标 = BOARD.md 渲染 KeyError，看板从此停更。"""
+    assert set(STATE_MARK) == set(StepState)

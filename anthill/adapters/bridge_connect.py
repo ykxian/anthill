@@ -73,8 +73,13 @@ def watch_prompt(layout: NodeLayout, agent: str) -> str:
         f'  {exe} bridge {agent} --reply <消息id> --text "你的回复" -w {workspace}\n'
         "回复正文含代码/反引号/$ 时**别用 --text**（shell 会吃转义且不报错）：\n"
         "把正文写进一个文件，再用 --text-file <路径> 发，全程不过 shell。\n"
-        "纯回执（「收到」「无需回复」这类）**别回** —— 回了对方还得再回执，没有终点；\n"
-        f"用 --ack 清掉它再重新挂监听：{exe} bridge {agent} --ack <消息id> -w {workspace}\n"
+        "**先看 needs_reply**（`--json` 里每条都带）：\n"
+        "  true  = 别人在等你回（task.request / chat），照上面那条回复；\n"
+        "  false = 通知类（task.result / task.error，是你派出去的活有了回音）。\n"
+        "通知**别回** —— 回了只会在对方队列里生成新待办，对方还得再回执，没有终点。\n"
+        "读完按需处理（比如它报了错就去跟进），然后用 --ack 清掉再重新挂监听：\n"
+        f"  {exe} bridge {agent} --ack <消息id> -w {workspace}\n"
+        "纯回执性质的「收到」「无需回复」同样用 --ack 清掉，别回。\n"
         "\n"
         "等消息的时候我照常可以让你干别的活，你不用一直卡在等待里。\n"
         f'想主动找别人说话：{exe} bridge {agent} --to <对方> --text "..." -w {workspace}\n'

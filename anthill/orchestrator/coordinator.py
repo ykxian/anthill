@@ -17,10 +17,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 from anthill.agent.handlers import HandlerContext
 from anthill.core.envelope import Envelope
-from anthill.core.errors import HopLimitExceeded, PlanError, UnknownRecipient
+from anthill.core.errors import ConfigError, HopLimitExceeded, PlanError, UnknownRecipient
 from anthill.core.ids import new_id, new_thread_id, now
 from anthill.core.payloads import (
     ChatPayload,
@@ -48,6 +49,8 @@ worker 回的 TaskErrorPayload 里本来就带 `retryable`，但整个 orchestra
 上限放在这里：`retryable` 默认为 True，光看它挡不住无限重试。
 """
 DEFAULT_STEP_TIMEOUT = 600.0
+DEFAULT_BRIDGE_STEP_TIMEOUT = 1800.0
+"""桥接 worker 的默认步骤超时。见 `core.config.DEFAULT_BRIDGE_TASK_TIMEOUT`。"""
 DEFAULT_NUDGE_AFTER = 180.0
 MAX_SUMMARY_CHARS = 4_000
 TRACE_CLIP = 200
@@ -59,7 +62,7 @@ _APPROVED = object()
 
 STEP_BODY = """\
 {task}
-
+{retry}
 ## 本步所属目标
 {goal}
 
@@ -78,6 +81,10 @@ DONE_WHEN_PROMPT = """\
 各步骤的交付：
 {deliverables}
 
+有步骤失败或被跳过时，先判断它到底挡没挡住目标：不影响的（比如可选的收尾、
+只是没必要执行的兜底分支）照样算达成；真的挡住了就算未达成，并在 fix 里写清楚
+**下一步具体要做什么**（会照着它重跑）。
+
 只输出一个 JSON：{{"satisfied": true/false, "reason": "一句话理由", "fix": "若未达成，\
 用一句话说明还需要做什么；达成则留空"}}\
 """
@@ -86,6 +93,7 @@ DONE_WHEN_PROMPT = """\
 @dataclass(frozen=True, slots=True)
 class CoordinatorSettings:
     step_timeout: float = DEFAULT_STEP_TIMEOUT
+    bridge_step_timeout: float = DEFAULT_BRIDGE_STEP_TIMEOUT
     nudge_after: float = DEFAULT_NUDGE_AFTER
     max_rework_rounds: int = MAX_REWORK_ROUNDS
     max_step_attempts: int = MAX_STEP_ATTEMPTS
@@ -141,7 +149,16 @@ class CoordinatorHandler:
             updated = await self._sweep_timeouts(state, ctx)
             # **有待派步骤时也要推一把。** 以前只在超时/催办改动了状态时才 advance，
             # 于是「卡在等审批」这种状态永远没人再看一眼 —— 人批了也没用。
-            if updated is not state or updated.ready_steps():
+            #
+            # 第三个条件是给「有 pending 步骤已经可以就地了结」留的出口：
+            # 这种 run 没有就绪步骤（所以第二条不成立）、也没有在跑的步骤可超时
+            # （所以第一条不成立），自己却还没收敛 —— 不看这一眼它就永远挂在那儿。
+            # 它同时是一条自愈路径：进程重启后，先前卡住的 run 会在下一次 tick 收敛。
+            if (
+                updated is not state
+                or updated.ready_steps()
+                or updated.block_unreachable() is not updated
+            ):
                 await self._advance(updated, ctx, env=None)
 
     # ---------- 开一次新运行 ----------
@@ -352,7 +369,10 @@ class CoordinatorHandler:
                 return _APPROVED
             ctx.log.warn("step.rejected", task=state.task_id, step=step.id, by=answer.by)
             self._trace(state.task_id).emit("step.rejected", step=step.id, by=answer.by)
-            return state.fail(step.id, error=f"这一步被拒绝了（{answer.by or '人工'}）")
+            # terminal：人已经答过「不」了，返工轮次再派一次只会再问一次同样的审批
+            return state.fail(
+                step.id, error=f"这一步被拒绝了（{answer.by or '人工'}）", terminal=True
+            )
 
         if not store.request_path(request_id).is_file():
             store.submit(
@@ -388,6 +408,7 @@ class CoordinatorHandler:
             task=step.task,
             goal=state.plan.goal,
             task_dir=f"blackboard://tasks/{state.task_id}/",
+            retry=_retry_note(state.step(step.id)),
             context=context,
         ).strip()
 
@@ -396,9 +417,47 @@ class CoordinatorHandler:
     async def _finalize(
         self, state: RunState, ctx: HandlerContext, *, env: Envelope | None
     ) -> RunState:
-        if state.failed_ids or state.skipped_ids:
-            failed = ", ".join(sorted(state.failed_ids | state.skipped_ids))
-            done = self._settle(state, f"步骤 {failed} 失败")
+        """判 done_when → 不达标就返工 → 返工额度用尽才收尾。
+
+        **有步骤失败也要走完这条路。** 以前这里第一件事就是「只要有 failed/skipped
+        就直接判整个 run 失败」，于是：失败原因从没被看过一眼；已经存在的返工机制
+        （`max_rework_rounds`）只在「全部成功但没达标」时才可能触发 —— 恰好是最不
+        需要它的那种情形；一步超时 = 整次协作报废，哪怕前面几步的产出都是好的。
+        编排者手里明明有判断力，却在最该用的时候被一个 if 短路掉了。
+
+        现在的顺序是：先让判定看着**失败原因**回答「目标还成不成立」，
+        不成立且还有额度 → 把没做成的步骤退回去重跑，额度用尽 → 才按失败收尾。
+        """
+        verdict = await self._judge(state, ctx)
+        reworked = (
+            self._rework(state, verdict)
+            if not verdict.satisfied and state.round < self._settings.max_rework_rounds
+            else None
+        )
+        if reworked is not None:
+            ctx.log.info(
+                "plan.rework",
+                task=state.task_id,
+                round=reworked.round,
+                retrying=",".join(sorted(state.broken_ids)),
+                reason=verdict.reason,
+            )
+            self._trace(state.task_id).emit(
+                "plan.rework",
+                round=reworked.round,
+                retrying=",".join(sorted(state.broken_ids)),
+                reason=verdict.reason[:TRACE_CLIP],
+            )
+            for step_id in reworked.ready_steps():
+                reworked = await self._dispatch(reworked, step_id, ctx, env=env)
+            return reworked
+
+        # 判定说「没挡住目标」时可以带着伤收尾（partial），但有两种情况轮不到它说了算：
+        # 目标确实没达成，或者**一步都没做成** —— 后者根本没有任何东西可以称为交付，
+        # 这时判定说达成，只可能是它看走了眼。
+        if state.broken_ids and (not verdict.satisfied or not state.done_ids):
+            failed = ", ".join(sorted(state.broken_ids))
+            done = self._settle(state, f"步骤 {failed} 失败：{verdict.reason}")
             self._trace(state.task_id).emit("run.finished", status="error", failed=failed)
             await self._send_final(
                 done,
@@ -409,24 +468,15 @@ class CoordinatorHandler:
             await self._notify(done, ctx)
             return done
 
-        verdict = await self._judge(state, ctx)
-        if not verdict.satisfied and state.round < self._settings.max_rework_rounds:
-            reworked = self._append_rework(state, verdict.fix or verdict.reason)
-            ctx.log.info(
-                "plan.rework", task=state.task_id, round=reworked.round, reason=verdict.reason
-            )
-            self._trace(state.task_id).emit(
-                "plan.rework", round=reworked.round, reason=verdict.reason[:TRACE_CLIP]
-            )
-            for step_id in reworked.ready_steps():
-                reworked = await self._dispatch(reworked, step_id, ctx, env=env)
-            return reworked
-
+        # 带伤跑完的不叫 ok —— 有步骤没做成这件事，不该被一句「达成了」抹平
+        status: Literal["ok", "partial"] = (
+            "ok" if verdict.satisfied and not state.broken_ids else "partial"
+        )
         summary = _aggregate(state, verdict)
         done = self._settle(state, summary)
         self._trace(state.task_id).emit(
             "run.finished",
-            status="ok" if verdict.satisfied else "partial",
+            status=status,
             reason=verdict.reason[:TRACE_CLIP],
         )
         await self._send_final(
@@ -436,7 +486,7 @@ class CoordinatorHandler:
             TaskResultPayload(
                 summary=summary,
                 artifacts=_all_artifacts(state),
-                status="ok" if verdict.satisfied else "partial",
+                status=status,
             ),
         )
         ctx.log.info(
@@ -467,19 +517,35 @@ class CoordinatorHandler:
     async def _judge(self, state: RunState, ctx: HandlerContext) -> Verdict:
         """用 done_when 对照各步交付。没写 done_when 就默认达成，不为难模型。"""
         if not state.plan.done_when.strip():
+            # 没有完成标准可依时，唯一诚实的判据就是「每一步都做成了没有」——
+            # 原来这里无条件返回达成，于是没写 done_when 的计划里，
+            # 一步失败也会被汇报成一次成功的协作。
+            if state.broken_ids:
+                broken = ", ".join(sorted(state.broken_ids))
+                return Verdict(
+                    satisfied=False,
+                    reason=f"计划未给出完成标准，而步骤 {broken} 没有完成",
+                    fix=f"重做步骤 {broken}",
+                )
             return Verdict(satisfied=True, reason="计划未给出完成标准，按各步已完成处理")
         prompt = DONE_WHEN_PROMPT.format(
             goal=state.plan.goal,
             done_when=state.plan.done_when,
-            deliverables="\n".join(
-                f"- {r.id}（{r.assignee}）：{r.summary or '（无交付说明）'}" for r in state.steps
-            ),
+            deliverables="\n".join(_deliverable_line(r) for r in state.steps),
         )
         judge = self._judge_provider or self._provider
         try:
             turn = await judge.complete([Msg.user(prompt)], [])
-        except Exception as exc:  # 判定失败不该让整次协作变成失败
+        except Exception as exc:  # 判定这一步自己出错，不该让整次协作跟着变成失败
             ctx.log.warn("done_when.judge_failed", task=state.task_id, error=str(exc))
+            if state.broken_ids:
+                # 但也别反过来：判不了的时候，已经摆在眼前的失败仍然是失败
+                broken = ", ".join(sorted(state.broken_ids))
+                return Verdict(
+                    satisfied=False,
+                    reason=f"完成标准判定失败（{exc}），且步骤 {broken} 没有完成",
+                    fix=f"重做步骤 {broken}",
+                )
             return Verdict(satisfied=True, reason=f"完成标准判定失败（{exc}），按已完成处理")
         self._log_model_call(ctx, kind="judge", usage=turn.usage, provider=judge)
         return _parse_verdict(turn.text)
@@ -501,6 +567,20 @@ class CoordinatorHandler:
             provider=provider.name,
             model=provider.model,
         )
+
+    def _rework(self, state: RunState, verdict: Verdict) -> RunState | None:
+        """返工怎么返，取决于上一轮**输在哪**。返回 None 表示这一轮返工没有意义。
+
+        - 有步骤没做成 → 把它们（连同被连累跳过的下游）退回去重跑。
+          原任务、原执行者、上游产出全都还在，比另起一步描述「刚才有什么没做成」
+          准确得多，也不会把一条支路的活错派给另一个人。
+        - 全都做成了、只是没达标 → 追加一步修复，这是原来就有的路径。
+        """
+        if state.broken_ids:
+            if not state.can_retry(max_attempts=self._settings.max_step_attempts):
+                return None  # 重跑不了（人拒绝了，或者次数已经用光）—— 别空转一轮
+            return state.retry_broken()
+        return self._append_rework(state, verdict.fix or verdict.reason)
 
     def _append_rework(self, state: RunState, fix: str) -> RunState:
         """返工只追加一步，派给**最后一个真的有产出的**执行者。
@@ -552,7 +632,7 @@ class CoordinatorHandler:
             elapsed = _elapsed(record.dispatched_at, current)
             # 每步可以有自己的超时：「写代码给 20 分钟、跑个 lint 给 30 秒」
             # 这种再普通不过的要求，以前只有一个全局值表达不了
-            limit = state.plan.step(record.id).timeout or self._settings.step_timeout
+            limit = state.plan.step(record.id).timeout or self._default_timeout(record, ctx)
             if elapsed > limit:
                 ctx.log.warn(
                     "step.timeout", task=state.task_id, step=record.id, seconds=int(elapsed)
@@ -566,6 +646,30 @@ class CoordinatorHandler:
                 self._trace(state.task_id).emit("step.nudged", step=record.id)
                 updated = updated.mark_nudged(record.id)
         return updated
+
+    def _default_timeout(self, record: StepRecord, ctx: HandlerContext) -> float:
+        """没写 `timeout` 的步骤该等多久 —— **取决于对面是人还是模型**。
+
+        代码里早就写着「那一头是人，不是模型」（见 `ask_timeout`），
+        但这个道理以前只用在 coordinator 等大脑回答上，没用在派活给人上：
+        桥接 worker 拿的还是给模型定的那个值。一个人读完失败清单、复现、
+        排查、改、跑两套测试再写文档，十分钟本来就不够。
+
+        对面认不出来就退回全局默认 —— 猜不出来的时候按短的算，别凭猜给人放宽。
+        认不出来有两种：本地 node.toml 里没有这个名字，或者它压根在别的节点上
+        （远端的 `tst1` 和本地的 `tst1` 是两个 Agent，本地配置说明不了远端那个）。
+        """
+        try:
+            address = parse_address(record.assignee, default_node=ctx.identity.node)
+        except (UnknownRecipient, ValueError):
+            return self._settings.step_timeout
+        if address.node and address.node != ctx.identity.node:
+            return self._settings.step_timeout
+        try:
+            agent = ctx.config.agent(address.agent)
+        except ConfigError:
+            return self._settings.step_timeout
+        return self._settings.bridge_step_timeout if agent.bridge else self._settings.step_timeout
 
     async def _nudge(self, state: RunState, record: StepRecord, ctx: HandlerContext) -> None:
         """催办走 chat，挂在该步的子 thread 上 —— 对方能直接看到自己在做的那件事。"""
@@ -670,6 +774,27 @@ def _first_error(state: RunState) -> str:
         if record.state is StepState.FAILED and record.error:
             return record.error
     return "未知原因"
+
+
+def _retry_note(record: StepRecord) -> str:
+    """重派时告诉对方上一轮栽在哪。
+
+    不给的话，重跑就是把同一段话原样再念一遍 —— 同样的输入、同样的做法，
+    大概率同样地失败，返工额度就这么白烧掉了。
+    """
+    if record.attempts < 1 or not record.error:
+        return ""
+    return f"\n## 这一步上一轮没做成\n原因：{record.error}\n请换个做法，别原样再来一遍。\n"
+
+
+def _deliverable_line(record: StepRecord) -> str:
+    """喂给判定的一行。**没做成的步骤要带上原因** —— 判定要回答的是
+    「这次失败挡没挡住目标」，只给它一句「（无交付说明）」等于让它蒙。
+    """
+    if record.state is StepState.DONE:
+        return f"- {record.id}（{record.assignee}）：{record.summary or '（无交付说明）'}"
+    reason = record.error or "未说明原因"
+    return f"- {record.id}（{record.assignee}）：【{record.state.value}】{reason}"
 
 
 def _aggregate(state: RunState, verdict: Verdict) -> str:

@@ -21,7 +21,7 @@ import typer
 from rich.prompt import Prompt
 from rich.table import Table
 
-from anthill.adapters.bridge import BridgeHandler, parse_note
+from anthill.adapters.bridge import AWAITS_REPLY, BridgeHandler, parse_note
 from anthill.adapters.bridge_connect import watch_prompt
 from anthill.adapters.bridge_session import pick_agent, wait_for_message
 from anthill.agent.sender import Sender
@@ -37,6 +37,10 @@ from anthill.core.payloads import ChatPayload, MessageType
 from anthill.core.router import Router, parse_address
 from anthill.core.states import DeliveryTracker
 from anthill.transport.registry import TransportRegistry
+
+NEEDS_REPLY_TYPES = frozenset(str(t) for t in AWAITS_REPLY)
+"""front matter 里的 `type` 是字符串，而 AWAITS_REPLY 装的是枚举 ——
+在这里转一次，别让两边各写一份类型名字面量。"""
 
 DEFAULT_CLI_AGENT = "cli"
 POLL_INTERVAL = 0.3
@@ -356,25 +360,37 @@ def _pending_json(handler: BridgeHandler, agent: str) -> dict[str, Any]:
     waiting = []
     for path in _pending(handler):
         headers, body = parse_note(path.read_text(encoding="utf-8"))
+        kind = headers.get("type", "chat")
         waiting.append(
             {
                 "id": path.stem,
                 "short": path.stem[-6:],
                 "from": headers.get("from", ""),
-                "type": headers.get("type", "chat"),
+                "type": kind,
+                # **通知类不需要回，但必须看得见。** task.result / task.error 是
+                # 别人给你的答复（你派出去的活有回音了），不回它是对的 ——
+                # 回了只会在对方队列里生成一条新待办。但它同样得把人唤醒，
+                # 否则「我派出去的活办完了」这件事没有任何人会知道。
+                "needs_reply": kind in NEEDS_REPLY_TYPES,
                 "thread": headers.get("thread", ""),
                 "body": body.strip(),
             }
         )
+    todo = [w for w in waiting if w["needs_reply"]]
     return {
         "agent": agent,
-        "count": len(waiting),
+        # count 只数「要你回的」—— 值守提示词是按它决定要不要回复的，
+        # 把通知混进去会让会话对着一条 task.result 憋出一句回复
+        "count": len(todo),
+        "notices": len(waiting) - len(todo),
         "waiting": waiting,
         "inbox": str(handler.dir("inbox")),
         "outbox": str(handler.dir("outbox")),
         "reply_hint": (
-            f"回复：anthill bridge {agent} --reply <id> --text '…'，"
-            f"或直接在 {handler.dir('outbox')} 下写同名 .md"
+            f"回复：anthill bridge {agent} --reply <id> --text-file <文件>，"
+            f"或直接在 {handler.dir('outbox')} 下写同名 .md。"
+            f"needs_reply=false 的是通知（别人给你的答复），"
+            f"读完用 --ack <id> 清掉，别回复"
         ),
     }
 
@@ -425,16 +441,27 @@ def _list_pending(handler: BridgeHandler, agent: str) -> None:
         console.print(f"[dim]目录：{handler.dir('inbox')}[/dim]")
         return
 
-    table = Table(title=f"{agent} 在等你回复", header_style="bold yellow")
-    for column in ("id", "来自", "类型", "内容"):
+    table = Table(title=f"{agent} 的收件箱", header_style="bold yellow")
+    for column in ("id", "来自", "类型", "要回吗", "内容"):
         table.add_column(column)
+    notices = 0
     for path in pending:
         headers, body = parse_note(path.read_text(encoding="utf-8"))
+        kind = headers.get("type", "-")
+        needs = kind in NEEDS_REPLY_TYPES
+        notices += 0 if needs else 1
         table.add_row(
             path.stem[-6:],
             headers.get("from", "-"),
-            headers.get("type", "-"),
-            " ".join(body.split())[:56],
+            kind,
+            "要回" if needs else "[dim]通知[/dim]",
+            " ".join(body.split())[:48],
         )
     console.print(table)
     console.print(f"[dim]直接编辑 {handler.dir('outbox')} 下的同名文件即可回复[/dim]")
+    if notices:
+        # 通知类回了只会在对方队列里生成一条新待办，而对方还得再回执 —— 没有终点
+        console.print(
+            f"[dim]其中 {notices} 条是通知（别人给你的答复），"
+            f"读完用 `anthill bridge {agent} --ack <id>` 清掉，别回复[/dim]"
+        )

@@ -49,6 +49,38 @@ STABLE_SECONDS = 1.0
 MAX_BODY_CHARS = 30_000
 FRONT_MATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", re.S)
 
+AWAITS_REPLY = frozenset({MessageType.TASK_REQUEST, MessageType.CHAT})
+"""别人在**等你回**的：派给你的活、跟你说的话。这些要建 pending（回信要用
+原始信封接住 thread 与 hops）。"""
+
+SURFACED = AWAITS_REPLY | frozenset({MessageType.TASK_RESULT, MessageType.TASK_ERROR})
+"""**写进 inbox 给人看**的全部类型 —— 比「等你回」的多出两种。
+
+### 为什么必须比 AWAITS_REPLY 大
+
+以前这两个集合是同一个，于是 `task.result` / `task.error` 走到 handler 就被
+`msg.ignored` 静默丢掉、直接归档。后果不是「少显示一条」，是**漏消息**：
+
+桥接 Agent 只有一个醒来的入口 —— 值守会话盯着 `bridge/inbox/`。而 AntHill 有
+两条信道：聊天走 bridge，`anthill send` 的任务结果走 mailbox。任务结果本该由
+handler 从 mailbox 搬进 bridge/inbox，可它在这儿被扔了，于是**这个人永远不会
+被唤醒**，日志里只留一行谁也不会去看的 `msg.ignored`。
+
+实测过：投一条 task.result 给桥接 Agent，`msg.received` → `msg.ignored` →
+归档进 `done/`，bridge/inbox 里什么都没多。
+
+最容易中招的正是「桥接 Agent 自己派了活出去」——它用 outbox 里带 `to:` 的
+文件发出一条 task，对方干完回 `task.result`，而**发起人看不见回音**。
+
+### 为什么不干脆把回执也放进来
+
+`receipt.*` 在 runtime 里就返回了（`env.type.is_receipt`），根本到不了
+handler，那是对的：回执是状态机的燃料不是给人读的，一条业务消息配一条回执，
+放进来会让收件箱里一半是噪音。`event` / `heartbeat` 同理。
+
+**判据是「人需不需要知道这件事」**，不是「消息是不是发给我的」。
+"""
+
 REQUEST_TEMPLATE = """\
 ---
 from: {frm}
@@ -107,17 +139,22 @@ class BridgeHandler:
     # ---------- 收：写成文件就返回，绝不在这里等人 ----------
 
     async def handle(self, env: Envelope, ctx: HandlerContext) -> None:
-        if env.type not in (MessageType.TASK_REQUEST, MessageType.CHAT):
+        if env.type not in SURFACED:
             ctx.log.info("msg.ignored", msg=env.id, type=str(env.type))
             return
 
         self.dir(INBOX).joinpath(f"{env.id}.md").write_text(render_request(env), encoding="utf-8")
-        self.dir(PENDING).joinpath(f"{env.id}.json").write_bytes(env.to_json_bytes())
+        # **只有「在等你回」的才进 pending。** pending 里放的是构造回信要用的
+        # 原始信封；task.result / task.error 是**别人给你的答复**，不需要你回，
+        # 给它建 pending 只会让 `--ack` 和「待回复」的计数把它算进去。
+        if env.type in AWAITS_REPLY:
+            self.dir(PENDING).joinpath(f"{env.id}.json").write_bytes(env.to_json_bytes())
         ctx.log.info(
             "bridge.waiting",
             msg=env.id,
             thread=env.thread,
             frm=str(env.from_),
+            type=str(env.type),
             file=f"{BRIDGE_DIR}/{INBOX}/{env.id}.md",
         )
 

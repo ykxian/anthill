@@ -23,7 +23,12 @@ from anthill.core.errors import ConfigError
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
-from anthill.core.payloads import ChatPayload, MessageType, TaskRequestPayload
+from anthill.core.payloads import (
+    ChatPayload,
+    MessageType,
+    TaskRequestPayload,
+    TaskResultPayload,
+)
 
 TIMEOUT = 10.0
 
@@ -181,6 +186,65 @@ async def test_an_incoming_message_becomes_a_file_and_does_not_block(
     names = {p.stem for p in handler.dir("inbox").glob("*.md")}
     assert names == {first.id, second.id}
     assert "第一件事" in (handler.dir("inbox") / f"{first.id}.md").read_text(encoding="utf-8")
+
+
+def result_to_cc(summary: str = "排期谈定了：9 月 3 日交付") -> Envelope:
+    """别人干完你派的活，回给你的那种消息。"""
+    return Envelope.new(
+        sender=Address(node="testnode", agent="cli"),
+        recipient=Address(node="testnode", agent="cc"),
+        type=MessageType.TASK_RESULT,
+        payload=TaskResultPayload(summary=summary),
+    )
+
+
+async def test_a_task_result_reaches_the_person_instead_of_being_dropped(
+    node: tuple[NodeLayout, Config],
+) -> None:
+    """**桥接 Agent 只有一个醒来的入口。**
+
+    值守会话盯的是 `bridge/inbox/`，而 AntHill 有两条信道：聊天走 bridge，
+    `anthill send` 的任务结果走 mailbox。任务结果本该由 handler 从 mailbox
+    搬进 bridge/inbox —— 以前这里只放行 task.request 与 chat，别的一律
+    `msg.ignored` 直接归档，于是**这个人永远不会被唤醒**，日志里只留一行
+    谁也不会去看的 ignored。
+
+    最容易中招的是「桥接 Agent 自己派了活出去」：对方干完回 task.result，
+    而发起人看不见回音。
+    """
+    layout, config = node
+    handler = handler_for(layout)
+    env = result_to_cc()
+
+    async with running(layout, config, handler):
+        Mailbox(layout.mailbox_dir("cc")).deposit(env)
+        await wait_until(lambda: (handler.dir("inbox") / f"{env.id}.md").is_file())
+
+    note = (handler.dir("inbox") / f"{env.id}.md").read_text(encoding="utf-8")
+    assert "排期谈定了" in note, "正文没带上，人看见了也不知道发生了什么"
+
+
+async def test_a_task_result_is_not_marked_as_awaiting_a_reply(
+    node: tuple[NodeLayout, Config],
+) -> None:
+    """看得见，但**不该要人回**。
+
+    task.result 是别人给你的答复，回它只会在对方队列里生成一条新待办、对方
+    再回执，没有终点。所以它不进 `pending/` —— 那里放的是构造回信要用的原始
+    信封，只有「在等你回」的才需要。
+    """
+    layout, config = node
+    handler = handler_for(layout)
+    answer, ask = result_to_cc(), task_to_cc("这件事交给你")
+
+    async with running(layout, config, handler):
+        box = Mailbox(layout.mailbox_dir("cc"))
+        box.deposit(answer)
+        box.deposit(ask)
+        await wait_until(lambda: len(list(handler.dir("inbox").glob("*.md"))) == 2)
+
+    assert not (handler.dir("pending") / f"{answer.id}.json").is_file(), "通知不该占「待回复」"
+    assert (handler.dir("pending") / f"{ask.id}.json").is_file(), "派活仍然要能回"
 
 
 async def test_the_sender_still_gets_an_accepted_receipt_right_away(

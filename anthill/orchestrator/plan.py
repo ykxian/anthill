@@ -157,6 +157,32 @@ class PlanStep(BaseModel):
         """去掉 `role:` 前缀后的名字，用于和 roster 对照。"""
         return self.assignee[len(ROLE_PREFIX) :] if self.is_role else self.assignee
 
+    def deps_satisfied(self, done: set[str], settled: set[str]) -> bool:
+        """依赖满足没有 —— 判据取决于这一步在等什么。
+
+        `settled` 是「已落定」（成功 ∪ 失败/跳过/无需执行），`done` 是其中真正成功的。
+        两个集合都传进来，是因为三种 run_if 问的是不同的问题：
+        正常步骤问「上游成了吗」，收尾步骤问「上游停了吗」，兜底步骤还要问「有谁没成」。
+
+        这是个**公开方法**，因为它有第二个调用点：`RunState.block_unreachable`
+        要靠它回答「这一步的条件还有没有可能成立」。以前它是模块私有函数、
+        只有 `Plan.ready` 用，于是 block_unreachable 只能自己另写一套近似判据 ——
+        近似漏掉的那个格子（兜底步骤的上游全成功了）就是一次永久挂起。
+        """
+        if self.run_if is RunIf.OK:
+            return all(dep in done for dep in self.depends_on)
+        if self.run_if is RunIf.ALWAYS:
+            # 收尾/清理：上游落定就行，成败都不管
+            return all(dep in settled for dep in self.depends_on)
+        # upstream_failed：上游全部落定，且**至少有一个**真的失败了
+        return all(dep in settled for dep in self.depends_on) and any(
+            dep in (settled - done) for dep in self.depends_on
+        )
+
+    def deps_settled(self, settled: set[str]) -> bool:
+        """上游是不是已经全部落定 —— 落定了条件还不成立，就是**永远不会**成立。"""
+        return all(dep in settled for dep in self.depends_on)
+
 
 class Plan(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -236,21 +262,8 @@ class Plan(BaseModel):
         return tuple(
             step
             for step in self.steps
-            if step.id not in taken and step.id not in done and _deps_satisfied(step, done, settled)
+            if step.id not in taken and step.id not in done and step.deps_satisfied(done, settled)
         )
-
-
-def _deps_satisfied(step: PlanStep, done: set[str], settled: set[str]) -> bool:
-    """依赖满足没有 —— 判据取决于这一步在等什么。"""
-    if step.run_if is RunIf.OK:
-        return all(dep in done for dep in step.depends_on)
-    if step.run_if is RunIf.ALWAYS:
-        # 收尾/清理：上游落定就行，成败都不管
-        return all(dep in settled for dep in step.depends_on)
-    # upstream_failed：上游全部落定，且**至少有一个**真的失败了
-    return all(dep in settled for dep in step.depends_on) and any(
-        dep in (settled - done) for dep in step.depends_on
-    )
 
 
 def _has_cycle(steps: tuple[PlanStep, ...]) -> bool:

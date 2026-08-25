@@ -26,6 +26,7 @@ STATE_MARK = {
     StepState.DONE: "✓",
     StepState.FAILED: "✗",
     StepState.SKIPPED: "⊘",
+    StepState.NOT_NEEDED: "·",
 }
 """**每个 StepState 都得在这儿有一格。**（有一条测试逐个枚举，加了新状态忘填会红。）
 

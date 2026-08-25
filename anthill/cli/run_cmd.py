@@ -49,6 +49,7 @@ STATE_STYLE = {
     StepState.DONE: ("✓", "green"),
     StepState.FAILED: ("✗", "bold red"),
     StepState.SKIPPED: ("—", "dim red"),
+    StepState.NOT_NEEDED: ("·", "dim"),
 }
 
 

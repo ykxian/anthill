@@ -14,16 +14,18 @@ from contextlib import AsyncExitStack, asynccontextmanager
 import pytest
 
 from anthill.agent.runtime import AgentRuntime
-from anthill.core.config import Config
+from anthill.core.config import DEFAULT_BRIDGE_TASK_TIMEOUT, DEFAULT_TASK_TIMEOUT, Config
 from anthill.core.envelope import Address, Envelope
 from anthill.core.errors import ProviderError
+from anthill.core.ids import new_id, new_thread_id
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
 from anthill.core.payloads import ChatPayload, MessageType, TaskRequestPayload
 from anthill.orchestrator.board import BOARD_FILE
 from anthill.orchestrator.coordinator import CoordinatorHandler, CoordinatorSettings
-from anthill.orchestrator.state import RunStore, StepState
+from anthill.orchestrator.plan import Plan
+from anthill.orchestrator.state import RunState, RunStore, StepRecord, StepState
 from anthill.providers.base import ToolCall, Turn
 from anthill.providers.fake import FakeProvider
 from anthill.security.approvals import ApprovalStore
@@ -364,7 +366,89 @@ async def test_independent_steps_are_dispatched_concurrently(
     assert "B 好了" in finals_in(cli_box)[0].payload.summary
 
 
-async def test_failed_step_stops_the_run_and_reports_to_the_user(
+async def test_untriggered_fallback_step_does_not_hang_or_fail_the_run(
+    layout: NodeLayout, node: Config
+) -> None:
+    """计划里带一个没被触发的兜底步骤，run 要正常跑完 —— 既不挂起，也不算失败。
+
+    回归：这条以前会**永远跑不完**（wait_until 超时）。s2 等的失败没发生所以不就绪，
+    又因为没有死上游而不被 block_unreachable 标记，于是永久停在 pending、
+    all_settled 永假、_finalize 永不触发；coordinator 从此不再派任何活。
+    """
+    # Arrange
+    fallback_plan = {
+        "goal": "写代码，出岔子有兜底",
+        "steps": [
+            {"id": "s1", "assignee": "coder", "task": "写测试", "depends_on": []},
+            {
+                "id": "s2",
+                "assignee": "coder",
+                "task": "s1 失败时回滚",
+                "depends_on": ["s1"],
+                "run_if": "upstream_failed",
+            },
+        ],
+        "done_when": "",
+    }
+    boss = FakeProvider([plan_turn(fallback_plan)])
+    coder = FakeProvider([finish_turn("写好了")])
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+
+    # Act
+    async with AsyncExitStack() as stack:
+        await stack.enter_async_context(
+            running(layout, node, "coder", worker_handler(layout, node, "coder", coder))
+        )
+        await stack.enter_async_context(
+            running(layout, node, "boss", coordinator_handler(layout, boss))
+        )
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(finals_in(cli_box)))
+
+    # Assert
+    final = finals_in(cli_box)[0]
+    assert final.type is MessageType.TASK_RESULT
+    assert final.payload.status == "ok"  # 兜底没被触发不是瑕疵，别报 partial
+    state = RunStore(layout.blackboard).all()[0]
+    assert state.step("s2").state is StepState.NOT_NEEDED
+    assert state.step("s2").attempts == 0
+
+
+async def test_failed_step_is_retried_before_the_run_gives_up(
+    layout: NodeLayout, node: Config
+) -> None:
+    """一步失败不等于整次协作报废：先判断它挡没挡住目标，挡住了就重跑。
+
+    回归：以前 `_finalize` 第一件事就是「有 failed/skipped 就直接判失败」，
+    失败原因从没被看过一眼，已经写好的返工机制也永远轮不到触发。
+    """
+    # Arrange：coder 的模型一直不收尾 → 每次都熔断失败；判定说目标没达成
+    boss = FakeProvider([plan_turn(), verdict_turn(satisfied=False, fix="重做 s1")])
+    coder = FakeProvider([Turn(text="", tool_calls=(ToolCall(id="c1", name="list_dir"),))])
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+    handler = worker_handler(layout, node, "coder", coder)
+    handler._max_steps = 2  # type: ignore[attr-defined]
+
+    # Act
+    async with AsyncExitStack() as stack:
+        await stack.enter_async_context(running(layout, node, "coder", handler))
+        await stack.enter_async_context(
+            running(layout, node, "boss", coordinator_handler(layout, boss, max_rework_rounds=1))
+        )
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(finals_in(cli_box)))
+
+    # Assert：派了两次才放弃，而不是一次失败就收摊
+    state = RunStore(layout.blackboard).all()[0]
+    assert state.step("s1").attempts == 2
+    assert state.round == 1
+    assert finals_in(cli_box)[0].type is MessageType.TASK_ERROR  # 额度用尽才报错
+    # 重派时得把上一轮栽在哪一起告诉对方，否则重跑就是把同一段话原样再念一遍
+    seen = "".join(m.content for call in coder.calls for m in call.messages)
+    assert "这一步上一轮没做成" in seen
+
+
+async def test_run_gives_up_only_after_rework_budget_is_spent(
     layout: NodeLayout, node: Config
 ) -> None:
     # Arrange：coder 的模型一直不收尾 → 步数熔断 → task.error 回到 coordinator
@@ -383,7 +467,8 @@ async def test_failed_step_stops_the_run_and_reports_to_the_user(
         Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
         await wait_until(lambda: bool(finals_in(cli_box)))
 
-    # Assert
+    # Assert：判定（这里是脚本里写死的「达成了」）说了不算 —— 一步都没做成的运行
+    # 没有任何东西可以称为交付，只能是失败
     final = finals_in(cli_box)[0]
     assert final.type is MessageType.TASK_ERROR
     assert "s1" in final.payload.error
@@ -473,10 +558,66 @@ async def test_silent_worker_is_nudged_then_timed_out(layout: NodeLayout, node: 
         for p in Mailbox(layout.mailbox_dir("coder")).list_new()
         if Mailbox.read_envelope(p).type is MessageType.CHAT
     ]
-    assert len(nudges) == 1  # 只催一次，不无限催
+    # 每次派发只催一次（不在同一次派发里无限催），但超时会重跑，
+    # 所以催办总数 = 派发次数 —— 每一次都是对着一个新的尝试问的
+    assert len(nudges) == state.step("s1").attempts
+    assert state.step("s1").attempts > 1  # 一次超时就放弃的时代结束了
 
 
 # ---------- 崩溃恢复 ----------
+
+
+async def test_restart_converges_a_run_that_was_already_stuck(
+    layout: NodeLayout, node: Config
+) -> None:
+    """磁盘上已经卡死的 run，重启之后要自己走完 —— 不需要人去手改 state.json。
+
+    卡死的形状：所有该做的步骤都做完了，只剩一个 run_if=upstream_failed 的步骤
+    停在 pending。这种 run 既没有就绪步骤、也没有在跑的步骤可超时，
+    tick 的前两个条件都不成立 —— 少了第三个条件它会一直挂着，
+    连带 worker 那边也再收不到任何新活。
+    """
+    # Arrange：手工造出卡死的状态并落盘（模拟修复之前留下的运行）
+    stuck_plan = Plan.model_validate(
+        {
+            "goal": "写代码，出岔子有兜底",
+            "steps": [
+                {"id": "s1", "assignee": "coder", "task": "写测试", "depends_on": []},
+                {
+                    "id": "s2",
+                    "assignee": "coder",
+                    "task": "回滚",
+                    "depends_on": ["s1"],
+                    "run_if": "upstream_failed",
+                },
+            ],
+            "done_when": "",
+        }
+    )
+    store = RunStore(layout.blackboard)
+    stuck = RunState.start(
+        task_id=new_id(),
+        plan=stuck_plan,
+        requester="testnode:cli",
+        root_thread=new_thread_id(),
+        root_msg_id=new_id(),
+    )
+    stuck = stuck.dispatch("s1", thread=new_thread_id(), msg_id=new_id())
+    stuck = stuck.complete("s1", summary="写完了", artifacts=())
+    store.save(stuck)
+    assert not stuck.all_settled  # 就是这个「永远为假」把 run 钉在原地
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+
+    # Act：只把 coordinator 拉起来，不发任何新任务 —— 推进只能来自 tick
+    async with running(
+        layout, node, "boss", coordinator_handler(layout, FakeProvider([plan_turn()]))
+    ):
+        await wait_until(lambda: bool(finals_in(cli_box)))
+
+    # Assert
+    assert store.all()[0].finished
+    assert store.all()[0].step("s2").state is StepState.NOT_NEEDED
+    assert finals_in(cli_box)[0].type is MessageType.TASK_RESULT
 
 
 async def test_coordinator_resumes_scheduling_after_a_restart(
@@ -1140,3 +1281,57 @@ async def test_a_forked_run_is_picked_up_and_kept_steps_are_not_redispatched(
     # fork run 的流水独立成篇，从头讲自己的故事
     kinds = [e["kind"] for e in read_trace(layout.blackboard / "tasks" / forked.task_id)]
     assert kinds[-1] == "run.finished"
+
+
+# ---------- 超时预算按大脑类型给 ----------
+
+
+BRIDGE_NODE_TOML = (
+    NODE_TOML
+    + """
+[agents.human]
+role = "worker"
+bridge = true
+"""
+)
+
+
+def _timeout_for(layout: NodeLayout, assignee: str) -> float:
+    """问 coordinator：这一步没写 timeout 的话，你打算等多久。"""
+    from anthill.agent.handlers import HandlerContext
+    from anthill.core.envelope import Address
+
+    layout.node_toml.write_text(BRIDGE_NODE_TOML, encoding="utf-8")
+    config = Config.load_from(layout)
+    handler = coordinator_handler(layout, FakeProvider([plan_turn()]))
+    ctx = HandlerContext(
+        identity=Address(node="testnode", agent="boss"),
+        agent=config.agent("boss"),
+        config=config,
+        layout=layout,
+        log=EventLog(layout.log_file("boss"), agent="boss", echo=False),
+        sender=None,  # type: ignore[arg-type]
+    )
+    record = StepRecord(id="s1", assignee=assignee, task="做事")
+    return handler._default_timeout(record, ctx)  # type: ignore[attr-defined]
+
+
+def test_bridge_worker_gets_the_long_default_timeout(layout: NodeLayout) -> None:
+    """桥接 worker 背后是人，预算该跟 ask_timeout 一个数量级，不是给模型定的那个。
+
+    代码里早就写着「那一头是人，不是模型」，但那句话以前只用在 coordinator
+    等大脑回答上 —— 派活给人时又退回了 600 秒。真实事故里三步用时
+    600/594/604 秒全贴着线，通过和判死只差 4 秒。
+    """
+    assert _timeout_for(layout, "human") == DEFAULT_BRIDGE_TASK_TIMEOUT
+    assert _timeout_for(layout, "coder") == DEFAULT_TASK_TIMEOUT  # 模型 worker 不受影响
+
+
+def test_unrecognisable_assignee_falls_back_to_the_short_default(layout: NodeLayout) -> None:
+    """认不出对面是谁就按短的算 —— 猜不出来的时候别凭猜给人放宽。"""
+    # 远端节点上的 human 和本地的 human 是两个 Agent，本地配置说明不了远端那个
+    assert _timeout_for(layout, "othernode:human") == DEFAULT_TASK_TIMEOUT
+    assert _timeout_for(layout, "role:worker") == DEFAULT_TASK_TIMEOUT
+    assert _timeout_for(layout, "nobody") == DEFAULT_TASK_TIMEOUT
+    # 本节点显式写全名的仍然认得出来
+    assert _timeout_for(layout, "testnode:human") == DEFAULT_BRIDGE_TASK_TIMEOUT

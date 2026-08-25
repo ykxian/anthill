@@ -29,6 +29,7 @@ MARK = {
     StepState.DONE: "✓",
     StepState.FAILED: "✗",
     StepState.SKIPPED: "⊘",
+    StepState.NOT_NEEDED: "·",
 }
 POLL_INTERVAL = 0.5
 
@@ -38,6 +39,7 @@ STYLE = {
     StepState.DONE: "green",
     StepState.FAILED: "bold red",
     StepState.SKIPPED: "dim red",
+    StepState.NOT_NEEDED: "dim",
 }
 
 

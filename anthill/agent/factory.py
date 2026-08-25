@@ -53,7 +53,10 @@ def build_handler(
                 timeout=config.runtime.ask_timeout,
             ),
             blackboard=Blackboard(layout.blackboard),
-            settings=CoordinatorSettings(step_timeout=config.runtime.task_timeout),
+            settings=CoordinatorSettings(
+                step_timeout=config.runtime.task_timeout,
+                bridge_step_timeout=config.runtime.bridge_task_timeout,
+            ),
         )
 
     if agent.bridge:
@@ -94,7 +97,10 @@ def build_handler(
         return CoordinatorHandler(
             provider=provider,
             blackboard=blackboard,
-            settings=CoordinatorSettings(step_timeout=config.runtime.task_timeout),
+            settings=CoordinatorSettings(
+                step_timeout=config.runtime.task_timeout,
+                bridge_step_timeout=config.runtime.bridge_task_timeout,
+            ),
             judge_provider=judge,
         )
 
