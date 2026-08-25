@@ -422,6 +422,112 @@ def test_the_page_shows_what_two_agents_said_to_each_other(
     page.close()
 
 
+def test_wide_screens_are_not_half_empty(browser: object, panel: str) -> None:
+    """任务看板 / 工作区 / 配置这几页在宽屏上要用得起宽度。
+
+    以前 `.hold` 给它们统一封 940px：1920 的屏上只用了 57%，右边空 698px。
+    浪费空间只是表象，真正的代价是**一边空着一边遮信息** —— 工作区页的路径
+    同时被截成 `…d4c25892…`，而一个读不全的路径基本等于没有。
+    """
+    page, errors = open_panel(browser, panel)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+    page.set_viewport_size({"width": 1920, "height": 950})
+    page.wait_for_timeout(400)
+
+    for pane in ("runs", "setup", "config"):
+        page.click(f'.tab[data-pane="{pane}"]')
+        page.wait_for_timeout(500)
+        used = page.evaluate(
+            """(pane) => {
+              const el = document.getElementById('pane-' + pane);
+              const main = document.querySelector('main').getBoundingClientRect();
+              const left = el.getBoundingClientRect().left;
+              let widest = 0;
+              for (const kid of el.querySelectorAll('*')) {
+                const k = kid.getBoundingClientRect();
+                if (k.width > 0) widest = Math.max(widest, k.right - left);
+              }
+              return Math.round(100 * widest / main.width);
+            }""",
+            pane,
+        )
+        assert used >= 80, f"{pane} 页在 1920 宽下只用了 {used}% 的可用宽度"
+
+    assert errors == []
+    page.close()
+
+
+def test_a_workspace_path_keeps_its_tail_visible(browser: object, panel: str) -> None:
+    """路径要**从中间断**，不能从尾部截。
+
+    `text-overflow: ellipsis` 只截尾巴，而尾巴恰恰是区分「哪个工作区」的
+    那一段：截完剩下的 `/tmp/claude-1000/-home-cs-students-...` 在同一台
+    机器上每行都一样 —— 保住了没信息量的一半，丢掉了唯一有信息量的一半。
+    """
+    page, errors = open_panel(browser, panel)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+    page.click('.tab[data-pane="setup"]')
+    page.wait_for_selector(".ws .path .tail", timeout=15000)
+
+    # **必须造一条挤得满的路径。** 测试用的临时目录只有 `…/tmpXXXX/ws` 那么长
+    # （量过 97px），怎么改都截不着 —— 断言恒真，测试空转。第一版就是这么绿着
+    # 放过去的，退回旧实现也照样通过。
+    long_path = "/tmp/" + "/".join(f"very-long-segment-{i}" for i in range(12)) + "/the-real-one"
+    page.evaluate(
+        """(p) => {
+          const rows = document.querySelectorAll('.ws .path');
+          if (!rows.length) throw new Error('工作区页没有行');
+          const parts = p.split('/');
+          const tail = parts.slice(-2).join('/');
+          const head = parts.slice(0, -2).join('/') + '/';
+          rows[0].querySelector('.head').textContent = head;
+          rows[0].querySelector('.tail').textContent = tail;
+        }""",
+        long_path,
+    )
+    page.wait_for_timeout(200)
+
+    checked = page.evaluate(
+        """() => {
+          const t = document.querySelector('.ws .path .tail');
+          const h = document.querySelector('.ws .path .head');
+          return {
+            tailCut: t.scrollWidth - t.clientWidth,   // 尾部必须 0：flex:none 不许它缩
+            headCut: h.scrollWidth - h.clientWidth,   // 头部该被吃掉，证明确实挤满了
+          };
+        }"""
+    )
+    assert checked["headCut"] > 0, "路径没挤满，这条断言是空转的"
+    assert checked["tailCut"] == 0, f"路径尾部被截了 {checked['tailCut']}px —— 尾巴才是有信息的那半"
+    # 每行还得能一键复制完整路径 —— tooltip 选不中也复制不了
+    assert page.locator(".ws [data-copy-text]").count() > 0, "工作区行没有复制完整路径的入口"
+
+    assert errors == []
+    page.close()
+
+
+def test_prose_stays_readable_even_on_a_wide_screen(browser: object, panel: str) -> None:
+    """放宽容器**不能**把正文一起铺开 —— 一行 1500px 的说明文字没人读得下去。
+
+    这是「容器全宽 + 少数几处收回来」这条规则的另一半：如果只做了放宽，
+    桥接页的消息正文和这里的说明文字会一起变差，那是净损失不是少赚。
+    """
+    page, errors = open_panel(browser, panel)
+    page.wait_for_selector("#topo-body .card", timeout=15000)
+    page.set_viewport_size({"width": 1920, "height": 950})
+    page.click('.tab[data-pane="setup"]')
+    page.wait_for_selector("#pane-setup .why", timeout=15000)
+    page.wait_for_timeout(300)
+
+    width = page.evaluate(
+        "() => Math.round(document.querySelector('#pane-setup .why').getBoundingClientRect().width)"
+    )
+
+    assert width <= 800, f"说明文字铺到了 {width}px，太长不好读"
+    assert errors == []
+    page.close()
+
+
 def test_the_chat_layout_does_not_overlap_at_any_width(
     browser: object, panel_with_peer_chat: str
 ) -> None:

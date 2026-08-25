@@ -153,7 +153,30 @@ main { overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
   .pane:not([hidden]) { animation: rise 200ms cubic-bezier(0.2, 0, 0, 1); }
   @keyframes rise { from { opacity: 0; transform: translateY(4px); } }
 }
-.hold { max-width: 940px; }
+/* ---- 宽度：按内容类型分开，不是一刀切 ----
+   `.hold` 原来给这四页统一封 940px。它对**正文**是对的（长行难读，
+   一行 65~75 字符是舒服的上限），但那四页装的大多不是正文，是路径、
+   步骤行、TOML —— 于是 1920 的屏上只用了 57%，右边空 698px，
+   而工作区页的路径同时被截成 `…d4c25892…`：**一边空着一边遮信息**。
+   一个读不全的路径基本等于没有，这页的用处就是让你认出「这是哪个工作区」。
+
+   现在：容器放宽到 `--pane-max`，正文单独用 `.prose` 收窄。
+   不完全放开是因为 2560 的屏上铺满会稀得难看。 */
+:root { --pane-max: 1500px; }
+.hold { max-width: var(--pane-max); }
+/* **只有「读的」东西收回来，其余默认全宽。**
+   反过来做（把每个元素都归一次类）会变成一笔要长期还的分类债：以后每加
+   一个元素都得有人判一次，判错还不报错。而「全宽」恰恰是路径、命令、
+   表格、TOML 的正确默认值 —— 需要例外的只有下面这几处。
+
+   收在**文本元素**上，不收在包着它的卡片上：`.waiting` 里除了 `.said`
+   还有回复用的 textarea，而替人回消息时正文常常带代码，那个框**该**宽。 */
+.prose,
+.pane .why,
+.card-block .why,
+.waiting .said,
+.xchg .line,
+.run-result { max-width: 68ch; }
 
 /* ---- 通用零件 ---- */
 .row { display: flex; align-items: center; gap: 9px; }
@@ -508,7 +531,20 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
 .ws:hover { box-shadow: var(--shadow); }
 .ws.now { border-color: color-mix(in srgb, var(--accent) 32%, transparent); background: var(--accent-soft); }
 .ws .name { font-weight: 600; }
-.ws .path { font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+/* 路径**从中间断**，不从尾部截。
+   以前用 `.truncate`，而 `text-overflow: ellipsis` 只截尾巴 —— 偏偏尾巴才是
+   区分「哪个工作区」的那一段。截完剩下的
+   `/tmp/claude-1000/-home-cs-students-...` 在同一台机器上每行都一模一样：
+   **保住了没信息量的一半，丢掉了唯一有信息量的一半。**
+
+   做法是把路径切成两段摆进一个 flex：头部可缩、先被吃掉；尾部（最后两段
+   路径）`flex: none`，永远看得见。比 `direction: rtl` 那个技巧稳 ——
+   后者会让开头的 `/` 之类标点被 bidi 重排到视觉末尾。 */
+.ws .path { display: flex; min-width: 0; font-family: var(--mono); font-size: 11.5px; }
+.ws .path .head {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim);
+}
+.ws .path .tail { flex: none; white-space: nowrap; color: var(--muted); }
 .crumbs { display: flex; gap: 9px; align-items: center; padding: 4px 0 10px; flex-wrap: wrap; }
 .crumbs code { color: var(--muted); }
 .dirs {
@@ -532,7 +568,10 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
 .card-block .why { margin: 0 0 12px; font-size: 12.5px; color: var(--dim); }
 #config-text { width: 100%; min-height: 280px; resize: vertical; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; }
 /* 配置页概览卡片 + 常用字段 + 保存前的 diff 确认 */
-.cfg-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin: 0 0 14px; }
+/* 下限从 230px 提到 300px：容器放宽之后，230 在 1500px 里能排到 6 列，
+   而卡片只有 4 张 —— 结果是「排布随容器宽度跳」，一会儿 3+1 一会儿 4+0。
+   300px 让它稳定在 4 列（宽屏）或 2×2（窄屏），两种都是整齐的。 */
+.cfg-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; margin: 0 0 14px; }
 .cfg-card { border: 1px solid var(--line-soft); border-radius: var(--r); padding: 10px 12px; background: var(--surface-2); }
 .cfg-card h4 { margin: 0 0 6px; font-size: 12px; color: var(--muted); font-weight: 600; }
 .cfg-card .meta { line-height: 1.7; }
@@ -2344,6 +2383,29 @@ for (const tab of document.querySelectorAll(".tab")) {
 const picker = { at: "", ready: true };
 const ready = { ready: true };
 
+// 末尾保留几段路径。一段常常不够（一堆工作区都叫 demo），两段基本能认出来。
+const PATH_TAIL_SEGMENTS = 2;
+
+// 把路径切成「可缩的头」和「永不缩的尾」，再配一个复制按钮。
+//
+// 为什么不用 title：tooltip 选不中、复制不了、触屏上根本不出现，而人看完
+// 工作区路径的下一个动作通常就是复制它。面板里本来就有 `data-copy-text`
+// 这个现成机制（桥接页的命令在用），复用它比加个 tooltip 有用。
+function renderPath(path) {
+  const text = String(path || "");
+  const parts = text.split("/");
+  // 少于 tail 段数就整条当尾巴 —— 短路径没什么可截的
+  const cut = parts.length > PATH_TAIL_SEGMENTS ? parts.length - PATH_TAIL_SEGMENTS : 0;
+  const head = parts.slice(0, cut).join("/") + (cut ? "/" : "");
+  const tail = parts.slice(cut).join("/");
+  return `
+    <span class="path grow">
+      <span class="head">${esc(head)}</span><span class="tail">${esc(tail)}</span>
+    </span>
+    <button class="ghost tiny" type="button" data-copy-text="${esc(text)}"
+            title="复制完整路径">复制</button>`;
+}
+
 function renderWorkspaces(info) {
   ready.ready = info.ready;
   syncLocalNodes(info);
@@ -2363,7 +2425,7 @@ function renderWorkspaces(info) {
         <span class="dot ${here ? "on" : ""}"></span>
         <span class="name">${esc(w.name)}</span>
         <span class="pill">${esc(w.node || "未命名")}</span>
-        <span class="path grow truncate">${esc(w.path)}</span>
+        ${renderPath(w.path)}
         ${here
           ? `<span class="meta">正在操作这个${w.current ? "" : "（主节点是 " + esc(info.node) + "）"}</span>`
           : `${w.attached
