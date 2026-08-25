@@ -302,7 +302,38 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
 .step.skipped { border-left-color: var(--dim); }
 .step .sid { font-family: var(--mono); color: var(--dim); min-width: 30px; }
 .step .who { color: var(--accent); min-width: 90px; }
-.step .what { color: var(--muted); }
+/* 摘要**单行截断**：看板是用来扫的，一行一步，视线才有落点。
+   完整正文在展开区里，不跟这一行抢空间。 */
+.step .what {
+  color: var(--muted); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.step .fold { flex: none; width: 12px; color: var(--accent); font-size: 10px; }
+.step.can-open { cursor: pointer; border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+.step.can-open:hover { background: var(--surface-2); }
+.step.can-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* 展开区：正经渲染的交付说明。左缩进对齐到摘要那一列，一眼看出它属于哪一步。 */
+.step-full {
+  margin: 4px 0 10px 42px; padding: 10px 14px;
+  background: var(--surface-2); border-left: 2px solid var(--line);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  font-size: 12.5px; max-width: 78ch;
+}
+.step-full > :first-child { margin-top: 0; }
+.step-artifacts { margin: 2px 0 6px 42px; font-size: 11.5px; color: var(--dim); }
+
+/* 结论默认收起：它把每一步的交付又复述一遍，动辄几千字 —— 摊开会把整块
+   看板顶到屏幕外，而人多数时候只想看步骤状态。 */
+.run-result-box { margin-top: 10px; border-top: 1px dashed var(--line-soft); padding-top: 8px; }
+.run-result-box > summary {
+  cursor: pointer; font-size: 12.5px; color: var(--muted); list-style: none;
+}
+.run-result-box > summary::-webkit-details-marker { display: none; }
+.run-result-box > summary::before { content: "▸ "; color: var(--accent); }
+.run-result-box[open] > summary::before { content: "▾ "; }
+.run-result-box > summary:hover { color: var(--ink); }
+.run-result { margin-top: 8px; font-size: 13px; }
 
 /* ---- 消息流：等宽对齐的时间线，密度优先 ---- */
 #stream-body { font-family: var(--mono); font-size: 12px; line-height: 1.75; }
@@ -1047,6 +1078,44 @@ const topoOpen = new Set();
 // 而 CLI 侧连列出历史任务的命令都没有（现在有 `anthill runs`）。
 const DONE_RUNS_SHOWN = 20;
 
+// 展开了哪几步。和 topoOpen 一样放模块级：看板每几秒重画一次，
+// 状态搁在 DOM 里会被 paint 抹掉 —— 人刚展开就被收回去。
+const stepsOpen = new Set();
+
+// coordinator 派活时会在正文后面追加这几段脚手架。它们对**执行者**有用
+// （告诉他产物往哪放），但在看板的一行摘要里是纯噪音 —— 每一步都一样，
+// 而且长度经常超过真正的交付说明本身。
+const SCAFFOLD_HEADINGS = ["## 本步所属目标", "## 你的产物放这里", "## 上游步骤的交付"];
+
+// 砍掉脚手架段落，只留下这一步自己说的话。
+function stripScaffold(text) {
+  let out = String(text || "");
+  for (const heading of SCAFFOLD_HEADINGS) {
+    const at = out.indexOf(heading);
+    if (at >= 0) out = out.slice(0, at);
+  }
+  return out.trim();
+}
+
+// 把一份 Markdown 交付说明压成一行能扫的摘要。
+//
+// 交付说明**是 Markdown**（标题、代码块、表格、粗体，动辄两三千字），
+// 以前直接 esc() 塞进一行截断 —— 于是看板上是一串字面量 `**`、`##`、
+// `|---|` 挤在一起，还被切一半。**要么渲染它，要么别把标记拿给人看；
+// 夹在中间是最差的那种。**
+//
+// 这里走「别拿给人看」：摘要只要一行，标记洗掉。完整原文在展开区里
+// 用 md() 正经渲染。
+function plainPreview(text, limit = 160) {
+  const body = stripScaffold(text)
+    .replace(/```[\s\S]*?```/g, " ")      // 代码块整段拿掉：一行摘要放不下
+    .replace(/^\s*[#>|].*$/gm, " ")       // 标题、引用、表格行
+    .replace(/[*`_]/g, "")                // 粗体/行内代码的标记
+    .replace(/\s+/g, " ")
+    .trim();
+  return body.length > limit ? body.slice(0, limit - 1) + "…" : body;
+}
+
 // 有危险操作停在那里等人点头时，**至少要让人看见**。
 // 「不能在面板上批」是有意的边界（确认必须在 CLI），但把边界画在「看不见」就是缺陷：
 // agentd 停着等，而用户在任何界面里都不知道系统在等他。
@@ -1095,20 +1164,45 @@ function renderRuns(nodes) {
         <span class="pill ${r.finished ? "ok" : ""}">${r.finished ? "已完成" : "进行中"}</span>
       </div>
       <div class="steps">
-        ${(r.steps || []).map(s => `
-          <div class="step ${esc(s.state)}">
-            <span class="sid">${esc(s.id)}</span>
-            <span class="who truncate">${esc(s.assignee)}</span>
-            <span class="what grow truncate">${esc(s.detail)}</span>
-            ${s.attempts > 1 ? `<span class="pill warn">试了 ${esc(s.attempts)} 次</span>` : ""}
-            ${s.elapsed ? `<span class="meta">${esc(s.elapsed)}</span>` : ""}
-          </div>
-          ${(s.artifacts || []).length
-            ? `<div class="step-artifacts">产物：${(s.artifacts || []).map(a => `<code>${esc(a)}</code>`).join(" ")}</div>`
-            : ""}`).join("")}
+        ${(r.steps || []).map(s => renderStep(r, s)).join("")}
       </div>
-      ${r.finished && r.result ? `<div class="run-result">${esc(r.result)}</div>` : ""}
+      ${r.finished && r.result
+        ? `<details class="run-result-box">
+             <summary>这次协作的结论</summary>
+             <div class="run-result mdown">${md(stripScaffold(r.result))}</div>
+           </details>`
+        : ""}
     </div>`).join(""));
+}
+
+// 一步一行：默认只给一行能扫的摘要，点开才展开完整交付说明。
+//
+// 交付说明动辄两三千字的 Markdown，全摊在看板上就没法「扫」了 —— 而看板的
+// 用处恰恰是一眼看出「谁卡住了、哪步失败了」。所以默认折叠、按需展开，
+// 而不是把长文截断塞进一行（那样两头不讨好：既扫不了也读不了）。
+function renderStep(run, s) {
+  const key = `${run.task_id || run.where}:${s.id}`;
+  const open = stepsOpen.has(key);
+  const full = stripScaffold(s.detail);
+  const preview = plainPreview(s.detail);
+  // 摘要和原文一样长时就没有「展开」可言了 —— 那种步骤（比如「本步跳过」）
+  // 不该摆一个点了什么都不变的箭头
+  const expandable = Boolean(full) && full.length > preview.length;
+  return `
+    <div class="step ${esc(s.state)} ${expandable ? "can-open" : ""}"
+         ${expandable ? `data-step="${esc(key)}" tabindex="0" role="button"
+                         aria-expanded="${open}"` : ""}>
+      <span class="fold">${expandable ? (open ? "▾" : "▸") : ""}</span>
+      <span class="sid">${esc(s.id)}</span>
+      <span class="who truncate">${esc(s.assignee)}</span>
+      <span class="what grow">${esc(preview) || `<span class="meta">（没有交付说明）</span>`}</span>
+      ${s.attempts > 1 ? `<span class="pill warn">试了 ${esc(s.attempts)} 次</span>` : ""}
+      ${s.elapsed ? `<span class="meta">${esc(s.elapsed)}</span>` : ""}
+    </div>
+    ${open ? `<div class="step-full mdown">${md(full)}</div>` : ""}
+    ${(s.artifacts || []).length
+      ? `<div class="step-artifacts">产物：${(s.artifacts || []).map(a => `<code>${esc(a)}</code>`).join(" ")}</div>`
+      : ""}`;
 }
 
 // CLI 显示 `#2BKPZ5 thread=W7BT1K`，面板却显示完整 ULID —— 一行的大半被
@@ -2509,6 +2603,15 @@ document.addEventListener("click", (event) => {
     $("topo-body").querySelector?.(`[data-toggle-node="${CSS.escape(name)}"]`)?.focus();
     return;
   }
+  const step = event.target.closest?.("[data-step]");
+  if (step) {
+    const key = step.dataset.step;
+    if (stepsOpen.has(key)) stepsOpen.delete(key); else stepsOpen.add(key);
+    renderRuns(state.nodes);
+    // 重画把这一行销毁了，键盘用户的焦点会掉回 body —— 找回同一步
+    $("runs-body").querySelector?.(`[data-step="${CSS.escape(key)}"]`)?.focus();
+    return;
+  }
   const switchTo = event.target.closest?.("[data-ws-node]");
   if (switchTo) { switchNode(switchTo.dataset.wsNode); return; }
   // 认 data-ws-op 而不是 data-ws —— 对话卡片也背着 data-ws（标这段属于哪个
@@ -2530,7 +2633,8 @@ document.addEventListener("click", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") return;
   if (event.target.closest?.("button, input, select, textarea, a")) return;
-  const head = event.target.closest?.("[data-focus-node], [data-toggle-node], [data-thread]");
+  const head = event.target.closest?.(
+    "[data-focus-node], [data-toggle-node], [data-thread], [data-step]");
   if (!head) return;
   event.preventDefault();  // 空格默认滚动页面
   head.click();

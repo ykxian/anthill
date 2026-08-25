@@ -91,7 +91,7 @@ const panel = new Function(
   "setTimeout",
   // setWrite：写权限开着时拓扑会多画启停/删除按钮和「加 Agent」表单，
   // 那几处也把外部数据拼进了 HTML，必须一起验
-  `${script}\nreturn { state, local, topoOpen, draw, applyCluster, applyLocal, renderWorkspaces, chat, renderChat, md, patchToml, diffLines, renderDiff, setWrite: (v) => { canWrite = v; } };`,
+  `${script}\nreturn { state, local, topoOpen, draw, applyCluster, applyLocal, renderWorkspaces, chat, renderChat, md, plainPreview, stripScaffold, patchToml, diffLines, renderDiff, setWrite: (v) => { canWrite = v; } };`,
 )(document, window, localStorage, history, URL, location, fetch, WebSocket, noop, noop);
 
 // ---- 数据 ----
@@ -484,6 +484,48 @@ listed = $("chat-body").innerHTML;
 assert.ok(listed.includes("echo") && !listed.includes("tst9"), "Agent 筛选没生效");
 panel.chat.agent = "";
 panel.chat.thread = "";
+
+// ---- 任务看板：交付说明是 Markdown，别把标记当字面量摊给人看 ----
+//
+// 步骤的 detail 动辄两三千字，带标题、代码块、表格。以前直接 esc() 塞进
+// 一行截断，于是看板上是一串字面量 `**` `##` `|---|` 挤在一起还被切一半。
+const DELIVERY = [
+  "**先纠正一个前提：**这个 bug 上一轮已经修好了。",
+  "",
+  "## 三档深度实测",
+  "",
+  "| 深度 | exit |",
+  "|---|---|",
+  "| 246 | `2` |",
+  "",
+  "```",
+  "74 passed in 3.28s",
+  "```",
+  "",
+  "## 本步所属目标",
+  "带领 tst1、tst2 协作做出一个计算器",
+  "",
+  "## 你的产物放这里",
+  "blackboard://tasks/01ABC/",
+].join("\n");
+
+const preview = panel.plainPreview(DELIVERY);
+assert.ok(!preview.includes("**"), `摘要里还有粗体标记：${preview}`);
+assert.ok(!preview.includes("##"), `摘要里还有标题标记：${preview}`);
+assert.ok(!preview.includes("|---|"), `摘要里还有表格分隔行：${preview}`);
+assert.ok(!preview.includes("74 passed"), "代码块该整段拿掉，一行摘要放不下");
+assert.ok(preview.includes("先纠正一个前提"), `摘要丢了正文：${preview}`);
+// 脚手架是 coordinator 给**执行者**看的，每一步都一样 —— 摘要里是纯噪音
+assert.ok(!preview.includes("本步所属目标"), "摘要里混进了脚手架段落");
+assert.ok(!preview.includes("blackboard://"), "摘要里混进了脚手架段落");
+
+const stripped = panel.stripScaffold(DELIVERY);
+assert.ok(stripped.includes("三档深度实测"), "正文被砍多了");
+assert.ok(!stripped.includes("你的产物放这里"), "脚手架没砍干净");
+// 完整正文走 md() 正经渲染 —— 这是「要么渲染它、要么别把标记拿给人看」的另一半
+const rendered = panel.md(stripped);
+assert.ok(rendered.includes('class="md-h"'), "展开区没把标题渲染出来");
+assert.ok(rendered.includes('class="md-code"'), "展开区没把代码块渲染出来");
 
 panel.chat.data = { threads: [] };
 panel.renderChat();
