@@ -17,6 +17,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -159,7 +160,13 @@ class Envelope(BaseModel):
                 kind = MessageType(msg_type)
             except ValueError as exc:
                 raise ValueError(f"未知消息类型 {msg_type!r}") from exc
-            raw["payload"] = PAYLOAD_MODELS[kind].model_validate(payload)
+            payload_data = dict(payload)
+            if kind is MessageType.CHAT:
+                # 0.26.1 开发期曾短暂把这项写进 ChatPayload，随后为了旧节点的
+                # extra=forbid 兼容又从线协议删除。已经落盘的信封仍得能读；只吞
+                # 这一项明确废弃的字段，其他未知字段继续严格拒绝。
+                payload_data.pop("expects_reply", None)
+            raw["payload"] = PAYLOAD_MODELS[kind].model_validate(payload_data)
 
         if raw.get("expires_at") is None:
             ts = raw.get("ts")
@@ -259,7 +266,12 @@ class Envelope(BaseModel):
             parsed = json.loads(data)
         except json.JSONDecodeError as exc:
             raise ProtocolError(f"信封不是合法 JSON：{exc}") from exc
-        return cls.model_validate(parsed)
+        try:
+            return cls.model_validate(parsed)
+        except ValidationError as exc:
+            # 文件邮箱、流量页等边界统一 catch ProtocolError。若把 pydantic 的
+            # 实现异常漏出去，一份坏历史文件就会让整个 ASGI 请求变成 500。
+            raise ProtocolError(f"信封 schema 非法：{exc}") from exc
 
     def canonical_bytes(self) -> bytes:
         """签名用的规范化字节串：去掉 sig、键排序、无多余空白（02-protocol §6）。"""

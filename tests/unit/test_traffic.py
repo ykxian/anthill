@@ -141,6 +141,17 @@ def test_empty_workspace_is_empty_not_an_error(tmp_path: Path) -> None:
     assert conversations(_layout(tmp_path))["threads"] == []
 
 
+def test_schema_invalid_history_is_skipped_instead_of_breaking_the_panel(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    done = layout.mailbox_dir("tst1") / "inbox" / "done" / "2026-08-27"
+    done.mkdir(parents=True, exist_ok=True)
+    (done / "01J00000000000000000000BAD.json").write_text(
+        '{"valid_json": "but not an envelope"}', encoding="utf-8"
+    )
+
+    assert conversations(layout)["threads"] == []
+
+
 def test_threads_with_a_human_agent_are_flagged(tmp_path: Path) -> None:
     """「你跟 Agent 说的」和「Agent 之间说的」是两个问题 —— 页面上要能分开看。"""
     # Arrange

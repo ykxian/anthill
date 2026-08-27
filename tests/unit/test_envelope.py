@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 
 import pytest
@@ -231,6 +232,37 @@ def test_canonical_bytes_excludes_signature_and_sorts_keys(make_task):
 def test_from_json_bytes_rejects_garbage():
     with pytest.raises(ProtocolError):
         Envelope.from_json_bytes(b"{ not json")
+
+
+def test_from_json_bytes_reads_chat_from_short_lived_expects_reply_schema(addr):
+    """开发期落盘的 expects_reply 不该让升级后的面板和邮箱一起崩掉。"""
+    env = Envelope.new(
+        sender=addr("alpha"),
+        recipient=addr("beta"),
+        type=MessageType.CHAT,
+        payload=ChatPayload(body="旧信封", mentions=("reviewer",)),
+    )
+    raw = env.model_dump(mode="json", by_alias=True)
+    raw["payload"]["expects_reply"] = True
+
+    restored = Envelope.from_json_bytes(json.dumps(raw).encode())
+
+    assert restored.payload == ChatPayload(body="旧信封", mentions=("reviewer",))
+    assert b"expects_reply" not in restored.to_json_bytes()
+
+
+def test_legacy_migration_does_not_allow_other_unknown_payload_fields(addr):
+    env = Envelope.new(
+        sender=addr("alpha"),
+        recipient=addr("beta"),
+        type=MessageType.CHAT,
+        payload=ChatPayload(body="仍然严格"),
+    )
+    raw = env.model_dump(mode="json", by_alias=True)
+    raw["payload"]["surprise"] = True
+
+    with pytest.raises(ProtocolError, match="schema"):
+        Envelope.from_json_bytes(json.dumps(raw).encode())
 
 
 def test_receipt_payload_carries_reference(make_task, addr):
