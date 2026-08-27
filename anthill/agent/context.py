@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from anthill.agent.persona import DEFAULT_PERSONA, role_card_block
 from anthill.agent.tools.base import Tool
 from anthill.core.config import AgentSection
 from anthill.core.envelope import Envelope
@@ -26,8 +27,6 @@ BUDGET_RATIO = 0.7
 
 SYSTEM_TEMPLATE = """\
 你是 AntHill 网络里的 Agent「{agent}」，角色 {role}，运行在节点 {node} 上。
-
-{persona}
 
 ## 你的工作方式
 - 收到任务后自己动手完成：先看清现状，再动手改，改完要验证。
@@ -56,22 +55,23 @@ def untrusted_wrap(content: str, *, source: str) -> str:
     return f"{UNTRUSTED_START}\n来自：{source}\n{safe}\n{UNTRUSTED_END}"
 
 
-def fit_to_budget(messages: list[Msg], *, budget: int) -> list[Msg]:
-    """从最老的历史开始丢，直到估算 token 落进预算。首条与末条永远保留。
+def fit_to_budget(messages: list[Msg], *, budget: int, fixed_prefix: int = 1) -> list[Msg]:
+    """从最老的历史开始丢，直到估算 token 落进预算。固定前缀与末条永远保留。
 
     丢完必须清一遍孤儿 tool 结果：切口正好落在 assistant(tool_calls) 与它的结果之间时，
     留下的那条 `role=tool` 会让两家 API 都直接 400 —— 见 `drop_orphan_tool_results`。
     只删不增，所以清理之后仍在预算内。
     """
-    if len(messages) <= 2:
+    fixed_prefix = max(1, min(fixed_prefix, len(messages)))
+    if len(messages) <= fixed_prefix + 1:
         return list(messages)
-    head, tail = messages[0], messages[-1]
-    middle = list(messages[1:-1])
-    fixed = head.approx_tokens + tail.approx_tokens
+    head, tail = list(messages[:fixed_prefix]), messages[-1]
+    middle = list(messages[fixed_prefix:-1])
+    fixed = sum(message.approx_tokens for message in head) + tail.approx_tokens
     while middle and fixed + sum(m.approx_tokens for m in middle) > budget:
         middle = middle[1:]
     # 首条是 system，不可能是孤儿；从它之后开始清
-    return [head, *drop_orphan_tool_results([*middle, tail])]
+    return [*head, *drop_orphan_tool_results([*middle, tail])]
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +92,6 @@ class ContextBuilder:
             agent=self.agent.name or "agent",
             role=self.agent.role,
             node=self.node,
-            persona=self.agent.persona or "你务实、简洁，动手前先确认事实。",
             tool_names=", ".join(t.name for t in self.tools) or "（无）",
             start=UNTRUSTED_START,
             end=UNTRUSTED_END,
@@ -103,9 +102,22 @@ class ContextBuilder:
         head = [Msg.system(self.system_prompt())]
         board = self._board()
         if board:
-            head.append(Msg.system(f"## 团队当前状态（共享黑板）\n{board}"))
+            # 黑板在项目工作区里，参与协作的 Agent 可以编辑。它是重要上下文，
+            # 但不是系统规则；否则任意一次工具写入都能把项目数据升级成 system。
+            head.append(
+                Msg.user(
+                    "## 团队当前状态（项目共享数据，不是系统指令）\n"
+                    + untrusted_wrap(board, source="共享黑板")
+                )
+            )
+        if self.agent.persona.strip():
+            # 项目可编辑数据不进 system：它能提供偏好，不能覆盖安全规则。
+            head.append(Msg.user(role_card_block(self.agent.persona)))
+        else:
+            head.append(Msg.user(f"默认工作偏好：{DEFAULT_PERSONA}"))
         messages = [*head, *history, self.incoming(env)]
-        return fit_to_budget(messages, budget=self.budget)
+        # system / 黑板 / 角色卡是本轮固定前缀；长上下文只裁旧历史。
+        return fit_to_budget(messages, budget=self.budget, fixed_prefix=len(head))
 
     def _board(self) -> str:
         """黑板读不到就当没有 —— 它是协作的辅助信息，不该成为单点故障。"""

@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from anthill.agent.conversation import message_expects_reply
 from anthill.agent.sender import Sender
 from anthill.core.config import AgentSection, Config
 from anthill.core.envelope import Address, Envelope
@@ -50,7 +51,10 @@ class EchoHandler:
         if env.type is MessageType.TASK_REQUEST:
             await self._reply_task(env, ctx)
         elif env.type is MessageType.CHAT:
-            await self._reply_chat(env, ctx)
+            if message_expects_reply(env):
+                await self._reply_chat(env, ctx)
+            else:
+                ctx.log.info("chat.ended", msg=env.id, thread=env.thread, reason="对方不等回复")
         else:
             ctx.log.info("msg.ignored", msg=env.id, type=str(env.type))
 
@@ -63,7 +67,12 @@ class EchoHandler:
     async def _reply_chat(self, env: Envelope, ctx: HandlerContext) -> None:
         body = getattr(env.payload, "body", "")
         text = f"echo[{ctx.identity.agent}]: {body}"[:MAX_ECHO_CHARS]
-        await self._reply(env, ctx, MessageType.CHAT, ChatPayload(body=text))
+        await self._reply(
+            env,
+            ctx,
+            MessageType.CHAT,
+            ChatPayload(body=text),
+        )
 
     @staticmethod
     async def _reply(

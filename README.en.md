@@ -4,7 +4,7 @@
 > Ants don't hold meetings — they leave pheromones in the environment, and whoever
 > walks past reads them and carries on.
 
-[中文 README](./README.md) · design docs in [`docs/`](./docs) (start with [00-prd](./docs/00-prd.md))
+[中文 README](./README.md)
 
 ## One axiom
 
@@ -149,6 +149,9 @@ be tested on their own, or handed to "human agents" (which is exactly how this p
   not "the model says it's done", and not the hop circuit breaker (that's a protocol-level
   backstop; if it trips, something is wrong).
 - **Writable panel** (`--panel-write`): start runs, send messages, edit node.toml in place.
+  It also restarts running stale agentd processes after Python source has been stable for ten
+  seconds, waiting for the current message to finish first. Stopped agents stay stopped; use
+  `--no-auto-restart-agents` to disable this development convenience.
 
 **One panel for every machine (M8)**
 
@@ -272,8 +275,14 @@ model = "deepseek-chat"
 [agents.coder]
 role = "worker"
 provider = "deepseek"
+persona = "Prefer minimal changes; inspect the current code before editing."
 tools = ["read_file", "write_file", "list_dir", "run_shell", "finish"]
 ```
+
+`persona` is an optional role card for responsibilities, expertise, and working style. Each
+Agent card in the panel provides a direct editor. The value lives in `.anthill/node.toml`;
+restart agentd or reconnect an interactive session after changing it. Role cards never grant
+tools or bypass approvals.
 
 ```bash
 export DEEPSEEK_API_KEY=sk-...
@@ -317,6 +326,12 @@ uv run anthill log boss --follow                 # structured event stream
 role = "worker"
 command = ["claude", "-p"]     # a command means the adapter path — no provider needed
 
+[agents.codex]
+role = "worker"
+command = ["codex", "exec", "--approve-for-me", "--skip-git-repo-check",
+           "--color", "never", "--ephemeral"]
+prompt_via = "stdin"            # no shell quoting or argv-size limit
+
 [agents.session]
 role = "worker"
 bridge = true                  # a long-running interactive session, or just you
@@ -328,6 +343,35 @@ messages land as `.md` files under `agents/<name>/bridge/inbox/`, replies go int
 file with a `to:` header is a message *you* initiate, which is how a human cuts into a
 collaboration already in progress.
 
+To keep a normal interactive Codex TUI while also responding automatically to AntHill mail,
+start or attach it through the Codex bridge:
+
+```bash
+uv run anthill codex session -w /your/workspace
+```
+
+From a regular shell, the command starts a private loopback-only app-server and a managed TUI.
+To connect an already running foreground, get the thread ID from `/status` and run this in a
+separate terminal:
+
+```bash
+uv run anthill codex session --attach <thread-id> -w /your/workspace
+```
+
+Attach mode uses Codex's native session queue, so incoming mail, progress, and the answer are
+visible in the original TUI; a read-only app-server delivers the final answer through the
+existing outbox protocol without competing for the thread writer. `--resume` automatically
+falls back to this mode on an active-writer error. MCP remains pull-based. For a standalone
+unattended worker with no TUI, use the `codex exec` command agent above.
+
+Managed mode injects the AntHill identity, automatic-reply contract, and proactive-send
+command once when the thread starts or resumes. Later mail contains only a compact
+source/thread/reply header and the untrusted body. Attach cannot rewrite the developer
+instructions of a thread owned by another foreground, so its first queued message carries
+the compatibility rules. An ordinary chat is one request and one terminal answer; only an
+explicit `anthill talk` keeps passing the turn between agents. Pure acknowledgements are
+silently archived instead of starting an acknowledgement loop.
+
 ```bash
 uv run anthill bridge session                                  # what's waiting for me
 uv run anthill bridge session --to coder --text "I'll take this one"
@@ -336,8 +380,9 @@ uv run anthill talk coder reviewer "how should we fix this bug" # two agents, yo
 ```
 
 Note the boundary: an external terminal follows the same envelope, thread and timeout rules
-as a native agent, but **the tool policy engine does not reach inside it** — Claude Code has
-its own permission system, and AntHill does not proxy it.
+as a native agent, but **the tool policy engine does not reach inside it** — Claude Code,
+Codex, and other external clients have their own permission systems, and AntHill does not
+proxy them.
 
 ### One panel for every machine
 
@@ -408,8 +453,7 @@ uv run ruff check anthill tests && uv run ruff format anthill tests
 uv run mypy anthill                     # strict mode
 ```
 
-Tests are organised around the protocol conformance checklist in
-[02-protocol §8](./docs/02-protocol.md): schema validation, atomic writes, concurrent delivery,
+Tests cover the protocol's critical paths: schema validation, atomic writes, concurrent delivery,
 idempotency, the retry state machine, hop-limit circuit breaking, and signature/replay attacks.
 Cross-machine tests spin up a **real in-process SSH + SFTP server** (asyncssh), so they exercise
 real handshakes, real SFTP writes and real renames rather than stubs.

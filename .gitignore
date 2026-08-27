@@ -12,6 +12,11 @@ wheels/
 # AntHill 运行时工作区
 .anthill/
 
+# 仅本地保留、不发布到 GitHub 的内部文档
+/CHANGELOG.md
+/docs/
+/examples/claude-code-hook/README.md
+
 # 测试与覆盖率
 .pytest_cache/
 .coverage

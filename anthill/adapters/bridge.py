@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from anthill.agent.conversation import chat_payload, plan_reply
+from anthill.agent.conversation import chat_payload, message_expects_reply, plan_reply
 from anthill.agent.handlers import HandlerContext
 from anthill.agent.memory import ThreadMemory
 from anthill.core.chat_log import record_outgoing
@@ -50,8 +50,12 @@ MAX_BODY_CHARS = 30_000
 FRONT_MATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", re.S)
 
 AWAITS_REPLY = frozenset({MessageType.TASK_REQUEST, MessageType.CHAT})
-"""别人在**等你回**的：派给你的活、跟你说的话。这些要建 pending（回信要用
-原始信封接住 thread 与 hops）。"""
+"""类型级兼容判定：旧 note 没有 needs_reply 字段时用它兜底。
+
+新信封必须走 message_expects_reply：task.request 一定等回复，chat 用
+reply_to + mentions 区分普通回答和 talk。等待回复的消息才建 pending
+（回信要用原信封接住 thread/hops）。
+"""
 
 SURFACED = AWAITS_REPLY | frozenset({MessageType.TASK_RESULT, MessageType.TASK_ERROR})
 """**写进 inbox 给人看**的全部类型 —— 比「等你回」的多出两种。
@@ -86,15 +90,14 @@ REQUEST_TEMPLATE = """\
 from: {frm}
 to: {to}
 type: {kind}
+needs_reply: {needs_reply}
 thread: {thread}
 id: {msg_id}
 ---
 
 {body}
 
-<!-- 回复：在 ../outbox/{msg_id}.md 写下正文即可（这段注释不用删）。
-     想主动发一条新消息：在 outbox/ 下新建任意文件名的 .md，
-     开头写 --- / to: 某个agent / --- 再写正文。 -->
+<!-- {instruction} -->
 """
 
 
@@ -147,7 +150,7 @@ class BridgeHandler:
         # **只有「在等你回」的才进 pending。** pending 里放的是构造回信要用的
         # 原始信封；task.result / task.error 是**别人给你的答复**，不需要你回，
         # 给它建 pending 只会让 `--ack` 和「待回复」的计数把它算进去。
-        if env.type in AWAITS_REPLY:
+        if message_expects_reply(env):
             self.dir(PENDING).joinpath(f"{env.id}.json").write_bytes(env.to_json_bytes())
         ctx.log.info(
             "bridge.waiting",
@@ -315,14 +318,34 @@ class BridgeHandler:
 
 
 def render_request(env: Envelope) -> str:
+    needs_reply = message_expects_reply(env)
+    instruction = (
+        f"回复：在 ../outbox/{env.id}.md 写下正文即可（这段注释不用删）。\n"
+        "     想主动发一条新消息：在 outbox/ 下新建任意文件名的 .md，\n"
+        "     开头写 --- / to: 某个agent / --- 再写正文。"
+        if needs_reply
+        else "这是答复或通知，不要回信；读完后归档即可。"
+    )
     return REQUEST_TEMPLATE.format(
         frm=str(env.from_),
         to=str(env.to),
         kind=str(env.type),
+        needs_reply=str(needs_reply).lower(),
         thread=env.thread,
         msg_id=env.id,
         body=_incoming_text(env),
+        instruction=instruction,
     )
+
+
+def note_needs_reply(headers: dict[str, str]) -> bool:
+    """新 note 读显式字段，旧 note 退回类型判定，保证升级时未处理来信可继续。"""
+    value = headers.get("needs_reply", "").strip().lower()
+    if value in {"true", "yes", "1"}:
+        return True
+    if value in {"false", "no", "0"}:
+        return False
+    return headers.get("type", "chat") in {str(kind) for kind in AWAITS_REPLY}
 
 
 def parse_note(text: str) -> tuple[dict[str, str], str]:

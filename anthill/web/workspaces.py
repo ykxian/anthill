@@ -100,6 +100,25 @@ def listing(attached: Iterable[Path] = (), primary: Path | None = None) -> list[
     return sorted(out, key=lambda w: (not w["current"], not w["attached"], w["path"]))
 
 
+def paths_for_node(node: str) -> list[Path]:
+    """返回机器清单里属于 ``node`` 的有效本地工作区。
+
+    这不只是给面板列目录：出站传输也要用同一份机器级清单判断一个节点是否
+    就在本机。只看当前 ``node.toml`` 会把另一个已挂载的本机工作区错当远端，
+    继而要求做一次毫无意义的 peer 配对。
+
+    返回列表而不是偷偷挑第一项，是为了让调用方能拒绝重名。信封只写节点名，
+    两个本地工作区同名时根本没有足够信息判断该投给谁。
+    """
+    found: list[Path] = []
+    for item in _read():
+        path = Path(str(item.get("path", ""))).expanduser().resolve()
+        if path in found or not is_workspace(path) or _node_name(path) != node:
+            continue
+        found.append(path)
+    return found
+
+
 def _node_name(path: Path) -> str:
     toml = path / ANTHILL_DIR / "node.toml"
     try:

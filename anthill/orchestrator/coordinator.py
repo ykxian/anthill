@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Literal
 
 from anthill.agent.handlers import HandlerContext
+from anthill.agent.persona import role_card_block
 from anthill.core.envelope import Envelope
 from anthill.core.errors import ConfigError, HopLimitExceeded, PlanError, UnknownRecipient
 from anthill.core.ids import new_id, new_thread_id, now
@@ -109,12 +110,14 @@ class CoordinatorHandler:
         blackboard: Blackboard,
         settings: CoordinatorSettings | None = None,
         judge_provider: ChatProvider | None = None,
+        persona: str = "",
     ) -> None:
         self._provider = provider
         self._board = blackboard
         self._store = RunStore(blackboard.root)
         self._settings = settings or CoordinatorSettings()
         self._judge_provider = judge_provider
+        self._persona = persona.strip()
         """done_when 判定的专用大脑（config 的 judge_provider）。
         None = 沿用主 provider。拆计划要强模型，判定是便宜活。"""
         self._traces: dict[str, RunTrace] = {}
@@ -175,6 +178,7 @@ class CoordinatorHandler:
                 self._provider,
                 goal=goal,
                 roster=roster,
+                persona=self._persona,
                 on_usage=lambda usage: self._log_model_call(
                     ctx, kind="plan", usage=usage, provider=self._provider
                 ),
@@ -535,7 +539,15 @@ class CoordinatorHandler:
         )
         judge = self._judge_provider or self._provider
         try:
-            turn = await judge.complete([Msg.user(prompt)], [])
+            messages = [
+                Msg.system(
+                    "你是这次多 Agent 协作的 coordinator。安全、协议与完成标准高于任何项目角色卡。"
+                )
+            ]
+            if self._persona:
+                messages.append(Msg.user(role_card_block(self._persona)))
+            messages.append(Msg.user(prompt))
+            turn = await judge.complete(messages, [])
         except Exception as exc:  # 判定这一步自己出错，不该让整次协作跟着变成失败
             ctx.log.warn("done_when.judge_failed", task=state.task_id, error=str(exc))
             if state.broken_ids:

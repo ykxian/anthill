@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import signal
 import socket
 from collections.abc import Iterator
@@ -24,6 +25,7 @@ import uvicorn
 from anthill.cli.common import console, fail
 from anthill.core.config import Config
 from anthill.core.errors import AntHillError
+from anthill.core.freshness import newest_code_mtime, stale_since
 from anthill.core.logging import EventLog
 from anthill.core.paths import NodeLayout
 from anthill.core.workspace import load_or_create as load_workspace
@@ -33,10 +35,12 @@ from anthill.security import secrets
 from anthill.security.panel_token import load_or_create, token_path
 from anthill.transport.pull import pull_once, ssh_peers
 from anthill.web.actions import RunRequest, start_run
+from anthill.web.agents import agent_op, running_pid, runtime_path, start_agent, stop_agent
 from anthill.web.app import create_app
 from anthill.web.cluster import write_status
 from anthill.web.context import NodeContext, NodeRegistry
 from anthill.web.workspaces import listing as known_workspaces
+from anthill.web.workspaces import remember as remember_workspace
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 45778
@@ -49,6 +53,10 @@ SCHEDULE_TICK = 10.0
 """定时任务循环多久醒一次。间隔本身由每条 schedule 的 `every` 决定。"""
 IDLE_PULL_INTERVAL = 3600.0
 """所有节点都关了自动拉取时的空转节奏 —— 不退出循环，好让人改了配置之后不用重启。"""
+AUTO_RESTART_INTERVAL = 2.0
+AUTO_RESTART_SETTLE = 10.0
+"""源码连续安静这么久才重启；一组编辑尚未落完时不反复拉进程。"""
+AUTO_RESTART_EXIT_POLL = 0.2
 
 
 def is_loopback(host: str) -> bool:
@@ -87,6 +95,11 @@ def serve_command(
         "--panel-write",
         help="允许面板发起任务与改配置；只能配合回环地址使用",
     ),
+    auto_restart_agents: bool | None = typer.Option(
+        None,
+        "--auto-restart-agents/--no-auto-restart-agents",
+        help="源码更新后自动重启运行中的 agentd；默认随 --panel-write 开启",
+    ),
     remote_admin: bool = typer.Option(
         False,
         "--remote-admin",
@@ -117,6 +130,12 @@ def serve_command(
     `_load_or_setup` 的实现正好相反 —— 而这句才是用户在 `--help` 里看到的那句。
     """
     layout, config, created = _load_or_setup(workspace)
+    # agentd 的同机跨工作区出站路由也读这份机器清单。命令行直接 `serve -w`
+    # 的主工作区以前只活在这个 serve 进程内，附属节点因此能收它的 HTTP 信，
+    # 却不能把本地消息发回它。启动即登记，让收发两侧看到同一组本机节点。
+    if layout is not None:
+        with suppress(AntHillError):
+            remember_workspace(layout.workspace, port=port)
     nodes = _registry(layout, config, quiet=quiet)
     # 还没配工作区时没地方写日志，只回显
     log = EventLog(
@@ -146,6 +165,10 @@ def serve_command(
     if panel_write and not show_panel:
         log.close()
         fail("--panel-write 需要面板是开着的；去掉 --no-panel")
+    restart_agents = panel_write if auto_restart_agents is None else auto_restart_agents
+    if restart_agents and not panel_write:
+        log.close()
+        fail("--auto-restart-agents 需要 --panel-write（自动启停进程属于写操作）")
     if created and layout is not None and config is not None:
         console.print(
             f"[bold green]✓[/bold green] 没找到工作区，已按 -w 建了一个：[b]{layout.root}[/b]\n"
@@ -178,6 +201,8 @@ def serve_command(
         )
     if show_panel:
         mode = "可发起任务与改配置" if panel_write else "只读"
+        if restart_agents:
+            mode += "；代码更新后自动重启 agentd"
         console.print(f"[bold]面板[/bold] {endpoint}/panel [dim]（{mode}）[/dim]")
         if panel_write and not is_loopback(host):
             # 绑对外是跨机投递的需要，写权限仍然只对本机开放 —— 说出来，别让人猜
@@ -214,6 +239,7 @@ def serve_command(
                 endpoint=endpoint,
                 panel=show_panel,
                 panel_write=panel_write,
+                auto_restart_agents=restart_agents,
                 summary=summary,
                 remote_admin=remote_admin,
                 panel_token=token,
@@ -282,6 +308,7 @@ async def _serve(
     endpoint: str,
     panel: bool = False,
     panel_write: bool = False,
+    auto_restart_agents: bool = False,
     summary: bool = True,
     remote_admin: bool = False,
     panel_token: str = "",
@@ -345,15 +372,19 @@ async def _serve(
         host=host,
         port=port,
     )
-    tasks = [
+    tasks: list[asyncio.Task[Any]] = [
         asyncio.create_task(server.serve(), name="http"),
         *(asyncio.create_task(b.run(stop), name=f"beacon:{i}") for i, b in enumerate(beacons)),
         asyncio.create_task(_status_loop(nodes, log, stop, enabled=summary), name="status"),
         asyncio.create_task(_pull_loop(nodes, log, stop), name="pull"),
         asyncio.create_task(_schedule_loop(nodes, log, stop), name="schedule"),
         asyncio.create_task(_hygiene_loop(nodes, log, stop), name="hygiene"),
-        asyncio.create_task(stop.wait(), name="stop"),
     ]
+    if auto_restart_agents:
+        tasks.append(
+            asyncio.create_task(_agent_restart_loop(nodes, log, stop), name="agent-restart")
+        )
+    tasks.append(asyncio.create_task(stop.wait(), name="stop"))
     http = tasks[0]
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -475,6 +506,129 @@ async def _pull_loop(nodes: NodeRegistry, log: EventLog, stop: asyncio.Event) ->
         with suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=_pull_interval(nodes))
             return
+
+
+async def _agent_restart_loop(
+    nodes: NodeRegistry,
+    log: EventLog,
+    stop: asyncio.Event,
+    *,
+    interval: float = AUTO_RESTART_INTERVAL,
+    settle_seconds: float = AUTO_RESTART_SETTLE,
+    exit_poll: float = AUTO_RESTART_EXIT_POLL,
+) -> None:
+    """源码稳定更新后，把当时仍在运行的旧 agentd 换成新进程。
+
+    这是 ``--panel-write`` 的本机后台能力，不依赖浏览器开着。只看 runtime
+    里确实活着且比源码旧的进程；原本停着的 Agent 永远不会被自动启动。
+    """
+    loop = asyncio.get_running_loop()
+    observed = newest_code_mtime(refresh=True)
+    stable_since = loop.time()
+    while not stop.is_set():
+        latest = newest_code_mtime(refresh=True)
+        if latest != observed:
+            observed = latest
+            stable_since = loop.time()
+        if loop.time() - stable_since >= settle_seconds:
+            await _restart_stale_agents(nodes, log, code_mtime=latest, exit_poll=exit_poll)
+        with suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+            return
+
+
+async def _restart_stale_agents(
+    nodes: NodeRegistry,
+    log: EventLog,
+    *,
+    code_mtime: float,
+    exit_poll: float = AUTO_RESTART_EXIT_POLL,
+) -> int:
+    restarted = 0
+    for ctx in nodes.all():
+        for name in sorted(ctx.config.agents):
+            if running_pid(ctx.layout, name) is None:
+                continue
+            try:
+                status = json.loads(runtime_path(ctx.layout, name).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(status, dict):
+                continue
+            if not stale_since(str(status.get("started_at", "")), code_mtime=code_mtime):
+                continue
+            try:
+                changed = await _restart_stale_agent(ctx, name, log, exit_poll=exit_poll)
+            except Exception as exc:
+                log.warn(
+                    "agentd.auto_restart_failed",
+                    node=ctx.name,
+                    agent=name,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                continue
+            restarted += int(changed)
+    return restarted
+
+
+async def _restart_stale_agent(
+    ctx: NodeContext,
+    name: str,
+    log: EventLog,
+    *,
+    exit_poll: float = AUTO_RESTART_EXIT_POLL,
+) -> bool:
+    """等当前消息结束，停止旧 pid，再拉新进程；同 Agent 操作串行。"""
+    with agent_op(ctx.name, name):
+        old_pid = running_pid(ctx.layout, name)
+        if old_pid is None:
+            return False
+
+        # AgentRuntime 收 SIGTERM 后会收尾退出，但它当前的 consume task 仍可能被
+        # cancel。先等 cur 清空，避免为了热更新白做一半模型调用；new 里的积压
+        # 留给新进程接着取，不影响停机窗口。
+        current = ctx.layout.mailbox_dir(name) / "inbox" / "cur"
+        while running_pid(ctx.layout, name) == old_pid and any(current.glob("*.json")):
+            await asyncio.sleep(exit_poll)
+
+        if running_pid(ctx.layout, name) == old_pid:
+            try:
+                stopped = stop_agent(ctx.layout, name)
+            except AntHillError:
+                # 检查与发信号之间旧进程刚好自然退出，也是成功走到替换点；
+                # 只有它其实还活着时才保留原错误。
+                if running_pid(ctx.layout, name) is not None:
+                    raise
+                stopped = {"already": True}
+            if not stopped.get("already"):
+                log.info("agentd.auto_restart_requested", node=ctx.name, agent=name, pid=old_pid)
+        while running_pid(ctx.layout, name) == old_pid:
+            await asyncio.sleep(exit_poll)
+
+        # CLI 等本 serve 进程之外的操作不受 agent_op 锁约束；若它已经拉起了
+        # 替代进程，就尊重那个结果，不再启动第二只。
+        replacement = running_pid(ctx.layout, name)
+        if replacement is not None:
+            log.info(
+                "agentd.auto_restart_replaced",
+                node=ctx.name,
+                agent=name,
+                pid=replacement,
+            )
+            return False
+        config = ctx.config
+        if name not in config.agents:
+            log.warn("agentd.auto_restart_skipped", node=ctx.name, agent=name, reason="removed")
+            return False
+        started = start_agent(ctx.layout, config, name)
+        log.info(
+            "agentd.auto_restarted",
+            node=ctx.name,
+            agent=name,
+            old_pid=old_pid,
+            pid=started.get("pid", ""),
+        )
+        return True
 
 
 def _pull_interval(nodes: NodeRegistry) -> float:

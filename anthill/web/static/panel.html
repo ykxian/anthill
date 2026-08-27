@@ -235,15 +235,18 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
 /* 三选一的确认框。**`window.confirm` 只有两个按钮，装不下三种意图** ——
    删记录 / 连未读一起删 / 什么都不做。硬塞的结果是「取消」变成了「删得少一点」，
    而在一个不可撤销的操作里，取消必须意味着什么都不做。 */
-#ask {
+#ask, #persona-editor {
   border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface);
   color: var(--text); padding: 20px 22px; max-width: 520px; box-shadow: var(--shadow-lg, var(--shadow));
 }
-#ask::backdrop { background: color-mix(in srgb, var(--ink, #000) 45%, transparent); }
-#ask h3 { margin: 0 0 10px; font-size: 15px; }
+#ask::backdrop, #persona-editor::backdrop { background: color-mix(in srgb, var(--ink, #000) 45%, transparent); }
+#ask h3, #persona-editor h3 { margin: 0 0 10px; font-size: 15px; }
 #ask #ask-body { font-size: 13px; line-height: 1.7; color: var(--muted); }
 #ask #ask-body b { color: var(--text); }
-#ask .actions { margin-top: 18px; justify-content: flex-end; flex-wrap: wrap; }
+#ask .actions, #persona-editor .actions { margin-top: 18px; justify-content: flex-end; flex-wrap: wrap; }
+#persona-editor { width: min(620px, calc(100vw - 32px)); }
+#persona-editor p { margin: 0 0 10px; color: var(--muted); font-size: 12.5px; }
+#persona-text { display: block; width: 100%; min-height: 180px; resize: vertical; }
 .actions { display: flex; gap: 8px; align-items: center; }
 .actions input, .actions select { flex: 1; min-width: 0; }
 .hint { font-size: 12px; color: var(--dim); padding-top: 8px; }
@@ -266,9 +269,25 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
 }
 .card:hover { background: var(--surface); border-color: var(--line-soft); box-shadow: var(--shadow); }
 .card .name { font-weight: 600; font-size: 13px; }
-.card .sub { color: var(--dim); font-size: 11.5px; padding-left: 16px; }
+.card .detail {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  padding-left: 16px; margin-top: 1px;
+}
+.card .sub { color: var(--dim); font-size: 11.5px; flex: 1; min-width: 0; }
 .card .ops { display: flex; gap: 4px; opacity: 0; transition: opacity var(--fast); }
 .card:hover .ops, .card:focus-within .ops { opacity: 1; }
+/* 角色卡是常用的逐 Agent 配置，但不是运行状态，也不是危险操作：放在元信息行
+   末尾，以轻量文字入口呈现。这样第一行不会和名称、启停、异常徽章争 304px，
+   同时入口在非 hover、触摸屏和键盘导航下都看得见。 */
+button.card-persona {
+  flex: none; border: 0; background: none; color: var(--dim);
+  padding: 0 1px; font-size: 11px; font-weight: 500; line-height: 1.5;
+}
+button.card-persona:hover {
+  color: var(--ink); background: none; filter: none;
+  text-decoration: underline; text-underline-offset: 3px;
+}
+button.card-persona.configured { color: var(--accent); }
 
 .add-agent {
   /* grid 子项默认 min-width:auto，会撑破侧栏 —— 显式给一列 minmax(0,1fr) */
@@ -277,7 +296,8 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
 }
 .add-agent .cap { font-size: 11px; color: var(--dim); }
 .add-agent .line { display: flex; gap: 6px; min-width: 0; }
-.add-agent input, .add-agent select { flex: 1; min-width: 0; font-size: 12.5px; padding: 5px 8px; }
+.add-agent input, .add-agent select, .add-agent textarea { flex: 1; min-width: 0; font-size: 12.5px; padding: 5px 8px; }
+.add-agent textarea { width: 100%; min-height: 58px; resize: vertical; font-family: var(--sans); }
 .add-agent button { padding: 5px 12px; font-size: 12.5px; }
 
 /* ---- 任务看板：步骤用左侧色条串起来，一眼看出卡在哪一步 ---- */
@@ -524,7 +544,7 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
 }
 .copy-line code { flex: 1; min-width: 0; color: var(--muted); word-break: break-all; }
 
-/* 「把终端接进来」那一块：三条路摆在一起，路径由服务端填好，点一下就复制 */
+/* 「把终端接进来」按客户端折叠。命令很多，但人一次只会用其中一种客户端。 */
 #bridge-connect { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }
 #bridge-connect > summary {
   cursor: pointer; padding: 10px 14px; font-weight: 600; font-size: 13.5px;
@@ -533,6 +553,20 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
 #bridge-connect > summary::-webkit-details-marker { display: none; }
 #bridge-connect > summary::before { content: "▸ "; color: var(--accent); }
 #bridge-connect[open] > summary::before { content: "▾ "; }
+.bridge-recipe-groups {
+  display: grid; gap: 8px; padding: 10px;
+  border-top: 1px solid var(--line-soft);
+}
+.recipe-group { border: 1px solid var(--line-soft); border-radius: var(--r-sm); overflow: hidden; }
+.recipe-group > summary {
+  display: flex; align-items: baseline; gap: 9px; cursor: pointer; list-style: none;
+  padding: 10px 12px; background: var(--surface-2); font-size: 13px;
+}
+.recipe-group > summary::-webkit-details-marker { display: none; }
+.recipe-group > summary::before { content: "▸"; flex: none; color: var(--accent); }
+.recipe-group[open] > summary::before { content: "▾"; }
+.recipe-group > summary strong { font-family: var(--sans); }
+.recipe-group > summary span { color: var(--muted); font-size: 12px; }
 .recipe { padding: 4px 14px 14px; border-top: 1px solid var(--line-soft); }
 .recipe h4 { margin: 12px 0 4px; font-size: 13px; font-family: var(--sans); }
 .recipe .why { margin: 0 0 8px; font-size: 12px; color: var(--muted); line-height: 1.6; }
@@ -541,6 +575,7 @@ button.tiny { padding: 2px 8px; font-size: 11px; }
   background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: var(--r-sm);
   font-family: var(--mono); font-size: 12px; line-height: 1.6; white-space: pre;
 }
+.recipe pre.prompt { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; }
 .recipe .row { margin-top: 6px; }
 
 /* 侧栏里本机的每个工作区都是一组，可点可折叠 —— 那才是「切换工作区」该在的地方 */
@@ -678,6 +713,23 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
       <div class="actions" id="ask-choices"></div>
     </dialog>
 
+    <dialog id="persona-editor">
+      <form id="persona-form">
+        <h3 id="persona-title">Agent 角色卡</h3>
+        <p>
+          可选。写职责、专长和工作风格；保存在 <code>.anthill/node.toml</code>，
+          会随初始提示词注入，但不能覆盖 AntHill 的投递和安全规则。清空即恢复默认身份；
+          这里是项目配置，<b>不要写密钥</b>。
+        </p>
+        <textarea id="persona-text" maxlength="2000" placeholder="例如：你负责代码审查，优先找正确性、并发和权限边界问题；结论先行。"></textarea>
+        <div class="hint" id="persona-hint"></div>
+        <div class="actions">
+          <button class="ghost" id="persona-cancel" type="button">取消</button>
+          <button type="submit">保存</button>
+        </div>
+      </form>
+    </dialog>
+
     <section class="pane" id="pane-chat" hidden>
       <div class="eyebrow">对话 <span class="count" id="chat-count"></span></div>
       <div class="chat-shell">
@@ -743,7 +795,7 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
         <span class="count" id="bridge-count"></span>
       </div>
       <details id="bridge-connect" style="margin-bottom:14px">
-        <summary>把一个终端会话接进来（三选一，都不占着会话）</summary>
+        <summary>接入 Codex 或 Claude Code</summary>
         <div id="bridge-recipes"></div>
       </details>
       <form class="actions" id="bridge-say" style="margin-bottom:16px">
@@ -959,6 +1011,17 @@ function agentCard(a, node) {
   // 远端那台也能启停 —— 走它自己的 remote_admin 开关，没开会给一句明确的拒绝。
   // 删 Agent 只对本机开放：那是改配置，另有一条路（配置页选机器）。
   const where = `data-agent="${esc(a.name)}" data-node="${esc(node.node)}"`;
+  // 角色卡是日常配置，不该藏在 hover 才出现的操作区里。入口始终放在第二行
+  // 元信息末尾，避免跟名称、启停和异常徽章挤在同一行；✓ 只表示已经配置，
+  // 不把可能敏感的正文塞进集群快照。
+  const personaOp = canWrite && node.local
+    ? `<button class="card-persona${a.has_persona ? " configured" : ""}" type="button"
+               ${where} data-op="persona"
+               title="${a.has_persona ? "编辑角色卡" : "设置角色卡"}"
+               aria-label="${a.has_persona ? "编辑" : "设置"}${esc(a.name)} 的角色卡">
+         角色卡${a.has_persona ? " ✓" : ""}
+       </button>`
+    : "";
   const ops = canWrite
     ? `<span class="ops">
          <button class="ghost" type="button" ${where}
@@ -979,7 +1042,10 @@ function agentCard(a, node) {
         <span class="name grow truncate">${esc(a.name)}</span>
         ${ops}${badges}
       </div>
-      <div class="sub truncate">${esc(a.role)} · ${esc(a.provider)} · ${esc(a.watch_mode)}</div>
+      <div class="detail">
+        <div class="sub truncate">${esc(a.role)} · ${esc(a.provider)} · ${esc(a.watch_mode)}</div>
+        ${personaOp}
+      </div>
     </div>`;
 }
 
@@ -999,11 +1065,13 @@ function addAgentForm() {
       <div class="line">
         <select id="agent-brain">
           <option value="echo">echo（只回显）</option>
-          <option value="bridge">bridge（你的会话）</option>
-          <option value="command">command（claude -p）</option>
+          <option value="bridge">bridge（你的交互会话）</option>
+          <option value="codex">codex（codex exec，无人值守）</option>
+          <option value="command">command（自定义 CLI）</option>
           <option value="provider">provider（接模型）</option>
         </select>
       </div>
+      <textarea id="agent-persona" maxlength="2000" placeholder="可选角色卡：职责、专长、工作风格（不要写密钥）"></textarea>
       <div class="line">
         <input id="agent-extra" placeholder="命令行或 provider 名，echo/bridge 留空" autocomplete="off" />
         <button type="submit">加上</button>
@@ -1337,6 +1405,13 @@ function scoped(path, params) {
   const tail = query.toString();
   if (!tail) return path;
   return path + (path.includes("?") ? "&" : "?") + tail;
+}
+
+// Agent 卡片来自全集群/多工作区视图，按钮上的 node 才是操作目标；不能只靠
+// 当前焦点。删除曾漏掉这层作用域，结果在 collab-tst 点删 card-tst，请求却去
+// 主节点找它并报“不存在”。角色卡读取/保存也统一走这里，避免同类串节点。
+function agentEndpoint(name, tail = "", node = "") {
+  return u(scoped(`api/agents/${encodeURIComponent(name)}${tail}`, node ? { node } : {}));
 }
 
 function draw() {
@@ -2068,10 +2143,113 @@ function syncBridgePicker() {
 // MCP 工具也是拉取式的，装完之后会话依然不会主动知道有消息在等它。
 function renderConnect(info) {
   const c = info.connect || {};
+  const cx = c.codex || {};
   const claims = info.claims || [];
+  // bridge 每三秒刷新一次。重画之前先记住用户展开了哪一种客户端，否则原生
+  // <details> 会在下一轮 paint 后突然合上。
+  const openSections = new Set(
+    [...document.querySelectorAll("#bridge-recipes .recipe-group[open][data-section]")]
+      .map((section) => section.dataset.section),
+  );
+  // 旧 serve 进程还不知道 current_prompt 时也别画一个空框：attach 命令里已经
+  // 带着正确的 exe / Agent / workspace，浏览器只需把占位 thread 换成 current。
+  // serve 重启后优先用后端生成的完整版，两边内容保持同一份语义。
+  const currentAttach = String(cx.attach || "").replace("THREAD_ID", "current");
+  const currentPrompt = cx.current_prompt || [
+    "请把当前这个 Codex 会话接入 AntHill 协作网络。",
+    "",
+    "先确认当前 shell 工具环境里存在 CODEX_THREAD_ID，但不要打印它。",
+    "接入器需要读写 CODEX_HOME（通常是 ~/.codex）里的当前会话状态。",
+    "不要先在 workspace 沙箱内试跑；请只为下面这一条命令申请一次性沙箱外执行/越界审批，",
+    "然后使用一个后台持续运行的 shell 工具会话执行：",
+    "",
+    currentAttach,
+    "",
+    "不要启动新的 Codex TUI，不要使用 --yolo，也不要改变当前会话或全局的 sandbox / 审批设置。",
+    "如果用户拒绝这次批准，或工具不能申请单次越界执行，就停止并说明原因。",
+    "让监听命令保持运行，但不要一直等待它退出。看到“已接入现有 Codex 前台”才算成功；",
+    "失败时原样告诉我错误。接入后继续留在当前对话。",
+  ].join("\n");
   paint($("bridge-recipes"), `
+    <div class="bridge-recipe-groups">
+    <details class="recipe-group" data-provider="codex" data-section="codex"${openSections.has("codex") ? " open" : ""}>
+      <summary><strong>Codex</strong><span>当前会话、托管会话或独立 worker</span></summary>
     <div class="recipe">
-      <h4>1 · 一条命令：起来就在值守</h4>
+      <h4>Codex · 当前会话直接接入（推荐）</h4>
+      <p class="why">
+        把下面整段复制后发给<b>现在正在聊的 Codex</b>。它会用自己的 thread ID
+        在后台接入，不用开新 TUI，也不用去 <code>/status</code> 手抄 ID：
+      </p>
+      <pre class="prompt" id="rcp-codex-current">${esc(currentPrompt)}</pre>
+      <div class="row"><button type="button" data-copy="rcp-codex-current">复制给当前 Codex 的提示词</button></div>
+      <p class="why" style="margin-top:8px">
+        这会认领当前选中的桥接 Agent。Codex 会请求<b>一次命令级审批</b>，因为只读
+        app-server 仍需访问 <code>~/.codex</code> 的当前会话状态；这不会把会话改成
+        full access，也不需要 <code>--yolo</code>。监听命令需保持运行。
+      </p>
+    </div>
+    <div class="recipe">
+      <h4>Codex · 另起一个托管交互会话</h4>
+      <p class="why">
+        从普通 shell 运行下面命令，会启动只监听本机的 app-server 与托管 TUI。
+        你可以照常对话，来信会排队自动处理：
+      </p>
+      <pre id="rcp-codex-launch">${esc(cx.launch || "")}</pre>
+      <div class="row"><button class="ghost" type="button" data-copy="rcp-codex-launch">复制</button></div>
+      <p class="why" style="margin-top:12px">
+        <b>⚠ 不推荐：</b>如果当前环境本身已有可靠隔离，也可以用下面这条
+        <code>--yolo</code> 命令跳过全部审批并关闭 Codex 沙箱。它会让模型生成的命令
+        直接以你的系统权限执行，请只在你完全清楚风险时使用：
+      </p>
+      <pre id="rcp-codex-yolo">${esc(cx.yolo || "")}</pre>
+      <div class="row"><button class="ghost" type="button" data-copy="rcp-codex-yolo">复制</button></div>
+      <p class="why" style="margin-top:8px">
+        已有 Codex 在另一个终端？先在原 TUI 的 <code>/status</code> 查看 thread ID，
+        把下面的 <code>THREAD_ID</code> 换掉。它用原生 queue 唤醒唯一 writer，来信、
+        Working 和回答都显示在原 TUI，不会再触发 active writer 冲突：
+      </p>
+      <pre id="rcp-codex-attach">${esc(cx.attach || "")}</pre>
+      <div class="row"><button class="ghost" type="button" data-copy="rcp-codex-attach">复制</button></div>
+      <p class="why" style="margin-top:8px">
+        <code>--resume</code> 碰到 active writer 也会自动切换到 attach。attach 模式的
+        权限与审批由原前台处理；托管模式的无人 RPC 审批仍按安全边界拒绝。
+      </p>
+    </div>
+    <div class="recipe">
+      <h4>Codex · 独立无人值守 worker</h4>
+      <p class="why">
+        不需要保留交互会话时，可以让 <code>agentd</code> 每收到一条信封运行一次
+        <code>codex exec</code>。在“加一个 Agent”里直接选 <b>codex</b> 即可；
+        想沿用当前 bridge 名字时，先停掉它，再把原配置节里的
+        <code>bridge = true</code> <b>替换</b>为下面内容（不能并排追加）：
+      </p>
+      <pre id="rcp-codex-worker">${esc(cx.worker || "")}</pre>
+      <div class="row"><button class="ghost" type="button" data-copy="rcp-codex-worker">复制</button></div>
+      <p class="why" style="margin-top:8px">
+        <code>--approve-for-me</code> 仍使用 workspace-write 沙箱与自动审查，
+        没有绕过 Codex 的权限边界；线程历史由 Anthill 保存，所以使用
+        <code>--ephemeral</code> 避免每封消息重复积累一份 Codex 会话。
+      </p>
+    </div>
+    <div class="recipe">
+      <h4>Codex · 给当前交互会话装 MCP（拉取式）</h4>
+      <p class="why">
+        活跃回合可以使用 <code>anthill_inbox</code> / <code>anthill_reply</code> /
+        <code>anthill_send</code>。MCP 本身是拉取式的，不会唤醒空闲会话；自动唤醒由
+        上面的 queue/app-server 桥接负责，二者可以同时使用。
+        Codex 的 MCP 配置位于用户配置中，因此 server 名带上工作区名以免相撞：
+      </p>
+      <pre id="rcp-codex-mcp">${esc(cx.mcp || "")}</pre>
+      <div class="row"><button class="ghost" type="button" data-copy="rcp-codex-mcp">复制</button></div>
+      <p class="why" style="margin-top:8px">需要把当前会话钉到这个桥接 Agent 时：</p>
+      <pre id="rcp-codex-pin">${esc(cx.pin || "")}</pre>
+      <div class="row"><button class="ghost" type="button" data-copy="rcp-codex-pin">复制</button></div>
+    </div>
+    </details>
+    <details class="recipe-group" data-provider="claude" data-section="claude"${openSections.has("claude") ? " open" : ""}>
+      <summary><strong>Claude Code</strong><span>启动命令、MCP 或 hook</span></summary>
+    <div class="recipe">
+      <h4>Claude Code 1 · 一条命令：起来就在值守</h4>
       <p class="why">
         什么都不用装，<b>也不用起来之后再跟它说一句</b>。
         Claude Code 是回合制的 —— 没有用户回合模型就不动，所以 hook 和 MCP 都只能
@@ -2091,7 +2269,7 @@ function renderConnect(info) {
       </details>
     </div>
     <div class="recipe">
-      <h4>2 · MCP：装在这个目录，之后每个会话自己认领</h4>
+      <h4>Claude Code 2 · MCP：装在这个目录，之后每个会话自己认领</h4>
       <p class="why">
         先 <code>uv sync --extra mcp</code>，然后跑这一条 ——
         <b>只对这个目录生效</b>（<code>--scope local</code> 是默认值，所以要先 cd 过去；
@@ -2130,7 +2308,7 @@ function renderConnect(info) {
       <div class="row"><button class="ghost" type="button" data-copy="rcp-multi">复制</button></div>
     </div>
     <div class="recipe">
-      <h4>3 · 加一个 hook（可选，配合 2 用）</h4>
+      <h4>Claude Code 3 · 加一个 hook（可选，配合 2 用）</h4>
       <p class="why">
         每轮开始前替它查一次收件箱，省得它忘了调 —— <b>不阻塞，也不占会话</b>，
         代价是只在你说话时才查。写进 <code>${esc(c.hook_path || "")}</code>
@@ -2140,6 +2318,9 @@ function renderConnect(info) {
       <pre id="rcp-hook">${esc(c.hook || "")}</pre>
       <div class="row"><button class="ghost" type="button" data-copy="rcp-hook">复制</button></div>
     </div>
+    </details>
+    <details class="recipe-group bridge-claims" data-section="claims"${openSections.has("claims") ? " open" : ""}>
+      <summary><strong>当前绑定</strong><span>查看谁正在使用桥接 Agent</span></summary>
     <div class="recipe">
       <h4>谁占着哪个</h4>
       ${claims.length
@@ -2164,6 +2345,8 @@ function renderConnect(info) {
         别人对它说过的话）是挂在 Agent 上的，认错人就串了历史。
         新来的会话优先拿没人用过的。
       </p>
+    </div>
+    </details>
     </div>`);
 }
 
@@ -2244,6 +2427,44 @@ $("bridge-pick").addEventListener("change", (event) => {
   loadBridge();
 });
 
+// navigator.clipboard 只在安全上下文且获准时可靠；面板常从另一台机器的 HTTP 地址
+// 打开，所以还得保留同步 execCommand 兜底。复制结果直接写在按钮上，不能只把提示
+// 扔到桥接页最底下 —— 配方很长时那里根本看不见。
+async function copyText(text) {
+  if (window.isSecureContext && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (_) {
+      // 权限被浏览器拒绝时继续走兼容路径。
+    }
+  }
+  const box = document.createElement("textarea");
+  box.value = text;
+  box.setAttribute("readonly", "");
+  box.style.position = "fixed";
+  box.style.opacity = "0";
+  box.style.pointerEvents = "none";
+  document.body.appendChild(box);
+  box.focus();
+  box.select();
+  box.setSelectionRange(0, box.value.length);
+  const copied = document.execCommand?.("copy");
+  box.remove();
+  if (!copied) throw new Error("copy unavailable");
+}
+
+function showCopyResult(btn, label, failed = false) {
+  const original = btn.textContent;
+  btn.textContent = label;
+  btn.classList.toggle("bad", failed);
+  setTimeout(() => {
+    if (!btn.isConnected) return;
+    btn.textContent = original;
+    btn.classList.remove("bad");
+  }, 1400);
+}
+
 // 通用复制：哪一段都行。以前只有「那一句提示词」有复制按钮。
 document.addEventListener("click", async (event) => {
   const btn = event.target.closest?.("[data-copy], [data-copy-text]");
@@ -2252,9 +2473,11 @@ document.addEventListener("click", async (event) => {
   const text = btn.dataset.copyText ?? $(btn.dataset.copy)?.textContent;
   if (!text) return;
   try {
-    await navigator.clipboard.writeText(text);
+    await copyText(text);
+    showCopyResult(btn, "已复制");
     say("bridge-hint", "已复制", "ok");
   } catch (err) {
+    showCopyResult(btn, "复制失败", true);
     say("bridge-hint", "浏览器不让复制，手动选中吧", "bad");
   }
 });
@@ -3120,6 +3343,10 @@ async function openPairWindow(node) {
 }
 
 async function runAgentOp(name, op, node, button) {
+  if (op === "persona") {
+    await openPersonaEditor(name, node);
+    return;
+  }
   if (op === "remove") {
     const go = await ask(
       `把 ${name} 从 node.toml 里删掉？`,
@@ -3138,10 +3365,9 @@ async function runAgentOp(name, op, node, button) {
     live.disabled = busy;
   };
   setBusy(true);
-  const at = node && node !== state.node ? `?node=${encodeURIComponent(node)}` : "";
   try {
-    if (op === "remove") await api(u(`api/agents/${encodeURIComponent(name)}`), { method: "DELETE" });
-    else await api(u(`api/agents/${encodeURIComponent(name)}/${op}${at}`), { method: "POST" });
+    if (op === "remove") await api(agentEndpoint(name, "", node), { method: "DELETE" });
+    else await api(agentEndpoint(name, `/${op}`, node), { method: "POST" });
     // 启停要几百毫秒才在 runtime.json 上体现出来，等一拍再刷
     setTimeout(poll, 700);
   } catch (err) {
@@ -3150,6 +3376,55 @@ async function runAgentOp(name, op, node, button) {
     setBusy(false);
   }
 }
+
+const personaEdit = { agent: "", node: "" };
+
+async function openPersonaEditor(name, node) {
+  const box = $("persona-editor");
+  personaEdit.agent = name;
+  personaEdit.node = node || "";
+  $("persona-title").textContent = `${name} 的角色卡`;
+  $("persona-text").value = "";
+  say("persona-hint", "读取中…");
+  box.showModal();
+  try {
+    const info = await api(agentEndpoint(name, "/persona", node));
+    // 请求回来前人若已经关掉或点开另一只，不要把旧值灌进新编辑框。
+    if (!box.open || personaEdit.agent !== name) return;
+    $("persona-text").value = info.persona || "";
+    say("persona-hint", "未配置也能正常使用；保存后重启 agentd 或重新接入会话生效。");
+    $("persona-text").focus();
+  } catch (err) {
+    say("persona-hint", String(err.message || err), "bad");
+  }
+}
+
+$("persona-cancel").addEventListener("click", () => $("persona-editor").close());
+$("persona-editor").addEventListener("click", (event) => {
+  if (event.target === $("persona-editor")) $("persona-editor").close();
+});
+$("persona-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = personaEdit.agent;
+  if (!name) return;
+  const save = event.target.querySelector('button[type="submit"]');
+  save.disabled = true;
+  try {
+    await api(agentEndpoint(name, "/persona", personaEdit.node), {
+      method: "PUT",
+      body: JSON.stringify({ persona: $("persona-text").value }),
+    });
+    $("persona-editor").close();
+    poll();
+    await tell(`${name} 的角色卡已保存`, [
+      "运行中的 agentd 要重启；交互式 Claude/Codex 会话要重新接入，新的初始提示词才会带上它。",
+    ]);
+  } catch (err) {
+    say("persona-hint", String(err.message || err), "bad");
+  } finally {
+    save.disabled = false;
+  }
+});
 
 document.addEventListener("submit", async (event) => {
   if (event.target.id !== "add-agent") return;
@@ -3160,7 +3435,12 @@ document.addEventListener("submit", async (event) => {
   if (!name) return;
   // role 以前根本没在表单里 —— 后端默认 worker，于是面板永远建不出 coordinator，
   // 而发起编排任务恰恰要求有一个 role="coordinator" 的 Agent。
-  const body = { name, brain, role: $("agent-role").value };
+  const body = {
+    name,
+    brain,
+    role: $("agent-role").value,
+    persona: $("agent-persona").value.trim(),
+  };
   if (brain === "command") body.command = extra;
   if (brain === "provider") body.provider = extra;
   try {

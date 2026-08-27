@@ -39,9 +39,18 @@ def trust_of(
     local_node: str,
     roles: dict[str, str],
     trusted_peers: set[str],
+    local_nodes: set[str] | frozenset[str] = frozenset(),
 ) -> TrustLevel:
-    """判定一条消息来源的信任级。本机 user 角色 = 你本人。"""
+    """判定一条消息来源的信任级。本机 user 角色 = 你本人。
+
+    机器清单里另一个工作区属于同一 OS 用户的本地信任域，不需要做 peer 配对；
+    但同一个名字同时指向本地工作区和 peer 时来源有歧义，必须按 UNKNOWN 拒绝。
+    """
     if source.node != local_node:
+        if source.node in local_nodes and source.node in trusted_peers:
+            return TrustLevel.UNKNOWN
+        if source.node in local_nodes:
+            return TrustLevel.LOCAL_AGENT
         return TrustLevel.TRUSTED_PEER if source.node in trusted_peers else TrustLevel.UNKNOWN
     return TrustLevel.USER if roles.get(source.agent) == USER_ROLE else TrustLevel.LOCAL_AGENT
 

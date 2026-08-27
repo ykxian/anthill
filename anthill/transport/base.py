@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 
 from anthill.core.config import PeerSection
 from anthill.core.envelope import Envelope, TransportKind
@@ -22,6 +23,8 @@ class Destination:
     node: str
     agent: str
     peer: PeerSection | None = None
+    local_workspace: Path | None = None
+    """跨工作区但仍在本机时，目标节点所在的工作区。"""
 
     @classmethod
     def from_envelope(cls, env: Envelope, peer: PeerSection | None = None) -> Destination:

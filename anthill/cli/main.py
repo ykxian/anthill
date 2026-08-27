@@ -7,6 +7,7 @@ import typer
 from anthill import __version__
 from anthill.cli.agent_cmd import agent_app
 from anthill.cli.chat_cmd import bridge_command, chat_command, talk_command
+from anthill.cli.codex_cmd import codex_command
 from anthill.cli.common import console
 from anthill.cli.cost_cmd import cost_command
 from anthill.cli.dead_cmd import dead_app
@@ -35,6 +36,7 @@ COMMAND_MAP = """AntHill 命令地图 —— 按「你想干什么」分组
   chat      跟一个 Agent 多轮对话
   talk      让两个 Agent 就一件事聊下去，你旁观
   bridge    看看桥接 Agent 那边有什么在等你（人就是那个 Agent）
+  codex     启动或接入可正常对话、也会被 AntHill 来信唤醒的 Codex TUI
 
 看情况
   status    本工作区总览：谁在跑、积压、死信、对端
@@ -75,6 +77,7 @@ app.command("send")(send_command)
 app.command("chat")(chat_command)
 app.command("talk")(talk_command)
 app.command("bridge")(bridge_command)
+app.command("codex")(codex_command)
 app.command("serve")(serve_command)
 app.command("approve")(approve_command)
 app.command("fetch")(fetch_command)

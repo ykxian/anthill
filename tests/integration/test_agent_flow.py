@@ -11,10 +11,12 @@ import shutil
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from anthill.agent.conversation import message_expects_reply
 from anthill.agent.handlers import EchoHandler, HandlerContext
 from anthill.agent.runtime import AgentRuntime
 from anthill.core import outbox as outbox_module
@@ -28,6 +30,8 @@ from anthill.core.paths import NodeLayout
 from anthill.core.payloads import ChatPayload, MessageType, TaskRequestPayload
 from anthill.core.seen import Claim
 from anthill.core.states import DeliveryState
+from anthill.core.workspace import create_workspace
+from anthill.web.workspaces import remember
 
 TIMEOUT = 5.0
 
@@ -108,8 +112,10 @@ async def test_duplicate_delivery_is_processed_once_but_acked_every_time(layout,
     assert types.count(MessageType.TASK_RESULT) == 1  # 业务只做了一次
 
 
-async def test_mutual_chat_is_broken_by_hop_limit(layout, config, addr):
-    """用例 6：两个 echo agent 互相回信，第 ttl_hops 跳被熔断，消息风暴止住。"""
+async def test_plain_chat_stops_after_one_answer_instead_of_reaching_hop_limit(
+    layout, config, addr
+):
+    """普通 chat 是一问一答；不该靠 ttl_hops 才终止礼貌回环。"""
     ping = Envelope.new(
         sender=addr("alpha"),
         recipient=addr("beta"),
@@ -120,7 +126,7 @@ async def test_mutual_chat_is_broken_by_hop_limit(layout, config, addr):
 
     async with running(layout, config, "alpha"), running(layout, config, "beta"):
         Mailbox(layout.mailbox_dir("beta")).deposit(ping)
-        await asyncio.sleep(1.5)  # 让它们尽情互相回，看会不会停下来
+        await asyncio.sleep(0.8)
 
     chats = [
         env
@@ -128,9 +134,41 @@ async def test_mutual_chat_is_broken_by_hop_limit(layout, config, addr):
         for env in archived(Mailbox(layout.mailbox_dir(box)))
         if env.type is MessageType.CHAT
     ]
-    assert chats, "至少要有第一条 ping"
-    assert max(env.hops for env in chats) <= 4  # 从没突破 ttl
-    assert len(chats) <= 4  # 不是无限风暴
+    assert len(chats) == 2, "一条请求加一条回答之后必须停止"
+    assert max(env.hops for env in chats) < ping.ttl_hops, "不该触及协议熔断"
+    answer = next(env for env in chats if env.from_.agent == "beta")
+    assert not message_expects_reply(answer)
+
+
+async def test_registered_local_workspaces_can_chat_in_both_directions(tmp_path: Path) -> None:
+    """两个本机节点不需要 peer 信任；问句过去，回答也能原路回来。"""
+    left = NodeLayout(tmp_path / "battle-plan")
+    right = NodeLayout(tmp_path / "data-system")
+    left_config = create_workspace(left, node_name="battle-plan")
+    right_config = create_workspace(right, node_name="data-system")
+    remember(left.workspace, port=0)
+    remember(right.workspace, port=0)
+
+    async with (
+        running(left, left_config, "echo") as left_runtime,
+        running(right, right_config, "echo"),
+    ):
+        sent = await left_runtime.sender.send_new(
+            to=Address(node="data-system", agent="echo"),
+            type=MessageType.CHAT,
+            payload=ChatPayload(body="跨工作区 ping"),
+        )
+        await wait_until(
+            lambda: any(
+                env.type is MessageType.CHAT and env.reply_to == sent.id
+                for env in archived(Mailbox(left.mailbox_dir("echo")))
+            )
+        )
+
+    received = archived(Mailbox(right.mailbox_dir("echo")))
+    answers = archived(Mailbox(left.mailbox_dir("echo")))
+    assert any(env.id == sent.id for env in received)
+    assert any(env.reply_to == sent.id and env.from_.node == "data-system" for env in answers)
 
 
 async def test_expired_message_is_refused_with_receipt(layout, config, addr):
@@ -320,6 +358,76 @@ async def test_a_message_interrupted_by_a_crash_really_gets_processed_again(
         await wait_until(lambda: handled == [env.id])
 
     assert handled == [env.id], "崩溃中断的消息没有重跑 —— 那是「最多一次」"
+
+
+async def test_a_graceful_stop_waits_for_the_current_handler(layout, config, make_task):
+    """SIGTERM 先停收新信，正在做的那条必须真正做完才归档。"""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class Blocking(EchoHandler):
+        async def handle(self, incoming: Envelope, ctx: HandlerContext) -> None:
+            started.set()
+            await release.wait()
+            await super().handle(incoming, ctx)
+
+    runtime = AgentRuntime(
+        layout=layout,
+        config=config,
+        agent_name="beta",
+        handler=Blocking(),
+        log=EventLog(layout.log_file("beta"), agent="beta", echo=False),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(runtime.run(stop))
+    env = make_task(sender="cli", recipient="beta")
+    runtime.mailbox.deposit(env)
+    await asyncio.wait_for(started.wait(), timeout=TIMEOUT)
+
+    stop.set()
+    await asyncio.sleep(0.05)
+    assert not task.done(), "正在处理的 handler 被停止信号取消了"
+    assert any(runtime.mailbox.cur.iterdir())
+
+    release.set()
+    await asyncio.wait_for(task, timeout=TIMEOUT)
+    assert not any(runtime.mailbox.cur.iterdir())
+    assert any(p.stem == env.id for p in runtime.mailbox.done.rglob("*.json"))
+    with runtime.mailbox.open_seen() as seen:
+        assert seen.is_done(env.id)
+
+
+async def test_forced_cancellation_leaves_the_claimed_message_for_recovery(
+    layout, config, make_task
+):
+    """宽限届满后的强制退出也不能把半成品冒充 completed。"""
+    started = asyncio.Event()
+
+    class Blocking(EchoHandler):
+        async def handle(self, incoming: Envelope, ctx: HandlerContext) -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+    runtime = AgentRuntime(
+        layout=layout,
+        config=config,
+        agent_name="beta",
+        handler=Blocking(),
+        log=EventLog(layout.log_file("beta"), agent="beta", echo=False),
+    )
+    task = asyncio.create_task(runtime.run(asyncio.Event()))
+    env = make_task(sender="cli", recipient="beta")
+    runtime.mailbox.deposit(env)
+    await asyncio.wait_for(started.wait(), timeout=TIMEOUT)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [p.stem for p in runtime.mailbox.cur.glob("*.json")] == [env.id]
+    assert not any(p.stem == env.id for p in runtime.mailbox.done.rglob("*.json"))
+    with runtime.mailbox.open_seen() as seen:
+        assert not seen.is_done(env.id)
 
 
 async def test_a_finished_message_is_not_redone_after_a_restart(layout, config, make_task):

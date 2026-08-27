@@ -60,6 +60,30 @@ def test_unknown_remote_node_is_untrusted() -> None:
     assert level is TrustLevel.UNKNOWN
 
 
+def test_another_registered_workspace_on_this_machine_is_local_trust() -> None:
+    level = trust_of(
+        Address(node="sibling", agent="coder"),
+        local_node="me",
+        roles={},
+        trusted_peers=set(),
+        local_nodes={"sibling"},
+    )
+
+    assert level is TrustLevel.LOCAL_AGENT
+
+
+def test_a_name_shared_by_local_workspace_and_peer_is_ambiguous() -> None:
+    level = trust_of(
+        Address(node="duplicate", agent="coder"),
+        local_node="me",
+        roles={},
+        trusted_peers={"duplicate"},
+        local_nodes={"duplicate"},
+    )
+
+    assert level is TrustLevel.UNKNOWN
+
+
 # ---------- 决策矩阵 ----------
 
 

@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from anthill.agent.conversation import ChatPlan, chat_payload, count_turns, plan_reply
+from anthill.agent.conversation import (
+    ChatPlan,
+    chat_payload,
+    count_turns,
+    message_expects_reply,
+    plan_reply,
+)
 from anthill.core.envelope import Address, Envelope
 from anthill.core.payloads import ChatPayload, MessageType, TaskRequestPayload
 from anthill.providers.base import Msg, Role
@@ -38,6 +44,8 @@ def test_a_plain_chat_is_answered_to_the_sender() -> None:
 
     assert plan.should_reply
     assert plan.recipient is not None and plan.recipient.agent == "cli"
+    assert not plan.expects_reply, "普通问答的答案不该再向对方索要一轮回复"
+    assert chat_payload("答案", plan).mentions == ()
 
 
 def test_a_mentioned_partner_gets_the_reply_not_the_sender() -> None:
@@ -54,7 +62,19 @@ def test_the_reply_mentions_me_so_the_ball_comes_back() -> None:
     plan = plan_reply(chat_from("cli", mentions=("reviewer",)), identity=ME, history=[], budget=6)
 
     assert plan.mentions == ("coder",)
-    assert chat_payload("我的看法", plan).mentions == ("coder",)
+    payload = chat_payload("我的看法", plan)
+    assert payload.mentions == ("coder",)
+    assert plan.expects_reply, "显式 talk 才把球继续打回去"
+
+
+def test_a_terminal_chat_answer_is_not_another_request() -> None:
+    answer = chat_from("reviewer")
+    answer = answer.model_copy(
+        update={"payload": ChatPayload(body="检查通过"), "reply_to": "01J00000000000000000000000"}
+    )
+
+    assert not message_expects_reply(answer)
+    assert message_expects_reply(chat_from("reviewer"))
 
 
 def test_a_mention_of_myself_is_ignored_when_picking_the_partner() -> None:

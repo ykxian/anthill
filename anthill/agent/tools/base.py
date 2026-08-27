@@ -40,6 +40,8 @@ class ToolContext:
     thread: str
     messenger: Messenger | None = None
     """没接消息通道的 Agent（比如单机跑的工具测试）用 None，send_message 会明确报错。"""
+    sensitive_env: frozenset[str] = frozenset()
+    """run_shell 等项目子进程绝不能继承的 provider 凭据变量名。"""
 
     def resolve(self, raw: str) -> Path:
         """把工具参数里的路径解析成绝对路径；越界抛 ValueError。

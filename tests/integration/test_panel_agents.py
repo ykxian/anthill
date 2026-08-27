@@ -12,6 +12,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from anthill.agent.factory import build_handler
 from anthill.core.config import Config
 from anthill.core.errors import AntHillError
 from anthill.core.logging import EventLog
@@ -25,6 +26,7 @@ from anthill.web.agents import (
     running_pid,
     start_agent,
     stop_agent,
+    update_persona,
 )
 from anthill.web.app import create_app
 
@@ -136,6 +138,7 @@ async def test_removing_an_agent_keeps_the_rest_of_the_file(node: Bundle) -> Non
         ({"name": "Bad Name", "brain": "echo"}, "非法名字"),
         ({"name": "x", "brain": "provider", "provider": "nope"}, "provider 不存在"),
         ({"name": "x", "brain": "command", "command": ""}, "command 是空的"),
+        ({"name": "x", "persona": "x" * 2001}, "角色卡过长"),
     ],
 )
 async def test_bad_agent_specs_never_touch_the_disk(
@@ -159,6 +162,30 @@ def test_a_command_agent_is_written_as_a_toml_array(node: Bundle) -> None:
     assert 'command = ["claude", "-p"]' in result["text"]
 
 
+def test_the_codex_preset_is_a_safe_noninteractive_command_agent(node: Bundle) -> None:
+    """面板一键加 Codex，落盘后仍走通用 command adapter，不新增第二套 runtime。"""
+    layout, config, _ = node
+
+    result = add_agent(layout, config, AgentSpec(name="codex-t1", brain="codex"))
+
+    assert 'command = ["codex", "exec"' in result["text"]
+    assert '"--approve-for-me"' in result["text"]
+    assert '"--skip-git-repo-check"' in result["text"]
+    assert '"--color", "never"' in result["text"]
+    assert '"--ephemeral"' in result["text"]
+    assert 'prompt_via = "stdin"' in result["text"]
+
+    import tomllib
+
+    parsed = tomllib.loads(result["text"])
+    assert parsed["agents"]["codex-t1"]["command"][:2] == ["codex", "exec"]
+
+    layout.node_toml.write_text(result["text"], encoding="utf-8")
+    fresh = Config.load_from(layout)
+    assert fresh.agents["codex-t1"].prompt_via == "stdin"
+    assert build_handler(layout=layout, config=fresh, agent_name="codex-t1").name == "cli"
+
+
 def test_quotes_in_a_persona_cannot_break_out_of_the_string(node: Bundle) -> None:
     """这段文本会被当配置解析 —— 引号没转义就是一次配置注入。"""
     layout, config, _ = node
@@ -173,6 +200,61 @@ def test_quotes_in_a_persona_cannot_break_out_of_the_string(node: Bundle) -> Non
 
     parsed = tomllib.loads(result["text"])
     assert "evil" not in parsed["agents"]
+    assert parsed["agents"]["tricky"]["persona"] == '他说"你好"\n[agents.evil]\nrole = "worker"'
+
+
+async def test_a_persona_can_be_read_updated_and_cleared_from_the_panel(node: Bundle) -> None:
+    layout, _, _ = node
+
+    async with client_for(node) as client:
+        saved = await client.put(
+            "/panel/api/agents/echo/persona",
+            json={"persona": "你负责验收。\n先跑真实测试，再给结论。"},
+        )
+        read_back = await client.get("/panel/api/agents/echo/persona")
+
+    assert saved.status_code == 200, saved.text
+    assert read_back.json()["persona"] == "你负责验收。\n先跑真实测试，再给结论。"
+    assert Config.load_from(layout).agents["echo"].persona == read_back.json()["persona"]
+    assert "# AntHill 节点配置" in layout.node_toml.read_text(encoding="utf-8")
+
+    async with client_for(node) as client:
+        cleared = await client.put("/panel/api/agents/echo/persona", json={"persona": ""})
+
+    assert cleared.status_code == 200, cleared.text
+    assert Config.load_from(layout).agents["echo"].persona == ""
+    assert not any(
+        line.lstrip().startswith("persona =")
+        for line in _agent_section(layout.node_toml.read_text(), "echo").splitlines()
+    )
+
+
+async def test_a_persona_cannot_be_read_without_panel_authorization(node: Bundle) -> None:
+    async with client_for(node, host="10.0.0.8") as client:
+        response = await client.get("/panel/api/agents/echo/persona")
+
+    assert response.status_code == 403
+
+
+def test_updating_a_handwritten_multiline_persona_does_not_leave_a_fragment(node: Bundle) -> None:
+    layout, config, _ = node
+    text = layout.node_toml.read_text(encoding="utf-8").replace(
+        '[agents.echo]\nrole = "worker"',
+        '[agents.echo]\nrole = "worker"\npersona = """旧的第一行\n旧的第二行"""',
+    )
+    layout.node_toml.write_text(text, encoding="utf-8")
+    config = Config.load_from(layout)
+
+    result = update_persona(layout, config, "echo", "新的角色卡")
+    layout.node_toml.write_text(result["text"], encoding="utf-8")
+
+    assert Config.load_from(layout).agents["echo"].persona == "新的角色卡"
+    assert "旧的第二行" not in result["text"]
+
+
+def _agent_section(text: str, name: str) -> str:
+    after = text.split(f"[agents.{name}]", 1)[1]
+    return after.split("\n[", 1)[0]
 
 
 def test_the_last_agent_cannot_be_removed(node: Bundle) -> None:

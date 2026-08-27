@@ -171,7 +171,7 @@ def worker_handler(layout: NodeLayout, config: Config, name: str, provider: Fake
 
 
 def coordinator_handler(
-    layout: NodeLayout, provider: FakeProvider, **settings: float
+    layout: NodeLayout, provider: FakeProvider, *, persona: str = "", **settings: float
 ) -> CoordinatorHandler:
     from anthill.orchestrator.board import Blackboard
 
@@ -179,6 +179,7 @@ def coordinator_handler(
         provider=provider,
         blackboard=Blackboard(layout.blackboard),
         settings=CoordinatorSettings(**settings),  # type: ignore[arg-type]
+        persona=persona,
     )
 
 
@@ -239,6 +240,39 @@ async def test_scenario_a_runs_end_to_end_without_human_intervention(
     assert "12 个用例" in final.payload.summary
     assert "approve" in final.payload.summary
     assert final.payload.artifacts == ("tests/test_date.py",)
+
+
+async def test_coordinator_role_card_stays_below_system_for_plan_and_judge(
+    layout: NodeLayout, node: Config
+) -> None:
+    boss = FakeProvider([plan_turn(), verdict_turn(satisfied=True)])
+    coder = FakeProvider([finish_turn("写了测试", ("tests/test_date.py",))])
+    reviewer = FakeProvider([finish_turn("approve")])
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+    persona = "你偏好最小变更，但不能改写完成标准。"
+
+    async with AsyncExitStack() as stack:
+        for name, provider in (("coder", coder), ("reviewer", reviewer)):
+            await stack.enter_async_context(
+                running(layout, node, name, worker_handler(layout, node, name, provider))
+            )
+        await stack.enter_async_context(
+            running(
+                layout,
+                node,
+                "boss",
+                coordinator_handler(layout, boss, persona=persona),
+            )
+        )
+        Mailbox(layout.mailbox_dir("boss")).deposit(user_task())
+        await wait_until(lambda: bool(finals_in(cli_box)))
+
+    assert len(boss.calls) == 2
+    for call in boss.calls:
+        assert call.messages[0].role.value == "system"
+        assert persona not in call.messages[0].content
+        assert call.messages[1].role.value == "user"
+        assert persona in call.messages[1].content
 
 
 async def test_dependent_step_receives_upstream_deliverables(

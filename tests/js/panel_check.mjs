@@ -13,6 +13,12 @@ import { readFileSync } from "node:fs";
 const html = readFileSync(process.argv[2], "utf8");
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
+assert.ok(html.includes('id="rcp-codex-current"'), "桥接页没有“发给当前 Codex”的提示词入口");
+assert.ok(
+  html.includes('data-copy="rcp-codex-current"'),
+  "当前 Codex 接入提示词没有一键复制按钮",
+);
+
 // ---- 标签页、PANES、<section> 三者必须一一对应 ----
 //
 // 漏掉其中一处的后果特别隐蔽：那一页的数据照常拉、照常渲染，**只是永远不显示**
@@ -53,14 +59,36 @@ const $ = (id) => {
   if (!elements.has(id)) elements.set(id, blank());
   return elements.get(id);
 };
+let fallbackCopyBox;
+let fallbackCopied = "";
 const document = {
   getElementById: $,
   title: "",
   querySelectorAll: () => [],
   querySelector: () => null,
   addEventListener() {},
+  createElement: () => {
+    fallbackCopyBox = {
+      value: "",
+      style: {},
+      setAttribute() {},
+      focus() {},
+      select() {},
+      setSelectionRange() {},
+      remove() {},
+    };
+    return fallbackCopyBox;
+  },
+  body: { appendChild() {} },
+  execCommand: (command) => {
+    fallbackCopied = fallbackCopyBox?.value || "";
+    return command === "copy";
+  },
 };
-const window = { prompt: () => null, alert() {}, confirm: () => false };
+const window = { prompt: () => null, alert() {}, confirm: () => false, isSecureContext: true };
+const navigator = {
+  clipboard: { writeText: async () => { throw new Error("permission denied"); } },
+};
 const localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
 const history = { replaceState() {} };
 class URL {
@@ -87,12 +115,13 @@ const panel = new Function(
   "location",
   "fetch",
   "WebSocket",
+  "navigator",
   "setInterval",
   "setTimeout",
   // setWrite：写权限开着时拓扑会多画启停/删除按钮和「加 Agent」表单，
   // 那几处也把外部数据拼进了 HTML，必须一起验
-  `${script}\nreturn { state, local, topoOpen, draw, applyCluster, applyLocal, renderWorkspaces, chat, renderChat, md, plainPreview, stripScaffold, patchToml, diffLines, renderDiff, setWrite: (v) => { canWrite = v; } };`,
-)(document, window, localStorage, history, URL, location, fetch, WebSocket, noop, noop);
+  `${script}\nreturn { state, local, topoOpen, draw, applyCluster, applyLocal, renderWorkspaces, renderConnect, copyText, chat, renderChat, md, plainPreview, stripScaffold, patchToml, diffLines, renderDiff, agentEndpoint, setWrite: (v) => { canWrite = v; } };`,
+)(document, window, localStorage, history, URL, location, fetch, WebSocket, navigator, noop, noop);
 
 // ---- 数据 ----
 
@@ -200,6 +229,17 @@ const stream = $("stream-body").innerHTML;
 assert.ok(stream.includes("serve.start") && stream.includes("msg.received"), "事件没有跨节点汇总");
 assert.equal($("topo-count").textContent, "3 个节点 · 2/2 在跑");
 
+// Agent 卡片可能来自主节点以外的本机工作区。删除、启停、角色卡都必须使用
+// 按钮自己携带的 node，不能默默落到主节点；card-tst 的删除故障就出在这里。
+assert.equal(
+  panel.agentEndpoint("card-tst", "", "collab-tst"),
+  "/panel/api/agents/card-tst?node=collab-tst",
+);
+assert.equal(
+  panel.agentEndpoint("card-tst", "/persona", "collab-tst"),
+  "/panel/api/agents/card-tst/persona?node=collab-tst",
+);
+
 // 只是「见过」的节点也该出现在拓扑里，好让人知道它可以配对
 panel.applyCluster({
   node: "laptop",
@@ -217,6 +257,27 @@ panel.applyCluster({
 });
 assert.ok($("topo-body").innerHTML.includes("陌生的"), "见过但没配对的节点没显示出来");
 panel.applyCluster(CLUSTER);
+
+// 页面可能先于 serve 重启：旧后端没有 current_prompt，但已有 attach 配方足够
+// 让浏览器组成可直接发给当前 Codex 的提示，不能给用户留一个空复制框。
+panel.renderConnect({
+  connect: { codex: { attach: "anthill codex cc --attach THREAD_ID -w /workspace" } },
+  claims: [],
+});
+const recipes = $("bridge-recipes").innerHTML;
+assert.ok(recipes.includes('data-provider="codex"'), "Codex 接入说明没有独立折叠区");
+assert.ok(recipes.includes('data-provider="claude"'), "Claude Code 接入说明没有独立折叠区");
+assert.ok(!recipes.includes('data-provider="codex" open'), "Codex 接入说明不应默认展开");
+assert.ok(!recipes.includes('data-provider="claude" open'), "Claude Code 接入说明不应默认展开");
+const currentPrompt = $("bridge-recipes").innerHTML.match(
+  /id="rcp-codex-current">([\s\S]*?)<\/pre>/,
+)[1];
+assert.ok(currentPrompt.includes("--attach current"), "旧 serve 下没有生成当前会话接入提示词");
+assert.ok(currentPrompt.includes("CODEX_THREAD_ID"), "接入提示没有先检查当前 thread 环境");
+assert.ok(currentPrompt.includes("CODEX_HOME"), "接入提示没有解释 app-server 的状态目录权限");
+assert.ok(currentPrompt.includes("一次性沙箱外执行"), "接入提示仍会让 Codex 在只读沙箱里直接试跑");
+await panel.copyText("完整的接入提示词");
+assert.equal(fallbackCopied, "完整的接入提示词", "Clipboard API 拒绝后没有走兼容复制");
 
 // ---- 选中的工作区展开，其余一律折叠成一行 ----
 //
@@ -333,6 +394,24 @@ assert.ok(
 // XSS：整份 payload 都来自对端的 status.json，每一个插值点都是外部数据
 const EVIL = "<img src=x onerror=alert(1)>";
 panel.setWrite(true);
+panel.applyCluster({
+  node: "role-box",
+  nodes: [{
+    node: "role-box", local: true, reachable: true,
+    agents: [{ ...agent("reviewer"), has_persona: true }], runs: [], events: [],
+  }],
+});
+const roleTopo = $("topo-body").innerHTML;
+assert.ok(roleTopo.includes('data-op="persona"'), "现有 Agent 没有角色卡入口");
+assert.ok(roleTopo.includes('id="agent-persona"'), "新建 Agent 不能填写角色卡");
+assert.ok(roleTopo.includes("角色卡 ✓"), "已配置角色卡的 Agent 没有明确状态");
+assert.ok(roleTopo.includes('class="card-persona configured"'), "角色卡状态没有落在稳定的轻量入口上");
+assert.match(
+  roleTopo,
+  /<div class="detail">[\s\S]*data-op="persona"[\s\S]*<\/div>/,
+  "角色卡入口没有放在元信息行，会重新挤乱 Agent 名称和运行状态",
+);
+
 panel.applyCluster({
   node: "x",
   nodes: [

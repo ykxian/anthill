@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from anthill.agent.context import ContextBuilder
-from anthill.agent.conversation import chat_payload, plan_reply
+from anthill.agent.conversation import chat_payload, message_expects_reply, plan_reply
 from anthill.agent.handlers import HandlerContext
 from anthill.agent.loop import AgentLoop, LoopOutcome
 from anthill.agent.memory import ThreadMemory
@@ -27,8 +27,10 @@ from anthill.core.payloads import (
     TaskResultPayload,
 )
 from anthill.core.router import parse_address
+from anthill.discovery.registry import PeerRegistry
 from anthill.providers.base import ChatProvider, Msg
 from anthill.security.policy import PolicyEngine, TrustLevel, trust_of
+from anthill.web.workspaces import paths_for_node
 
 MAX_SUMMARY_CHARS = 32_000
 MAX_MENTION_BODY = 30_000
@@ -133,12 +135,20 @@ class LlmHandler:
         if env.type not in (MessageType.TASK_REQUEST, MessageType.CHAT):
             ctx.log.info("msg.ignored", msg=env.id, type=str(env.type))
             return
-
+        trusted_peers = set(self._trusted_peers)
+        trusted_peers.update(
+            peer.node
+            for peer in PeerRegistry(ctx.layout.root, self_name=ctx.config.node.name).all()
+            if peer.trusted
+        )
+        local_paths = paths_for_node(env.from_.node)
         trust = trust_of(
             env.from_,
             local_node=ctx.config.node.name,
             roles={name: a.role for name, a in ctx.config.agents.items()},
-            trusted_peers=set(self._trusted_peers),
+            trusted_peers=trusted_peers,
+            # 重名的本地工作区不能证明来源；只认唯一解析。
+            local_nodes={env.from_.node} if len(local_paths) == 1 else set(),
         )
         if trust is TrustLevel.UNKNOWN:
             # 未知节点连上下文都不该进：注入的成本应该停在这里，而不是靠工具层兜底
@@ -165,6 +175,9 @@ class LlmHandler:
                 security=ctx.config.security,
                 thread=env.thread,
                 messenger=EnvelopeMessenger(env, ctx),
+                sensitive_env=frozenset(
+                    provider.api_key_env for provider in ctx.config.providers.values()
+                ),
             ),
             log=ctx.log,
             trust=trust,
@@ -244,7 +257,15 @@ class LlmHandler:
         self, env: Envelope, ctx: HandlerContext, error: str, *, retryable: bool
     ) -> None:
         if env.type is MessageType.CHAT:
-            await self._send(env, ctx, MessageType.CHAT, ChatPayload(body=f"处理失败：{error}"))
+            if not message_expects_reply(env):
+                ctx.log.info("chat.ended", msg=env.id, thread=env.thread, reason="对方不等回复")
+                return
+            await self._send(
+                env,
+                ctx,
+                MessageType.CHAT,
+                ChatPayload(body=f"处理失败：{error}"),
+            )
             return
         await self._send(
             env,

@@ -269,8 +269,27 @@ def test_adding_starting_and_stopping_an_agent_from_the_page(browser: object, pa
     # 加
     page.fill("#agent-name", "frombrowser")
     page.select_option("#agent-brain", "echo")
+    page.fill("#agent-persona", "你负责浏览器验收，先复现再下结论。")
     page.click('#add-agent button[type="submit"]')
     page.wait_for_selector(card, timeout=15000)
+
+    # 入口始终可见，不需要先猜到要 hover；新建时的角色卡能读回来，也能单独更新
+    page.click(f'{card} [data-op="persona"]')
+    page.wait_for_selector("#persona-editor[open]", timeout=15000)
+    page.wait_for_function(
+        "() => document.getElementById('persona-text').value.includes('浏览器验收')",
+        timeout=15000,
+    )
+    page.fill("#persona-text", "你负责回归测试；结论必须带真实命令结果。")
+    page.click('#persona-form button[type="submit"]')
+    page.wait_for_selector("#ask[open]", timeout=15000)
+    page.click('#ask [data-pick="cancel"]')
+    page.click(f'{card} [data-op="persona"]')
+    page.wait_for_function(
+        "() => document.getElementById('persona-text').value.includes('真实命令结果')",
+        timeout=15000,
+    )
+    page.click("#persona-cancel")
 
     # 启
     page.hover(card)
@@ -745,9 +764,50 @@ def test_the_bridge_tab_shows_the_queue_and_can_answer_it(
     page.wait_for_selector("#bridge-body .waiting", timeout=15000)
 
     assert "异步" in page.text_content("#bridge-body")
-    # 「把终端接进来」那三条路也在，而且路径是填好的
+    # 接入方法先按客户端收起来，选中哪一种才展开哪一种。
     page.click("#bridge-connect > summary")
+    assert page.locator(".recipe-group[open]").count() == 0
+    page.click('.recipe-group[data-provider="codex"] > summary')
+    page.wait_for_selector("#rcp-codex-current", timeout=15000)
+    assert page.is_hidden("#rcp-mcp")
+    # Codex 有独立配方：已有前台走 queue attach，无 TUI worker 仍走 exec。
+    current = page.text_content("#rcp-codex-current")
+    assert "当前这个 Codex 会话" in current
+    assert "--attach current" in current
+    assert "cc" in current
+    assert str(tmp_path / "ws") in current
+    assert "anthill codex" in page.text_content("#rcp-codex-launch")
+    assert "--yolo" in page.text_content("#rcp-codex-yolo")
+    assert "不推荐" in page.text_content("#bridge-recipes")
+    assert "--attach" in page.text_content("#rcp-codex-attach")
+    assert '"codex", "exec"' in page.text_content("#rcp-codex-worker")
+    assert "codex mcp add" in page.text_content("#rcp-codex-mcp")
+    assert "自动唤醒由" in page.text_content("#bridge-recipes")
+    # 远程 HTTP 或剪贴板权限被拒时会走兼容复制，并在按钮原地确认成功。
+    page.evaluate(
+        """() => {
+          Object.defineProperty(navigator, "clipboard", {
+            configurable: true,
+            value: { writeText: async () => { throw new Error("denied"); } },
+          });
+          document.execCommand = (command) => {
+            window.__anthillCopied = document.activeElement?.value || "";
+            return command === "copy";
+          };
+        }"""
+    )
+    page.click('[data-copy="rcp-codex-current"]')
+    page.wait_for_function(
+        "() => document.querySelector('[data-copy=\"rcp-codex-current\"]').textContent === '已复制'"
+    )
+    assert page.evaluate("window.__anthillCopied") == current
+
+    page.click('.recipe-group[data-provider="codex"] > summary')
+    page.click('.recipe-group[data-provider="claude"] > summary')
     page.wait_for_selector("#rcp-mcp", timeout=15000)
+    assert page.is_hidden("#rcp-codex-current")
+    page.wait_for_timeout(3500)
+    assert page.is_visible("#rcp-mcp"), "定时刷新不应把正在看的接入方法合上"
     # 1 是个真的监控循环（会阻塞的命令），不是「你想起来看一眼」
     assert "--wait" in page.text_content("#rcp-prompt")
     # 2 的命令里**不写 Agent 名** —— 写死的话同一份配置下的会话会抢同一个
@@ -1061,6 +1121,7 @@ def test_the_bridge_tab_follows_the_focused_workspace(
 
     page.click('.tab[data-pane="bridge"]')
     page.click("#bridge-connect > summary")
+    page.click('.recipe-group[data-provider="claude"] > summary')
     page.wait_for_selector("#rcp-mcp", timeout=15000)
     assert "collab-tst" in page.text_content("#rcp-mcp"), "命令指向了别的工作区"
     assert "ANTHILL_AGENT=cc" in page.text_content("#rcp-pin")

@@ -46,7 +46,16 @@ from anthill.web.actions import (
     start_run,
     write_config,
 )
-from anthill.web.agents import AgentSpec, add_agent, agent_op, remove_agent, start_agent, stop_agent
+from anthill.web.agents import (
+    AgentSpec,
+    PersonaSpec,
+    add_agent,
+    agent_op,
+    remove_agent,
+    start_agent,
+    stop_agent,
+    update_persona,
+)
 from anthill.web.bridge_panel import BridgeReply
 from anthill.web.bridge_panel import inbox as bridge_inbox
 from anthill.web.bridge_panel import reply as bridge_reply
@@ -568,6 +577,31 @@ def mount_panel_actions(
         _guard(request)
         ctx = _pick(nodes, node)
         return _agent_edit(ctx.layout, log, lambda fresh: add_agent(ctx.layout, fresh, body))
+
+    @app.get(f"{PANEL_PATH}/api/agents/{{name}}/persona")
+    async def panel_agent_persona(request: Request, name: str, node: str = "") -> dict[str, Any]:
+        """读取角色卡。它本来就在可读的 node.toml 里，这个接口只是给编辑框用。"""
+        _guard(request)
+        ctx = _pick(nodes, node)
+        try:
+            # 配置监听是异步的；刚保存完立刻再打开时直接读盘，别短暂显示旧卡。
+            agent = Config.load_from(ctx.layout).agent(name)
+        except AntHillError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"name": name, "persona": agent.persona}
+
+    @app.put(f"{PANEL_PATH}/api/agents/{{name}}/persona")
+    async def panel_agent_persona_update(
+        request: Request, name: str, body: PersonaSpec = Body(...), node: str = ""
+    ) -> dict[str, Any]:
+        """设置或清空可选角色卡；空串恢复默认身份，不影响没有角色卡的旧配置。"""
+        _guard(request)
+        ctx = _pick(nodes, node)
+        return _agent_edit(
+            ctx.layout,
+            log,
+            lambda fresh: update_persona(ctx.layout, fresh, name, body.persona),
+        )
 
     @app.delete(f"{PANEL_PATH}/api/agents/{{name}}")
     async def panel_agent_remove(request: Request, name: str, node: str = "") -> dict[str, Any]:

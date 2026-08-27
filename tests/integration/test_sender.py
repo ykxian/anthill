@@ -14,16 +14,20 @@ import pytest
 
 from anthill.agent.sender import Sender
 from anthill.core import outbox as outbox_module
-from anthill.core.envelope import TransportKind
-from anthill.core.errors import UnknownRecipient
+from anthill.core.config import PeerSection
+from anthill.core.envelope import Envelope, TransportKind
+from anthill.core.errors import UnknownRecipient, UnroutableNode
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.outbox import Outbox
-from anthill.core.payloads import MessageType, ReceiptPayload, TaskRequestPayload
+from anthill.core.paths import NodeLayout
+from anthill.core.payloads import ChatPayload, MessageType, ReceiptPayload, TaskRequestPayload
 from anthill.core.router import Router
 from anthill.core.states import DeliveryState, DeliveryTracker
+from anthill.core.workspace import create_workspace
 from anthill.transport.base import DeliveryResult, Destination
 from anthill.transport.registry import TransportRegistry
+from anthill.web.workspaces import remember
 
 
 class SlowTransports(TransportRegistry):
@@ -126,3 +130,55 @@ async def test_unknown_recipient_is_reported_not_swallowed(layout, config, addr,
             type=MessageType.TASK_REQUEST,
             payload=TaskRequestPayload(title="查无此人"),
         )
+
+
+async def test_registered_workspace_on_this_machine_uses_local_transport(
+    tmp_path, layout, config, addr, make_sender
+):
+    """机器清单里的另一个工作区不是远端 peer，不需要配对。"""
+    remote_layout = NodeLayout(tmp_path / "data-system")
+    remote_config = create_workspace(remote_layout, node_name="data-system")
+    remember(layout.workspace, port=0)
+    remember(remote_layout.workspace, port=0)
+    transports = TransportRegistry(config, layout)
+    sender, tracker, _ = make_sender(transports)
+
+    env = await sender.send_new(
+        to=addr("echo", node=remote_config.node.name),
+        type=MessageType.TASK_REQUEST,
+        payload=TaskRequestPayload(title="同机跨工作区"),
+    )
+
+    delivered = Mailbox(remote_layout.mailbox_dir("echo")).list_new()
+    assert [Mailbox.read_envelope(path).id for path in delivered] == [env.id]
+    assert tracker.get(env.id).state is DeliveryState.DELIVERED
+    assert transports.destination_for(env).local_workspace == remote_layout.workspace
+
+
+def test_a_registered_workspace_cannot_silently_shadow_the_current_node(
+    tmp_path, layout, config, make_task
+) -> None:
+    duplicate = NodeLayout(tmp_path / "duplicate")
+    create_workspace(duplicate, node_name=config.node.name)
+    remember(duplicate.workspace, port=0)
+
+    with pytest.raises(UnroutableNode, match="其它工作区都叫"):
+        TransportRegistry(config, layout).destination_for(make_task())
+
+
+def test_a_local_workspace_cannot_silently_shadow_a_peer(tmp_path, layout, config, addr) -> None:
+    local = NodeLayout(tmp_path / "local-lab")
+    create_workspace(local, node_name="lab")
+    remember(local.workspace, port=0)
+    ambiguous = config.model_copy(
+        update={"peers": {"lab": PeerSection(transport=TransportKind.LAN, endpoint="http://lab")}}
+    )
+    env = Envelope.new(
+        sender=addr("alpha"),
+        recipient=addr("echo", node="lab"),
+        type=MessageType.CHAT,
+        payload=ChatPayload(body="该投给谁"),
+    )
+
+    with pytest.raises(UnroutableNode, match=r"本机工作区.*peer"):
+        TransportRegistry(ambiguous, layout).destination_for(env)

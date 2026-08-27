@@ -21,7 +21,7 @@ import typer
 from rich.prompt import Prompt
 from rich.table import Table
 
-from anthill.adapters.bridge import AWAITS_REPLY, BridgeHandler, parse_note
+from anthill.adapters.bridge import BridgeHandler, note_needs_reply, parse_note
 from anthill.adapters.bridge_connect import watch_prompt
 from anthill.adapters.bridge_session import pick_agent, wait_for_message
 from anthill.agent.sender import Sender
@@ -37,10 +37,6 @@ from anthill.core.payloads import ChatPayload, MessageType
 from anthill.core.router import Router, parse_address
 from anthill.core.states import DeliveryTracker
 from anthill.transport.registry import TransportRegistry
-
-NEEDS_REPLY_TYPES = frozenset(str(t) for t in AWAITS_REPLY)
-"""front matter 里的 `type` 是字符串，而 AWAITS_REPLY 装的是枚举 ——
-在这里转一次，别让两边各写一份类型名字面量。"""
 
 DEFAULT_CLI_AGENT = "cli"
 POLL_INTERVAL = 0.3
@@ -371,7 +367,7 @@ def _pending_json(handler: BridgeHandler, agent: str) -> dict[str, Any]:
                 # 别人给你的答复（你派出去的活有回音了），不回它是对的 ——
                 # 回了只会在对方队列里生成一条新待办。但它同样得把人唤醒，
                 # 否则「我派出去的活办完了」这件事没有任何人会知道。
-                "needs_reply": kind in NEEDS_REPLY_TYPES,
+                "needs_reply": note_needs_reply(headers),
                 "thread": headers.get("thread", ""),
                 "body": body.strip(),
             }
@@ -448,7 +444,7 @@ def _list_pending(handler: BridgeHandler, agent: str) -> None:
     for path in pending:
         headers, body = parse_note(path.read_text(encoding="utf-8"))
         kind = headers.get("type", "-")
-        needs = kind in NEEDS_REPLY_TYPES
+        needs = note_needs_reply(headers)
         notices += 0 if needs else 1
         table.add_row(
             path.stem[-6:],

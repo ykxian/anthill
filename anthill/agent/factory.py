@@ -57,6 +57,7 @@ def build_handler(
                 step_timeout=config.runtime.task_timeout,
                 bridge_step_timeout=config.runtime.bridge_task_timeout,
             ),
+            persona=agent.persona,
         )
 
     if agent.bridge:
@@ -75,6 +76,9 @@ def build_handler(
                 cwd=Path(agent.command_cwd) if agent.command_cwd else layout.workspace,
                 timeout=agent.command_timeout,
                 prompt_via=agent.prompt_via,
+                sensitive_env=frozenset(
+                    provider.api_key_env for provider in config.providers.values()
+                ),
             ),
             agent_name=agent_name,
             role=agent.role,
@@ -102,6 +106,7 @@ def build_handler(
                 bridge_step_timeout=config.runtime.bridge_task_timeout,
             ),
             judge_provider=judge,
+            persona=agent.persona,
         )
 
     section = config.provider_for(agent_name)

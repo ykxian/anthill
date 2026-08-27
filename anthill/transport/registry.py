@@ -15,6 +15,7 @@ from anthill.transport.base import DeliveryResult, Destination, Transport
 from anthill.transport.lan import LanTransport
 from anthill.transport.local import LocalTransport
 from anthill.transport.ssh import SshTransport
+from anthill.web.workspaces import paths_for_node
 
 
 class TransportRegistry:
@@ -43,6 +44,7 @@ class TransportRegistry:
                 log=log or EventLog(None, agent=config.node.name, echo=False),
             ),
         }
+        self._local_transports: dict[str, LocalTransport] = {}
 
     def register(self, transport: Transport) -> None:
         self._transports[transport.kind] = transport
@@ -50,9 +52,36 @@ class TransportRegistry:
     def destination_for(self, env: Envelope) -> Destination:
         """先看 node.toml 里显式配的 peer，再看 peers 列表里信任过的（LAN 发现来的）。"""
         node = env.to.node
-        if node == self._config.node.name:
-            return Destination(node=node, agent=env.to.agent)
+        local = paths_for_node(node)
+        current = self._layout.workspace.resolve()
+        other_local = [path for path in local if path != current]
         peer = self._config.peers.get(node) or self._lan_peer(node)
+        if node == self._config.node.name:
+            if other_local:
+                choices = "、".join(str(path) for path in (current, *other_local))
+                raise UnroutableNode(
+                    f"当前工作区与机器清单里的其它工作区都叫 {node!r}：{choices}；"
+                    "信封无法区分它们，请先把节点改成唯一名称"
+                )
+            if peer is not None:
+                raise UnroutableNode(
+                    f"节点名 {node!r} 同时指向当前工作区和一个 peer；"
+                    "信封无法区分本机与远端，请先把节点改成唯一名称"
+                )
+            return Destination(node=node, agent=env.to.agent)
+        if len(local) > 1:
+            choices = "、".join(str(path) for path in local)
+            raise UnroutableNode(
+                f"本机工作区清单里有多个名为 {node!r} 的节点：{choices}；"
+                "节点名必须唯一，无法安全投递"
+            )
+        if local:
+            if peer is not None:
+                raise UnroutableNode(
+                    f"节点名 {node!r} 同时指向本机工作区 {local[0]} 和一个 peer；"
+                    "信封无法区分本机与远端，请先把节点改成唯一名称"
+                )
+            return Destination(node=node, agent=env.to.agent, local_workspace=local[0])
         if peer is None:
             raise UnroutableNode(
                 f"节点 {node!r} 不在 peers 列表里 —— 发现 ≠ 可通信，"
@@ -67,6 +96,13 @@ class TransportRegistry:
         return PeerSection(transport=TransportKind.LAN, endpoint=record.endpoint)
 
     def transport_for(self, dest: Destination) -> Transport:
+        if dest.local_workspace is not None:
+            key = str(dest.local_workspace)
+            local_transport = self._local_transports.get(key)
+            if local_transport is None:
+                local_transport = LocalTransport(NodeLayout(dest.local_workspace))
+                self._local_transports[key] = local_transport
+            return local_transport
         kind = dest.peer.transport if dest.peer else TransportKind.LOCAL
         transport = self._transports.get(kind)
         if transport is None:
@@ -78,5 +114,5 @@ class TransportRegistry:
         return await self.transport_for(dest).deliver(env, dest)
 
     async def close(self) -> None:
-        for transport in self._transports.values():
+        for transport in (*self._transports.values(), *self._local_transports.values()):
             await transport.close()

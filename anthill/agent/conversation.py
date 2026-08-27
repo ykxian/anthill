@@ -29,6 +29,7 @@ class ChatPlan:
     should_reply: bool
     recipient: Address | None = None
     mentions: tuple[str, ...] = ()
+    expects_reply: bool = False
     reason: str = ""
 
 
@@ -47,6 +48,11 @@ def plan_reply(env: Envelope, *, identity: Address, history: list[Msg], budget: 
     """
     if env.type is not MessageType.CHAT:
         return ChatPlan(should_reply=True, recipient=env.from_)
+    # 不把语义塞进新 payload 字段：旧节点的 extra=forbid 会拒绝整封信。
+    # 协议本来就有 reply_to：普通回答有 reply_to 且无 mentions；
+    # 主动请求无 reply_to；talk 回合有 mentions，依此完整区分。
+    if env.reply_to is not None and not tuple(getattr(env.payload, "mentions", ()) or ()):
+        return ChatPlan(should_reply=False, reason="对方不等回复")
 
     turns = count_turns(history)
     if budget and turns >= budget:
@@ -55,12 +61,16 @@ def plan_reply(env: Envelope, *, identity: Address, history: list[Msg], budget: 
             reason=f"这个话题已经聊了 {turns} 轮，到上限 {budget}，不再接话",
         )
 
+    mentions = tuple(getattr(env.payload, "mentions", ()) or ())
+    continues = any(name != identity.agent for name in mentions)
     partner = _partner(env, identity)
     return ChatPlan(
         should_reply=True,
         recipient=partner,
         # 把自己 @ 回去，对方才知道该继续跟我聊，而不是回给最初那个人
-        mentions=(identity.agent,),
+        mentions=(identity.agent,) if continues else (),
+        # 普通 chat 是一问一答；只有显式 @ 了另一位参与者的 talk 才把球打回去。
+        expects_reply=continues,
     )
 
 
@@ -84,3 +94,13 @@ def _partner(env: Envelope, identity: Address) -> Address:
 
 def chat_payload(body: str, plan: ChatPlan) -> ChatPayload:
     return ChatPayload(body=body, mentions=plan.mentions)
+
+
+def message_expects_reply(env: Envelope) -> bool:
+    """协议级问答语义；不能再用「type 是 chat」代替。"""
+    if env.type is MessageType.TASK_REQUEST:
+        return True
+    if env.type is MessageType.CHAT:
+        mentions = tuple(getattr(env.payload, "mentions", ()) or ())
+        return env.reply_to is None or bool(mentions)
+    return False

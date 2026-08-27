@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -160,6 +161,29 @@ async def test_run_shell_runs_inside_workspace(ctx: ToolContext) -> None:
     result = await RunShellTool().run({"command": "ls"}, ctx)
 
     assert "marker.txt" in result.content
+
+
+async def test_run_shell_does_not_inherit_provider_or_anthill_credentials(
+    ctx: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OTHER_PROVIDER_KEY", "provider-must-not-leak")
+    monkeypatch.setenv("ANTHILL_PANEL_TOKEN", "panel-must-not-leak")
+    monkeypatch.setenv("ANTHILL_TAKEOVER", "1")
+    safe_ctx = replace(ctx, sensitive_env=frozenset({"OTHER_PROVIDER_KEY"}))
+
+    result = await RunShellTool().run(
+        {
+            "command": (
+                "printf '%s|%s|%s|%s' \"$OTHER_PROVIDER_KEY\" "
+                '"$ANTHILL_PANEL_TOKEN" "$ANTHILL_TAKEOVER" "${PATH:+path-ok}"'
+            )
+        },
+        safe_ctx,
+    )
+
+    assert result.ok
+    assert result.content.endswith("|||path-ok")
+    assert "must-not-leak" not in result.content
 
 
 # ---------- finish ----------

@@ -23,12 +23,16 @@ _GRACE_SECONDS = 1.0
 """启动那一刻的写入（pyc 之外偶有触碰）别误报成「代码更新了」。"""
 
 
-def newest_code_mtime() -> float:
+def newest_code_mtime(*, refresh: bool = False) -> float:
     """包里最新一个 .py 的 mtime。带 15s 缓存 —— 状态循环每 30s 问一次，
-    但 WebSocket 每 2s 也会路过，别让它每次都走一遍文件树。"""
+    但 WebSocket 每 2s 也会路过，别让它每次都走一遍文件树。
+
+    自动重启监控要准确知道一组编辑什么时候真正安静下来，所以它显式传
+    ``refresh=True`` 绕过缓存；普通状态展示仍走便宜的缓存路径。
+    """
     global _cache
     now = time.monotonic()
-    if _cache is not None and now - _cache[0] < _TTL_SECONDS:
+    if not refresh and _cache is not None and now - _cache[0] < _TTL_SECONDS:
         return _cache[1]
     newest = 0.0
     for path in CODE_ROOT.rglob("*.py"):
@@ -42,10 +46,11 @@ def newest_code_mtime() -> float:
     return newest
 
 
-def stale_since(started_iso: str) -> bool:
+def stale_since(started_iso: str, *, code_mtime: float | None = None) -> bool:
     """`started_iso` 之后代码又改过 = 这个进程跑的是旧版，该重启了。"""
     try:
         started = datetime.fromisoformat(started_iso).timestamp()
     except (ValueError, TypeError):
         return False
-    return newest_code_mtime() > started + _GRACE_SECONDS
+    newest = newest_code_mtime() if code_mtime is None else code_mtime
+    return newest > started + _GRACE_SECONDS

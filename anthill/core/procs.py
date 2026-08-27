@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 from contextlib import suppress
+from pathlib import Path
 from typing import TypedDict
 
 _STILL_ACTIVE = 259
@@ -39,7 +40,23 @@ def process_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True  # 别人的进程，但确实在
+    if sys.platform.startswith("linux") and _dead_linux_process(pid):
+        return False
     return True
+
+
+def _dead_linux_process(pid: int) -> bool:
+    """Linux 的 kill(pid, 0) 会把僵尸也算作「存在」。"""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+    # comm 字段在括号里，名字本身可以带 `)`，所以从右边切。
+    _comm, marker, tail = stat.rpartition(")")
+    return bool(marker) and tail.lstrip()[:1] in {"Z", "X"}
 
 
 def _alive_windows(pid: int) -> bool:

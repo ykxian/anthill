@@ -14,7 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from anthill.adapters.bridge import BridgeHandler, parse_note, render_request
+from anthill.adapters.bridge import BridgeHandler, note_needs_reply, parse_note, render_request
+from anthill.agent.conversation import message_expects_reply
 from anthill.agent.factory import build_handler
 from anthill.agent.runtime import AgentRuntime
 from anthill.core.config import Config
@@ -115,12 +116,18 @@ def task_to_cc(body: str = "帮我看看 date.py") -> Envelope:
     )
 
 
-def chat_to_cc(body: str = "你怎么看", mentions: tuple[str, ...] = ()) -> Envelope:
+def chat_to_cc(
+    body: str = "你怎么看",
+    mentions: tuple[str, ...] = (),
+    *,
+    expects_reply: bool = True,
+) -> Envelope:
     return Envelope.new(
         sender=Address(node="testnode", agent="cli"),
         recipient=Address(node="testnode", agent="cc"),
         type=MessageType.CHAT,
         payload=ChatPayload(body=body, mentions=mentions),
+        reply_to=None if expects_reply else "01J00000000000000000000000",
     )
 
 
@@ -139,6 +146,7 @@ def test_the_request_file_tells_a_human_how_to_reply() -> None:
     assert "给 date.py 补单测" in text
     assert f"outbox/{env.id}.md" in text  # 回复该写到哪，写在纸面上
     assert "testnode:cli" in text
+    assert "needs_reply: true" in text
 
 
 def test_front_matter_is_parsed_without_a_yaml_dependency() -> None:
@@ -247,6 +255,24 @@ async def test_a_task_result_is_not_marked_as_awaiting_a_reply(
     assert (handler.dir("pending") / f"{ask.id}.json").is_file(), "派活仍然要能回"
 
 
+async def test_a_terminal_chat_answer_is_visible_but_not_pending(
+    node: tuple[NodeLayout, Config],
+) -> None:
+    layout, config = node
+    handler = handler_for(layout)
+    answer = chat_to_cc("检查通过", expects_reply=False)
+
+    async with running(layout, config, handler):
+        Mailbox(layout.mailbox_dir("cc")).deposit(answer)
+        note = handler.dir("inbox") / f"{answer.id}.md"
+        await wait_until(note.is_file)
+
+    headers, body = parse_note(note.read_text(encoding="utf-8"))
+    assert body.strip() == "检查通过"
+    assert not note_needs_reply(headers)
+    assert not (handler.dir("pending") / f"{answer.id}.json").exists()
+
+
 async def test_the_sender_still_gets_an_accepted_receipt_right_away(
     node: tuple[NodeLayout, Config],
 ) -> None:
@@ -305,9 +331,9 @@ async def test_a_reply_to_a_chat_goes_back_as_a_chat(
         write_draft(handler, f"{env.id}.md", "我觉得先加日志")
         await wait_until(lambda: any(e.type is MessageType.CHAT for e in envelopes(cli_box)))
 
-    assert next(e for e in envelopes(cli_box) if e.type is MessageType.CHAT).payload.body == (
-        "我觉得先加日志"
-    )
+    reply = next(e for e in envelopes(cli_box) if e.type is MessageType.CHAT)
+    assert reply.payload.body == "我觉得先加日志"
+    assert not message_expects_reply(reply)
 
 
 async def test_a_chat_reply_follows_the_mention_rule(
@@ -328,6 +354,7 @@ async def test_a_chat_reply_follows_the_mention_rule(
     got = envelopes(coder_box)[0]
     assert got.type is MessageType.CHAT
     assert got.payload.mentions == ("cc",)  # 把球打回来
+    assert message_expects_reply(got)
 
 
 def _pending(handler) -> bool:

@@ -24,6 +24,11 @@ uv run anthill serve -w . --panel-write
 编排就得有一个 `coordinator`）、把它启动起来、给它派活、跟它对话、改 `node.toml`。
 **不用开第二个终端。**
 
+`--panel-write` 默认也会监视本地源码：一组 `.py` 修改连续稳定 10 秒后，仍在运行的
+旧 agentd 会等当前消息处理完，自动停掉并用新代码拉起；原本停着的 Agent 不会启动。
+不需要这项开发期便利时，加 `--no-auto-restart-agents`。serve 本身仍需在升级到支持
+此功能的版本时手动重启一次。
+
 > 密钥存在 `~/.anthill/secrets.env`（0600），**不进 `node.toml`** ——
 > 那个文件会进 git、会被 `fetch` 拉走、会显示在配置页上。
 > 不想落盘就照旧在终端 `export`，面板会显示「来自环境变量」。
@@ -84,7 +89,86 @@ uv run anthill serve -w . --host 0.0.0.0 --panel-write --panel-token
 两条路写的是同一批文件（`bridge/inbox/` 收，`bridge/outbox/` 回），
 所以会话在盯着的同时，你照样可以在网页上先替它回一句。
 
-## 6. 把 Claude Code 接进来
+## 6. 把 Codex 接进来
+
+如果要像普通 Codex TUI 一样对话，同时在 AntHill 来信时自动响应，
+先配一个 bridge Agent：
+
+```toml
+[agents.codex-t1]
+role = "worker"
+bridge = true
+```
+
+```bash
+uv run anthill codex codex-t1 -w /你的工作区
+```
+
+从普通 shell 运行时，这条命令会启动一个只监听 `127.0.0.1` 的私有
+app-server，TUI 与桥接器共用同一条 thread。
+
+如果 Codex 前台已经开着，不要用第二个 `thread/resume` 抢 writer。从另一个
+终端接入时，先在 Codex 的 `/status` 查看 thread ID，再运行：
+
+```bash
+uv run anthill codex codex-t1 --attach THREAD_ID \
+  -w /你的工作区
+```
+
+这条路径用 Codex 原生 `queue` 唤醒已有 writer，来信、Working 状态和回答都
+显示在原来的 TUI；独立的只读 app-server 只负责取得最终回答并送回发件人。
+已有脚本继续使用 `--resume <thread-id>` 也可以：遇到 active writer 时会自动
+降级为 queue attach。当前 Codex CLI 必须提供 `codex queue`。
+attach 命令是这条映射的常驻监听器，请让它保持运行；原 Codex TUI 仍照常使用。
+
+托管模式会在 thread 启动/恢复时一次性注入 AntHill 身份、自动回信和主动发信规则；
+之后每封来信在 TUI 里只有一行紧凑元数据和正文，不再重复整段操作说明。接入一个
+已经由别的前台持有的 thread 时，无法改它的 developer instructions，所以首次来信
+会随消息带上兼容规则。普通 chat 是“一问一答”：回答投递后不会再要求对方确认；
+只有显式 `anthill talk` 才会继续多轮传球。
+
+在 Codex 的普通用户回合里让它主动找其他 Agent 时，会话规则会让它使用 bridge CLI。
+正文含代码、反引号或 `$` 时走文件，避免 shell 改写内容：
+
+```bash
+uv run anthill bridge codex-t1 --to coder --kind chat \
+  --text-file /tmp/message.md -w /你的工作区
+```
+
+不需要交互 TUI，只想让 agentd 独立无人值守时，用 Codex 官方的
+非交互入口 `codex exec`：
+
+```toml
+[agents.codex]
+role = "worker"
+command = ["codex", "exec", "--approve-for-me", "--skip-git-repo-check",
+           "--color", "never", "--ephemeral"]
+prompt_via = "stdin"
+command_timeout = 900.0
+```
+
+然后像启动其他 Agent 一样启动：
+
+```bash
+uv run anthill agent start codex -w /你的工作区
+uv run anthill send codex "看看 utils/date.py 有没有边界问题"
+```
+
+也可以在面板“加一个 Agent”里直接选 **codex**，它会生成同一套安全默认值。
+`--approve-for-me` 使用 workspace-write 沙箱与自动审查，不会绕过 Codex 权限；
+`--ephemeral` 避免每封消息重复保存一份会话，thread 历史由 AntHill 自己续上。
+
+想让 Codex 会话主动查询、发消息，也可以装 MCP：
+
+```bash
+codex mcp add anthill-demo -- /路径/.venv/bin/anthill mcp serve -w /你的工作区
+ANTHILL_AGENT=codex-t1 codex
+```
+
+Codex 的 MCP 配置在用户配置中，所以 server 名建议带工作区名。MCP 是拉取式的：
+它自己不会唤醒空闲会话；自动唤醒由 `anthill codex` 的 queue/app-server 桥接负责。
+
+## 7. 把 Claude Code 接进来
 
 ```bash
 uv sync --extra mcp
@@ -207,7 +291,7 @@ ANTHILL_AGENT=cc1 claude "$(/路径/anthill bridge cc1 --prompt -w /你的工作
 
 `cur/`（此刻正在被处理的）任何情况下都不碰 —— 删它是在跟 agentd 抢文件。
 
-## 7. 存一件常做的事 / 定时跑 / 跑完通知
+## 8. 存一件常做的事 / 定时跑 / 跑完通知
 
 ```toml
 [templates.review]

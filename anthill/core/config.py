@@ -142,6 +142,7 @@ class AgentSection(_Section):
     name: str = ""
     role: str = "worker"
     provider: str | None = None
+    # 核心配置保持向后兼容；面板的编辑 API 单独限制 2000 字符。
     persona: str = ""
 
     judge_provider: str | None = None
@@ -643,7 +644,7 @@ role = "worker"
 # [agents.coder]
 # role = "worker"
 # provider = "deepseek"
-# persona = "你写最小可用的代码，改动前先读现状。"
+# persona = "你写最小可用的代码，改动前先读现状。"  # 可选角色卡（职责、专长、工作风格）
 # tools = ["read_file", "write_file", "edit_file", "list_dir", "search_text", "find_files",
 #           "run_shell", "send_message", "finish"]
 # max_steps = 20           # 步数熔断
@@ -662,9 +663,18 @@ role = "worker"
 # command_timeout = 900.0
 # chat_turns = 6         # 同一话题最多接几轮，防止两个 Agent 聊不完
 #
-# ---- 让一个常驻的交互式会话参与（你一直开着的 Claude Code，或就是你本人）----
+# Codex 无人值守：agentd 每收到一封消息就调用一次 codex exec，不依赖交互会话唤醒。
+# [agents.codex]
+# role = "worker"
+# command = ["codex", "exec", "--approve-for-me", "--skip-git-repo-check",
+#            "--color", "never", "--ephemeral"]
+# prompt_via = "stdin"  # 长 prompt / 代码片段不经过 shell 或 argv
+# command_timeout = 900.0
+#
+# ---- 让一个常驻的交互式会话参与（Claude Code / Codex，或就是你本人）----
 # 收到的消息写成 .anthill/agents/<name>/bridge/inbox/*.md，回复写进 ../outbox/。
 # 收消息不阻塞，人可以慢慢想；outbox 里放带 `to:` 的文件就是主动发起一条消息。
+# Codex 交互唤醒：anthill codex <name> -w <workspace>
 # [agents.cc]
 # role = "worker"
 # bridge = true

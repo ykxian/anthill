@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from anthill.core.errors import AntHillError
@@ -35,6 +36,7 @@ SECRETS_FILE = "secrets.env"
 FILE_MODE = 0o600
 MAX_NAME = 128
 MAX_VALUE = 8192
+PANEL_TOKEN_ENV = "ANTHILL_PANEL_TOKEN"
 
 
 def secrets_path() -> Path:
@@ -89,6 +91,29 @@ def load_into_env(env: dict[str, str] | None = None) -> int:
             target[name] = value
             injected += 1
     return injected
+
+
+def sanitized_child_env(
+    *, blocked: Iterable[str] = (), extra: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """给外部 Agent/CLI 子进程的环境：保留正常 shell 配置，剥掉 AntHill 凭据。
+
+    `secrets.env` 里的所有名字、面板 bearer token、全部 ``ANTHILL_*`` 内部变量，
+    以及调用方从 node.toml provider 配置得到的变量名都不会默认传给项目内 Agent。
+    调用方显式给的 `extra` 最后合并，便于传递无密钥的内部会话变量。
+    """
+    env = dict(os.environ)
+    sensitive = {
+        *read_all(),
+        *blocked,
+        PANEL_TOKEN_ENV,
+        *(name for name in env if name.startswith("ANTHILL_")),
+    }
+    for name in sensitive:
+        env.pop(name, None)
+    if extra:
+        env.update(extra)
+    return env
 
 
 def set_secret(name: str, value: str) -> None:

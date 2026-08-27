@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from anthill.core.procs import process_alive
@@ -30,6 +31,27 @@ def test_a_finished_process_is_not_alive() -> None:
     assert process_alive(child.pid) is False
 
 
+def test_a_linux_zombie_is_not_alive() -> None:
+    """kill(pid, 0) 看得见僵尸，但面板不应因此一直等它。"""
+    if not sys.platform.startswith("linux"):
+        return
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    stat_path = Path(f"/proc/{child.pid}/stat")
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            stat = stat_path.read_text(encoding="utf-8")
+            if stat.rpartition(")")[2].lstrip()[:1] == "Z":
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("子进程没有在 5 秒内进入僵尸状态")
+        assert process_alive(child.pid) is False
+    finally:
+        child.wait(timeout=5)
+
+
 def test_nonsense_pids_are_not_alive() -> None:
     assert process_alive(0) is False
     assert process_alive(-1) is False
@@ -37,8 +59,6 @@ def test_nonsense_pids_are_not_alive() -> None:
 
 def test_kill_tree_terminates_a_process_group() -> None:
     """POSIX 语义保持：整组 TERM，孙子进程跑不掉。"""
-    import time
-
     from anthill.core.procs import kill_tree
 
     child = subprocess.Popen(

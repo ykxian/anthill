@@ -16,6 +16,7 @@ from typing import Any, ClassVar
 from anthill.agent.tools.base import BaseTool, ToolContext, ToolResult, string_param
 from anthill.core.payloads import RiskLevel
 from anthill.core.procs import detach_kwargs, kill_tree
+from anthill.security.secrets import sanitized_child_env
 
 KILL_GRACE_SECONDS = 2.0
 
@@ -56,6 +57,7 @@ class RunShellTool(BaseTool):
             proc = await asyncio.create_subprocess_shell(
                 command,
                 cwd=str(ctx.workspace),
+                env=sanitized_child_env(blocked=ctx.sensitive_env),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,  # 合并，避免两路各自阻塞
                 **detach_kwargs(),  # 自成进程组/独立会话，超时才能整组杀干净

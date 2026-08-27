@@ -1,4 +1,4 @@
-"""`anthill mcp serve` —— 以 stdio 起一个 MCP server，供 Claude Code 拉起。"""
+"""`anthill mcp serve` —— 以 stdio 起一个 MCP server，供外部 Agent 客户端拉起。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from anthill.cli.common import console, fail, load
 from anthill.core.errors import AntHillError
 from anthill.mcp.server import build_server
 
-mcp_app = typer.Typer(help="MCP：把 AntHill 暴露给 Claude Code 这类客户端")
+mcp_app = typer.Typer(help="MCP：把 AntHill 暴露给 Claude Code、Codex 这类客户端")
 
 
 @mcp_app.command("serve")
@@ -22,7 +22,8 @@ def serve(
 ) -> None:
     """以 stdio 起一个 MCP server。
 
-    **由客户端拉起，不是你手动跑。** 在 Claude Code 的 MCP 配置里写：
+    **由客户端拉起，不是你手动跑。** Claude Code、Codex 等支持 stdio MCP 的
+    客户端都可以使用；例如配置内容是：
 
         {"mcpServers": {"anthill": {
             "command": "anthill",

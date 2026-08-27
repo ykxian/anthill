@@ -157,10 +157,11 @@ class AgentRuntime:
                 "policy.loosened",
                 unattended_allow=", ".join(self.config.security.unattended_allow),
             )
-        queue: asyncio.Queue[Path] = asyncio.Queue()
+        queue: asyncio.Queue[Path | None] = asyncio.Queue()
+        consumer = asyncio.create_task(self._consume(queue, stop), name="consume")
         workers = [
             asyncio.create_task(self._produce(queue), name="watch"),
-            asyncio.create_task(self._consume(queue), name="consume"),
+            consumer,
             asyncio.create_task(self.sender.run_retry_loop(stop), name="retry"),
             asyncio.create_task(self._sweep_loop(stop), name="sweep"),
         ]
@@ -168,21 +169,37 @@ class AgentRuntime:
             # 只有需要「时间驱动」的 handler（coordinator 的催办与超时）才起这个任务
             workers.append(asyncio.create_task(self._tick_loop(stop), name="tick"))
         stopper = asyncio.create_task(stop.wait(), name="stop")
+        all_tasks = [stopper, *workers]
         try:
             # 任一 worker 意外退出也要唤醒主流程，不能傻等 stop
             done, pending = await asyncio.wait(
                 {stopper, *workers}, return_when=asyncio.FIRST_COMPLETED
             )
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            for task in done:
-                if task is not stopper and (exc := task.exception()) is not None:
+            if stopper in done:
+                # 先停收件和后台循环，但不取消正在执行的 handler。
+                # 队列里尚未 claim 的路径仍在 inbox/new，下次启动会重新扫到。
+                for worker in workers:
+                    if worker is not consumer:
+                        worker.cancel()
+                queue.put_nowait(None)
+                await asyncio.gather(*workers, return_exceptions=True)
+            else:
+                for pending_task in pending:
+                    pending_task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+            for done_task in done:
+                if done_task is not stopper and (exc := done_task.exception()) is not None:
                     raise exc
         finally:
+            # run() 自身被强制取消时也必须收干净 worker。_process
+            # 会把未完成的信留在 cur，不会误归档。
+            for cleanup_task in all_tasks:
+                if not cleanup_task.done():
+                    cleanup_task.cancel()
+            await asyncio.gather(*all_tasks, return_exceptions=True)
             await self.aclose()
 
-    async def _produce(self, queue: asyncio.Queue[Path]) -> None:
+    async def _produce(self, queue: asyncio.Queue[Path | None]) -> None:
         """watcher → 队列。单独一个任务，好让消费慢时事件不丢。"""
         stream = self._watcher.stream()
         try:
@@ -191,10 +208,12 @@ class AgentRuntime:
         finally:
             await stream.aclose()
 
-    async def _consume(self, queue: asyncio.Queue[Path]) -> None:
+    async def _consume(self, queue: asyncio.Queue[Path | None], stop: asyncio.Event) -> None:
         """串行处理：同一个 Agent 一次只处理一条消息，避免上下文交错。"""
         while True:
             path = await queue.get()
+            if path is None or stop.is_set():
+                return
             await self._process(path)
 
     async def _tick_loop(self, stop: asyncio.Event) -> None:
@@ -320,16 +339,26 @@ class AgentRuntime:
             self.log.error("msg.invalid", file=claimed.name, error=str(exc))
             return
 
+        completed = False
         try:
             await self._dispatch(env)
+            completed = True
+        except asyncio.CancelledError:
+            # 强制停止/意外 worker 退出：保留 cur + claimed 状态，
+            # 下次启动 recover_stale 才能真正重放，绝不能冒充已完成。
+            self.log.warn("msg.interrupted", msg=env.id, thread=env.thread)
+            raise
         except Exception as exc:  # handler 抛错不能拖垮 agentd
             self.log.error("msg.handler_error", msg=env.id, error=f"{type(exc).__name__}: {exc}")
             await self._report_failure(env, exc)
+            completed = True
         finally:
-            self.mailbox.archive(claimed)
-            # **归档之后**才落 completed。反过来会开一扇窗：落了 completed 却还没归档时
-            # 崩溃，recover_stale 把信退回 new/，而 seen.db 说「干完了」—— 这条就丢了处理。
-            self._seen.complete(env.id)
+            if completed:
+                self.mailbox.archive(claimed)
+                # **归档之后**才落 completed。反过来会开一扇窗：落了 completed
+                # 却还没归档时崩溃，recover_stale 把信退回 new/，而
+                # seen.db 说「干完了」—— 这条就丢了处理。
+                self._seen.complete(env.id)
 
     def _check_signature(self, env: Envelope) -> None:
         """跨节点来件必须验签 —— 只要我们持有对方的密钥。

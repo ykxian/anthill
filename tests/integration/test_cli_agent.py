@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from anthill.adapters.cli_agent import CliAgentHandler, CliSpec, parse_delivery
+from anthill.agent.conversation import message_expects_reply
 from anthill.agent.factory import build_handler
 from anthill.agent.runtime import AgentRuntime
 from anthill.core.config import Config
@@ -288,7 +289,67 @@ async def test_chat_gets_a_chat_reply(tmp_path: Path) -> None:
     # Assert
     reply = next(e for e in replies_in(cli_box) if e.type is MessageType.CHAT)
     assert reply.payload.body == "我觉得可以先跑一遍测试"
+    assert not message_expects_reply(reply)
     assert reply.thread == chat.thread
+
+
+async def test_a_terminal_processes_a_final_chat_without_replying(tmp_path: Path) -> None:
+    """expects_reply=false 是「把答案记住但别再回」，不是丢掉整条来信。"""
+    layout = NodeLayout(tmp_path).ensure_base()
+    seen = tmp_path / "final-chat.txt"
+    command = fake_agent(
+        tmp_path,
+        f"open({str(seen)!r}, 'w', encoding='utf-8').write(prompt)\nprint('已记住')",
+    )
+    config = node_with(layout, command)
+    cli_box = Mailbox(layout.mailbox_dir("cli"))
+    chat = Envelope.new(
+        sender=Address(node="testnode", agent="cli"),
+        recipient=Address(node="testnode", agent="cc"),
+        type=MessageType.CHAT,
+        payload=ChatPayload(body="验收已通过"),
+        reply_to="01J00000000000000000000000",
+    )
+
+    async with running(layout, config, handler_for(command, tmp_path)):
+        Mailbox(layout.mailbox_dir("cc")).deposit(chat)
+        await wait_until(
+            lambda: any(
+                p.stem == chat.id
+                for p in layout.mailbox_dir("cc").joinpath("inbox/done").rglob("*.json")
+            )
+        )
+
+    assert "验收已通过" in seen.read_text(encoding="utf-8")
+    assert not any(env.type is MessageType.CHAT for env in replies_in(cli_box))
+    memory = layout.agent_dir("cc") / "threads" / f"{chat.thread}.jsonl"
+    assert "已记住" in memory.read_text(encoding="utf-8")
+
+
+async def test_terminal_agent_does_not_inherit_other_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OTHER_PROVIDER_KEY", "must-not-leak")
+    monkeypatch.setenv("ANTHILL_PANEL_TOKEN", "panel-must-not-leak")
+    command = fake_agent(
+        tmp_path,
+        "print('|'.join((os.environ.get('OTHER_PROVIDER_KEY', ''), "
+        "os.environ.get('ANTHILL_PANEL_TOKEN', ''), "
+        "'path-ok' if os.environ.get('PATH') else 'path-missing')))",
+    )
+    handler = CliAgentHandler(
+        spec=CliSpec(
+            command=tuple(command),
+            cwd=tmp_path,
+            sensitive_env=frozenset({"OTHER_PROVIDER_KEY"}),
+        ),
+        agent_name="cc",
+        role="worker",
+    )
+
+    outcome = await handler.run("看不到密钥")
+
+    assert outcome.summary == "||path-ok"
 
 
 async def test_the_terminal_sees_earlier_turns_of_the_same_thread(tmp_path: Path) -> None:

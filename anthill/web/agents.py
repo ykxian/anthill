@@ -21,6 +21,7 @@ import os
 import signal
 import subprocess
 import sys
+import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -28,6 +29,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from anthill.adapters.command_presets import CODEX
 from anthill.core.config import Config
 from anthill.core.envelope import AGENT_NAME_RE
 from anthill.core.errors import AntHillError
@@ -37,7 +39,7 @@ from anthill.core.procs import detach_kwargs
 
 RUNTIME_FILE = "runtime.json"
 STOP_GRACE = signal.SIGTERM
-BRAINS = ("echo", "bridge", "command", "provider")
+BRAINS = ("echo", "bridge", "codex", "command", "provider")
 
 
 class AgentSpec(BaseModel):
@@ -47,10 +49,18 @@ class AgentSpec(BaseModel):
 
     name: str = Field(min_length=1, max_length=64)
     role: str = Field(default="worker", max_length=64)
-    brain: Literal["echo", "bridge", "command", "provider"] = "echo"
+    brain: Literal["echo", "bridge", "codex", "command", "provider"] = "echo"
     provider: str = Field(default="", max_length=64)
     command: str = Field(default="", max_length=400)
     """`brain = "command"` 时的命令行，按空格切；比如 `claude -p`。"""
+
+    persona: str = Field(default="", max_length=2000)
+
+
+class PersonaSpec(BaseModel):
+    """面板里单独编辑一只 Agent 的可选角色卡。"""
+
+    model_config = ConfigDict(extra="forbid")
 
     persona: str = Field(default="", max_length=2000)
 
@@ -85,17 +95,68 @@ def remove_agent(layout: NodeLayout, config: Config, name: str) -> dict[str, Any
     return {"ok": True, "name": name, "text": drop_section(text, f"agents.{name}")}
 
 
+def update_persona(layout: NodeLayout, config: Config, name: str, persona: str) -> dict[str, Any]:
+    """只改 ``[agents.<name>]`` 里的 persona，保住其余配置和注释。
+
+    ``node.toml`` 允许手写多行字符串，所以不能武断地只替换一行。这里逐步扩大
+    被替换范围，直到 TOML 重新解析后与原配置**只有 persona 不同**；面板生成的
+    单行字符串第一轮就会命中，手写的 ``\"\"\"...\"\"\"`` 也不会留下半截。
+    """
+    if name not in config.agents:
+        raise AntHillError(f"没有叫 {name} 的 Agent")
+    value = persona.strip()
+    text = layout.node_toml.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    start, end = _section_bounds(lines, f"agents.{name}")
+    assignment = next(
+        (
+            i
+            for i in range(start + 1, end)
+            if lines[i].lstrip().startswith("persona")
+            and lines[i].lstrip()[len("persona") :].lstrip().startswith("=")
+        ),
+        None,
+    )
+    replacement = f"persona = {json.dumps(value, ensure_ascii=False)}\n" if value else ""
+    if assignment is None:
+        updated = "".join([*lines[:end], replacement, *lines[end:]])
+    else:
+        expected = tomllib.loads(text)
+        agent = expected["agents"][name]
+        if value:
+            agent["persona"] = value
+        else:
+            agent.pop("persona", None)
+        updated = ""
+        for stop in range(assignment + 1, end + 1):
+            candidate = "".join([*lines[:assignment], replacement, *lines[stop:]])
+            try:
+                parsed = tomllib.loads(candidate)
+            except tomllib.TOMLDecodeError:
+                continue
+            if parsed == expected:
+                updated = candidate
+                break
+        if not updated:
+            raise AntHillError(f"读不懂 agents.{name} 里 persona 的写法；请在配置页修改")
+    return {"ok": True, "name": name, "persona": value, "text": updated}
+
+
 def _section(spec: AgentSpec) -> str:
     lines = [f"\n[agents.{spec.name}]", f'role = "{_esc(spec.role)}"']
     if spec.brain == "bridge":
         lines.append("bridge = true")
+    elif spec.brain == "codex":
+        parts = ", ".join(f'"{_esc(p)}"' for p in CODEX.command)
+        lines.append(f"command = [{parts}]")
+        lines.append(f'prompt_via = "{CODEX.prompt_via}"')
     elif spec.brain == "command":
         parts = ", ".join(f'"{_esc(p)}"' for p in spec.command.split())
         lines.append(f"command = [{parts}]")
     elif spec.brain == "provider":
         lines.append(f'provider = "{_esc(spec.provider)}"')
     if spec.persona.strip():
-        lines.append(f'persona = "{_esc(spec.persona)}"')
+        lines.append(f"persona = {json.dumps(spec.persona.strip(), ensure_ascii=False)}")
     return "\n".join(lines) + "\n"
 
 
@@ -118,6 +179,22 @@ def drop_section(text: str, header: str) -> str:
         if not dropping:
             out.append(line)
     return "".join(out)
+
+
+def _section_bounds(lines: list[str], header: str) -> tuple[int, int]:
+    wanted = f"[{header}]"
+    start = next((i for i, line in enumerate(lines) if line.strip() == wanted), None)
+    if start is None:
+        raise AntHillError(f"node.toml 里找不到 [{header}]")
+    end = next(
+        (
+            i
+            for i in range(start + 1, len(lines))
+            if lines[i].strip().startswith("[") and lines[i].strip().endswith("]")
+        ),
+        len(lines),
+    )
+    return start, end
 
 
 # ---------- agentd 的启停 ----------

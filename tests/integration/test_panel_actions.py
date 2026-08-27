@@ -404,7 +404,57 @@ def test_panel_write_works_alongside_listening_for_other_machines(
     # Assert
     assert result.exit_code == 0, result.output
     assert started["panel_write"] is True
+    assert started["auto_restart_agents"] is True
+    assert "自动重启 agentd" in result.output
     assert "只对本机开放" in result.output  # 而且要把这件事说出来，别让人猜
+
+
+def test_automatic_agent_restart_can_be_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typer.testing import CliRunner
+
+    import anthill.cli.serve_cmd as serve_mod
+
+    started: dict[str, object] = {}
+
+    async def fake_serve(*args: object, **kwargs: object) -> None:
+        started.update(kwargs)
+
+    monkeypatch.setattr(serve_mod, "_serve", fake_serve)
+    runner = CliRunner()
+    assert runner.invoke(cli_app, ["init", str(tmp_path), "--node-name", "n"]).exit_code == 0
+
+    result = runner.invoke(
+        cli_app,
+        [
+            "serve",
+            "--port",
+            "0",
+            "--panel-write",
+            "--no-auto-restart-agents",
+            "-w",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert started["auto_restart_agents"] is False
+
+
+def test_automatic_agent_restart_requires_write_authority(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    runner = CliRunner()
+    assert runner.invoke(cli_app, ["init", str(tmp_path), "--node-name", "n"]).exit_code == 0
+
+    result = runner.invoke(
+        cli_app,
+        ["serve", "--port", "0", "--auto-restart-agents", "-w", str(tmp_path)],
+    )
+
+    assert result.exit_code == 1
+    assert "需要 --panel-write" in result.output
 
 
 def test_panel_write_requires_the_panel_to_be_on(tmp_path: Path) -> None:

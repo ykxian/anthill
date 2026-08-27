@@ -90,6 +90,9 @@ def _agents(layout: NodeLayout, config: Config) -> list[dict[str, Any]]:
                 "name": name,
                 "role": agent.role,
                 "provider": brain_of(agent),
+                # 内容不进集群快照：角色卡可能写着项目内部职责；页面要编辑时
+                # 再走仅本机的专用接口。这里一个布尔值只够画「已配置」提示。
+                "has_persona": bool(agent.persona.strip()),
                 "running": running,
                 "watch_mode": watch_mode,
                 "queue": len(mailbox.list_new()) if mailbox.exists else 0,

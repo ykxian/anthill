@@ -5,7 +5,7 @@
 
 **只想跑起来？看 [QUICKSTART.md](./QUICKSTART.md)。**
 
-[English README](./README.en.md) · 设计文档在 [`docs/`](./docs)（先读 [00-prd](./docs/00-prd.md)）
+[English README](./README.en.md)
 
 本 README 只讲**当前已经能跑的东西**。
 
@@ -126,7 +126,7 @@ flowchart LR
   （每步状态与交付）、合并后的实时消息流。单页 HTML + 原生 JS + WebSocket，
   **无构建链、无外部资源** —— 没外网的服务器上也能打开
 - ✅ 面板**默认只在绑回环时开启**：一旦 `--host 0.0.0.0`，它会跟着暴露给整个网段
-- ✅ 中英文 README、CHANGELOG、MIT LICENSE
+- ✅ 中英文 README、快速使用说明、MIT LICENSE
   （截至 M15：975 个测试，覆盖率 87%；实现 14.7k 行 + 测试 12.7k 行）
 
 **接已有终端、对话、面板可写（M7）**
@@ -141,7 +141,9 @@ flowchart LR
   也不拿 hops 熔断当刹车
 - ✅ **`anthill chat` / `anthill talk`**：人跟 Agent 多轮聊；让两个 Agent 就一件事聊，你旁观
 - ✅ **面板可写**（`--panel-write`）：发起任务、发消息、在线改 node.toml
-  （保存前用同一套模型校验，不合法磁盘一个字都不改，并留备份）
+  （保存前用同一套模型校验，不合法磁盘一个字都不改，并留备份）；开发期源码稳定
+  更新 10 秒后，仍在运行的旧 agentd 会等当前消息结束再自动重启，
+  `--no-auto-restart-agents` 可关闭
 
 **一个面板管所有机器（M8）**
 
@@ -311,6 +313,10 @@ provider = "deepseek"
 persona = "你写最小可用的代码，改动前先读现状。"
 tools = ["read_file", "write_file", "edit_file", "search_text", "run_shell", "finish"]
 ```
+
+`persona` 是可选角色卡（职责、专长、工作风格），不配就沿用默认身份。也可以在
+面板的每张 Agent 卡片上单独查看、修改或清空；它保存在 `.anthill/node.toml`，
+运行中的 agentd 或交互会话需重启/重新接入后生效。角色卡不能扩大工具权限或绕过审批。
 
 ```bash
 export DEEPSEEK_API_KEY=sk-...
@@ -486,6 +492,22 @@ command = ["claude", "-p"]     # 有 command 就走适配器，不需要 provide
 command_timeout = 900.0
 ```
 
+Codex 有正式的非交互入口 `codex exec`，所以无人值守时直接走同一个 command adapter，
+不需要依赖某个 Codex 交互会话被后台进程“唤醒”：
+
+```toml
+[agents.codex]
+role = "worker"
+command = ["codex", "exec", "--approve-for-me", "--skip-git-repo-check",
+           "--color", "never", "--ephemeral"]
+prompt_via = "stdin"
+command_timeout = 900.0
+```
+
+`--approve-for-me` 仍使用 Codex 的 workspace-write 沙箱与自动审查，并没有绕过权限；
+`--ephemeral` 是因为 thread 历史已经由 AntHill 保存并放回下一轮 prompt，不必为每封
+信再积累一份重复的 Codex 会话。面板“加一个 Agent”里直接选 **codex** 会生成同一配置。
+
 ```bash
 uv run anthill agent start cc
 uv run anthill send cc "看看 utils/date.py 有没有边界问题"
@@ -493,13 +515,13 @@ uv run anthill send cc "看看 utils/date.py 有没有边界问题"
 
 它和自研 Agent 守同样的规矩：来件包在不可信定界块里、按 thread 记上下文
 （外来 CLI 每次都是新进程，自己不记事）、超时杀整个进程组。
-**但工具与策略引擎管不到它** —— Claude Code 有自己的权限体系，
+**但工具与策略引擎管不到它** —— Claude Code、Codex 等外部终端有自己的权限体系，
 AntHill 不代管：你给它什么权限，它就有什么权限。
 
 ### 让一个常驻的交互式会话参与协作（M7）
 
-上面那个适配器是**每条消息起一个新进程**（`claude -p` 无头模式）。
-如果你想要的是「我的 Claude Code 会话一直开着，顺便当个 Agent，我随时能插话」——
+上面那个适配器是**每条消息起一个新进程**（`claude -p` / `codex exec` 无头模式）。
+如果你想要的是「我的交互会话一直开着，顺便当个 Agent，我随时能插话」——
 那是文件夹桥接，也就是这个项目起点那个土办法的正式版本：
 
 ```toml
@@ -519,6 +541,32 @@ bridge = true
 
 > 盯着 `.anthill/agents/cc/bridge/inbox/`，出现新 `.md` 就读，
 > 把回复写进 `../outbox/` 下同名的 `.md` 文件。
+
+这里的文件协议与客户端无关，但**自动唤醒能力属于客户端**：Claude Code 借用
+后台命令完成通知；Codex 已有前台时用原生 session queue，托管 TUI 时通过
+app-server 把来信提交成同一 thread 的新 turn。
+
+```bash
+uv run anthill codex cc -w /你的工作区
+```
+
+从普通 shell 运行会启动一套私有 app-server 与托管 TUI。从另一个终端接入
+已经运行的前台可用：
+
+```bash
+uv run anthill codex cc --attach <thread-id> -w /你的工作区
+```
+
+后者通过 Codex 原生 `queue` 唤醒唯一 writer，所以来信与处理过程显示在原 TUI，
+只读 app-server 负责把最终回答写回 outbox；`--resume` 遇到 active writer 也会
+自动切换到这条路径。MCP 仍是拉取式工具，不负责唤醒。不需要 TUI 时，仍可使用
+上面的 `codex exec` command Agent。
+
+托管模式会在 thread 启动/恢复时一次性注入 AntHill 身份、自动回信和主动发信规则；
+以后每封来信只显示一行来源/thread/reply 元数据和正文，不再重复整段操作说明。
+已有前台的 developer instructions 不能由 attach 改写，所以首次 queue 来信会附带
+兼容规则。普通 chat 回答会标记为无需回复并在对端归档；纯确认也会被静默吞掉，
+不会再出现“收到”→“确认收到”式的双向死循环。
 
 它和其他适配器的**根本区别是不阻塞**：收到消息只是写个文件就返回，
 你可以想十分钟，期间照常收新消息（几条一起躺在 inbox 里等你）。
@@ -555,7 +603,8 @@ coder    → reviewer  那就两处都改，我先写
 安静了一会儿，对话应该结束了
 ```
 
-对话怎么停下来？**按 thread 数轮次**（`chat_turns`，默认 6），是确定性的 ——
+普通 `chat` 是一问一答：回答信封明确标记为无需回复，到此结束。显式 `talk` 才会
+在两个 Agent 之间持续传球，并按 thread 数轮次（`chat_turns`，默认 6）确定性停止；
 不依赖模型自觉说「我说完了」，也不拿 hops 熔断当刹车（那是协议层的兜底，
 一响就说明出事了）。
 
@@ -752,13 +801,8 @@ uv run ruff check anthill tests && uv run ruff format anthill tests
 uv run mypy anthill                     # strict 模式
 ```
 
-测试按 [02-protocol §8](./docs/02-protocol.md) 的协议一致性清单组织：
-schema 校验、原子写、并发投递、幂等、重试状态机、hops 熔断。
-
-## 更新日志
-
-见 [CHANGELOG.md](./CHANGELOG.md)：按里程碑记录了每一步做了什么、
-以及联调时踩到的坑与修法。
+测试覆盖协议一致性的关键路径：schema 校验、原子写、并发投递、幂等、
+重试状态机与 hops 熔断。
 
 ## License
 
