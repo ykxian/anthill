@@ -17,9 +17,9 @@ jobs:
         python-version: ["3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
 
@@ -38,6 +38,7 @@ jobs:
           uv run ruff format --check anthill tests
 
       - name: Type check
+        if: matrix.python-version == '3.12'
         run: uv run mypy anthill
 
       # ANTHILL_REQUIRE_BROWSER：装好了却还跳过 = 上面那步白做了，直接判失败。

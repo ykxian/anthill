@@ -110,10 +110,14 @@ class McpToolset:
     async def connect(self, name: str, section: McpSection) -> int:
         """连一台 server，把它的工具收进来。返回收到几个；失败返回 0。"""
         try:
-            session = await asyncio.wait_for(
-                self._open(section), timeout=section.timeout or CONNECT_TIMEOUT
-            )
-            listed = await asyncio.wait_for(session.list_tools(), timeout=CONNECT_TIMEOUT)
+            # wait_for 会在单独的 Task 里运行 coroutine。MCP/AnyIO 的上下文若在
+            # 那个 Task 里进入、最后却由调用 connect() 的 Task 退出，Python 3.11
+            # 会拒绝跨 Task 清理 cancel scope。asyncio.timeout 保留超时语义，
+            # 同时让连接的进入与退出始终发生在同一个 Task。
+            async with asyncio.timeout(section.timeout or CONNECT_TIMEOUT):
+                session = await self._open(section)
+            async with asyncio.timeout(CONNECT_TIMEOUT):
+                listed = await session.list_tools()
         except Exception as exc:
             # 一个外部依赖挂了，不该让整个 agentd 起不来
             if self._log is not None:
