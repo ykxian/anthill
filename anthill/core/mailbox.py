@@ -3,6 +3,7 @@
     mailbox/
     ├── inbox/{tmp,new,cur,done}
     ├── outbox/{pending,sent}
+    ├── delivery-locks/
     └── seen.db
 
 watcher 只盯 `inbox/new`；写入方一律 tmp→rename。目录语义见 02-protocol §2。
@@ -71,11 +72,25 @@ class Mailbox:
         return self.outbox / "dead"
 
     @property
+    def delivery_locks(self) -> Path:
+        """同一发件邮箱被 CLI 与 agentd 共用时，按消息 ID 做跨进程投递互斥。"""
+        return self.root / "delivery-locks"
+
+    @property
     def seen_db(self) -> Path:
         return self.root / "seen.db"
 
     def all_dirs(self) -> tuple[Path, ...]:
-        return (self.tmp, self.new, self.cur, self.done, self.pending, self.sent, self.dead)
+        return (
+            self.tmp,
+            self.new,
+            self.cur,
+            self.done,
+            self.pending,
+            self.sent,
+            self.dead,
+            self.delivery_locks,
+        )
 
     def ensure(self) -> Mailbox:
         """幂等创建全部目录。返回 self 便于链式调用。"""

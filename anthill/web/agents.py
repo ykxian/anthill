@@ -21,6 +21,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -35,9 +36,11 @@ from anthill.core.envelope import AGENT_NAME_RE
 from anthill.core.errors import AntHillError
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
+from anthill.core.process_lock import locked_owner
 from anthill.core.procs import detach_kwargs
 
 RUNTIME_FILE = "runtime.json"
+LOCK_FILE = "agentd.lock"
 STOP_GRACE = signal.SIGTERM
 BRAINS = ("echo", "bridge", "codex", "command", "provider")
 
@@ -205,9 +208,12 @@ def runtime_path(layout: NodeLayout, name: str) -> Path:
 
 
 def running_pid(layout: NodeLayout, name: str) -> int | None:
-    """agentd 自己写的 runtime.json 里有 pid；进程没了就当没在跑。"""
+    """以内核锁为准；兼容还没升级、只会写 runtime.json 的旧 agentd。"""
     from anthill.cli.common import is_running
 
+    owner = locked_owner(layout.agent_dir(name) / LOCK_FILE)
+    if owner is not None:
+        return owner
     try:
         data = json.loads(runtime_path(layout, name).read_text(encoding="utf-8"))
         pid = int(data.get("pid", -1))
@@ -276,6 +282,24 @@ def start_agent(layout: NodeLayout, config: Config, name: str) -> dict[str, Any]
         )
     except OSError as exc:
         raise AntHillError(f"起不来：{exc}") from exc
+
+    # 不再把「Popen 成功」冒充「agentd 已就绪」。并发 start 时会同时生出两个
+    # 短命子进程，但只有一个能拿到内核锁；两个调用方都应看到真正的赢家 PID。
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        owner = running_pid(layout, name)
+        if owner is not None:
+            return {
+                "ok": True,
+                "name": name,
+                "pid": owner,
+                "already": owner != process.pid,
+            }
+        if process.poll() is not None:
+            break
+        time.sleep(0.02)
+    if process.poll() is not None:
+        raise AntHillError(f"{name} 启动后立即退出；请查看 Agent 日志")
     return {"ok": True, "name": name, "pid": process.pid, "already": False}
 
 

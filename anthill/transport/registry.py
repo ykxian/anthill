@@ -26,12 +26,13 @@ class TransportRegistry:
         *,
         peers: PeerRegistry | None = None,
         log: EventLog | None = None,
+        threaded_local: bool = True,
     ) -> None:
         self._config = config
         self._layout = layout
         self._peers = peers if peers is not None else PeerRegistry(layout.root)
         self._transports: dict[TransportKind, Transport] = {
-            TransportKind.LOCAL: LocalTransport(layout),
+            TransportKind.LOCAL: LocalTransport(layout, threaded=threaded_local),
             TransportKind.LAN: LanTransport(
                 node_name=config.node.name,
                 peers=self._peers,
@@ -44,6 +45,7 @@ class TransportRegistry:
                 log=log or EventLog(None, agent=config.node.name, echo=False),
             ),
         }
+        self._threaded_local = threaded_local
         self._local_transports: dict[str, LocalTransport] = {}
 
     def register(self, transport: Transport) -> None:
@@ -100,7 +102,9 @@ class TransportRegistry:
             key = str(dest.local_workspace)
             local_transport = self._local_transports.get(key)
             if local_transport is None:
-                local_transport = LocalTransport(NodeLayout(dest.local_workspace))
+                local_transport = LocalTransport(
+                    NodeLayout(dest.local_workspace), threaded=self._threaded_local
+                )
                 self._local_transports[key] = local_transport
             return local_transport
         kind = dest.peer.transport if dest.peer else TransportKind.LOCAL

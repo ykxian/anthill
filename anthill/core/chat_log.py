@@ -29,7 +29,7 @@ def chats_dir(layout: NodeLayout) -> Path:
 
 
 def record_outgoing(layout: NodeLayout, env: Envelope, body: str) -> None:
-    """把刚发出去的那条记下来。追加写，一个 thread 一个文件。"""
+    """把刚发出去的那条记下来；同一 Envelope 的重试不重复追加。"""
     line = json.dumps(
         {
             "id": env.id,
@@ -42,5 +42,21 @@ def record_outgoing(layout: NodeLayout, env: Envelope, body: str) -> None:
         ensure_ascii=False,
     )
     path = chats_dir(layout) / f"{env.thread}.jsonl"
+    if _contains(path, env.id):
+        return
     with path.open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")
+
+
+def _contains(path: Path, msg_id: str) -> bool:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            if json.loads(line).get("id") == msg_id:
+                return True
+        except (json.JSONDecodeError, AttributeError):
+            continue
+    return False

@@ -22,6 +22,7 @@ from anthill.agent.runtime import AgentRuntime
 from anthill.core import outbox as outbox_module
 from anthill.core.config import Config
 from anthill.core.envelope import Address, Envelope
+from anthill.core.errors import AntHillError
 from anthill.core.ids import now
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
@@ -395,6 +396,36 @@ async def test_a_graceful_stop_waits_for_the_current_handler(layout, config, mak
     assert any(p.stem == env.id for p in runtime.mailbox.done.rglob("*.json"))
     with runtime.mailbox.open_seen() as seen:
         assert seen.is_done(env.id)
+
+
+async def test_only_one_runtime_can_consume_an_agent_mailbox(layout, config):
+    """runtime.json 是展示状态，不是互斥锁；两个 agentd 绝不能同时扫同一邮箱。"""
+    first = AgentRuntime(
+        layout=layout,
+        config=config,
+        agent_name="beta",
+        handler=EchoHandler(),
+        log=EventLog(layout.log_file("beta"), agent="beta", echo=False),
+    )
+    stop = asyncio.Event()
+    running_task = asyncio.create_task(first.run(stop))
+    await wait_until(first.status_path.is_file)
+
+    contender = AgentRuntime(
+        layout=layout,
+        config=config,
+        agent_name="beta",
+        handler=EchoHandler(),
+        log=EventLog(layout.log_file("beta"), agent="beta", echo=False),
+    )
+    try:
+        with pytest.raises(AntHillError, match="已有一个实例"):
+            await contender.run(asyncio.Event())
+        assert first.status_path.is_file(), "启动竞态的输家删掉了赢家的 runtime.json"
+        assert not running_task.done(), "竞态输家影响了正在工作的 agentd"
+    finally:
+        stop.set()
+        await asyncio.wait_for(running_task, timeout=TIMEOUT)
 
 
 async def test_forced_cancellation_leaves_the_claimed_message_for_recovery(

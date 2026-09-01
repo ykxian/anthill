@@ -17,7 +17,9 @@ import pytest
 from anthill.adapters.bridge import BridgeHandler, note_needs_reply, parse_note, render_request
 from anthill.agent.conversation import message_expects_reply
 from anthill.agent.factory import build_handler
+from anthill.agent.memory import ThreadMemory
 from anthill.agent.runtime import AgentRuntime
+from anthill.agent.sender import Sender
 from anthill.core.config import Config
 from anthill.core.envelope import Address, Envelope
 from anthill.core.errors import ConfigError
@@ -585,3 +587,86 @@ async def test_a_failing_chat_record_does_not_resend_the_reply(
 
     sent = [e for e in envelopes(cli_box) if e.type is MessageType.CHAT]
     assert len(sent) == 1, f"补记失败被放大成重发：收到 {len(sent)} 条"
+
+
+async def test_a_tick_retry_reuses_the_persisted_envelope_id(
+    node: tuple[NodeLayout, Config], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """send 已成功、后处理却抛错时，整份草稿会重跑，但不得生成一个新消息 ID。"""
+    layout, config = node
+    handler = handler_for(layout)
+    source = chat_to_cc()
+    sent_ids: list[str] = []
+    remembers = 0
+
+    original_send = Sender.send
+
+    async def capture_send(self: Sender, env: Envelope):
+        if env.type is MessageType.CHAT and env.reply_to == source.id:
+            sent_ids.append(env.id)
+        return await original_send(self, env)
+
+    original_remember = handler._remember
+
+    def fail_once(ctx, incoming: Envelope, reply: Envelope) -> None:
+        nonlocal remembers
+        remembers += 1
+        original_remember(ctx, incoming, reply)
+        if remembers == 1:
+            raise RuntimeError("模拟 send 之后 tick 失败")
+
+    monkeypatch.setattr(Sender, "send", capture_send)
+    monkeypatch.setattr(handler, "_remember", fail_once)
+
+    async with running(layout, config, handler):
+        Mailbox(layout.mailbox_dir("cc")).deposit(source)
+        await wait_until(lambda: (handler.dir("inbox") / f"{source.id}.md").is_file())
+        write_draft(handler, f"{source.id}.md", "这句话只能有一个消息 ID")
+        await wait_until(lambda: remembers >= 2 and not list(handler.dir("outbox").glob("*.md")))
+
+    assert len(sent_ids) == 2, "测试必须真实走过一次失败和一次重试"
+    assert len(set(sent_ids)) == 1, f"同一草稿重跑生成了新 ID：{sent_ids}"
+    assert list(handler.dir("prepared").glob("*.json")) == []
+    chat_log = (layout.root / "chats" / f"{source.thread}.jsonl").read_text(encoding="utf-8")
+    assert chat_log.count(sent_ids[0]) == 1, "同 ID 重试不应在面板发件记录里重复出现"
+    history = ThreadMemory(ThreadMemory.path_for(layout.agent_dir("cc"), source.thread)).load()
+    assert len(history) == 2, "同 ID 重试不应把同一问答重复算成两轮"
+
+
+async def test_reusing_a_draft_name_cannot_send_a_stale_prepared_envelope(
+    node: tuple[NodeLayout, Config], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """草稿归档与 prepared 清理之间崩溃后，同名新稿不能继承旧目标与正文。"""
+    layout, config = node
+    handler = handler_for(layout)
+    original_send = Sender.send
+    block_send = True
+
+    async def fail_before_delivery(self: Sender, env: Envelope):
+        if block_send and env.from_.agent == "cc" and env.type is MessageType.CHAT:
+            raise RuntimeError("模拟 prepared 落盘后崩溃")
+        return await original_send(self, env)
+
+    monkeypatch.setattr(Sender, "send", fail_before_delivery)
+    draft = write_draft(handler, "固定名字.md", "---\nto: coder\n---\n\n旧正文")
+
+    async with running(layout, config, handler):
+        await wait_until(lambda: bool(list(handler.dir("prepared").glob("*.json"))))
+
+    old_mtime = draft.stat().st_mtime_ns
+    draft.write_text("---\nto: cli\n---\n\n全新的正文", encoding="utf-8")
+    import os
+
+    os.utime(draft, ns=(old_mtime + 1_000_000, old_mtime + 1_000_000))
+    block_send = False
+
+    async with running(layout, config, handler):
+        await wait_until(lambda: bool(list(handler.dir("done").glob("固定名字.md.failed"))))
+
+    for recipient in ("cli", "coder"):
+        assert not any(
+            env.type is MessageType.CHAT
+            for env in envelopes(Mailbox(layout.mailbox_dir(recipient)))
+        )
+    assert list(handler.dir("prepared").glob("*.json")) == []
+    assert list(handler.dir("done").glob("固定名字.md.json.failed"))

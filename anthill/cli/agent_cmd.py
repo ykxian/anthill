@@ -74,6 +74,8 @@ def start(
 
     try:
         asyncio.run(_run(runtime))
+    except AntHillError as exc:
+        fail(str(exc))
     except KeyboardInterrupt:  # asyncio.run 在信号处理外仍可能抛
         console.print("\n[dim]已停止[/dim]")
 

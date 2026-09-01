@@ -29,6 +29,7 @@ from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
 from anthill.core.payloads import MessageType, TaskErrorPayload
+from anthill.core.process_lock import ProcessLock
 from anthill.core.retention import SweepResult, rotate_log, sweep_archive, sweep_flat
 from anthill.core.router import Router
 from anthill.core.seen import Claim, SeenStore
@@ -40,6 +41,7 @@ from anthill.security.signing import verify_envelope
 from anthill.transport.registry import TransportRegistry
 
 STATUS_FILE = "runtime.json"
+LOCK_FILE = "agentd.lock"
 DEFAULT_TICK_INTERVAL = 5.0
 SWEEP_INTERVAL = 3600.0
 """多久清一次归档。一小时够慢（清理不该占资源），也够快（不会攒到磁盘满）。"""
@@ -123,6 +125,10 @@ class AgentRuntime:
             config=config,
             log=self.log,
         )
+        self._process_lock = ProcessLock(
+            layout.agent_dir(agent_name) / LOCK_FILE,
+            label=f"{config.node.name}:{agent_name} agentd",
+        )
 
     @property
     def tracker(self) -> DeliveryTracker:
@@ -135,6 +141,25 @@ class AgentRuntime:
     # ---------- 生命周期 ----------
 
     async def run(self, stop: asyncio.Event | None = None) -> None:
+        try:
+            self._process_lock.acquire()
+        except AntHillError:
+            # 这是启动竞态里的输家，从未写过 runtime.json，绝不能走 aclose()
+            # 把真正持锁进程的状态删掉；只关掉自己在 __init__ 里打开的资源。
+            await self._close_handler()
+            await self._transports.close()
+            self._seen.close()
+            self.log.close()
+            raise
+        try:
+            await self._run_locked(stop)
+        finally:
+            try:
+                await self.aclose()
+            finally:
+                self._process_lock.release()
+
+    async def _run_locked(self, stop: asyncio.Event | None = None) -> None:
         stop = stop or asyncio.Event()
         self._startup_recovery()
         # handler 是在同步的 __init__ 里造的，异步的准备工作（连外部 MCP server）
@@ -197,7 +222,6 @@ class AgentRuntime:
                 if not cleanup_task.done():
                     cleanup_task.cancel()
             await asyncio.gather(*all_tasks, return_exceptions=True)
-            await self.aclose()
 
     async def _produce(self, queue: asyncio.Queue[Path | None]) -> None:
         """watcher → 队列。单独一个任务，好让消费慢时事件不丢。"""
@@ -306,9 +330,19 @@ class AgentRuntime:
         await self._close_handler()
         await self._transports.close()
         self._seen.close()
-        self.status_path.unlink(missing_ok=True)
+        self._remove_own_status()
         self.log.info("agentd.stop")
         self.log.close()
+
+    def _remove_own_status(self) -> None:
+        """旧实例退场不能抹掉刚接班的新实例状态。"""
+        try:
+            data = json.loads(self.status_path.read_text(encoding="utf-8"))
+            owner = int(data.get("pid", -1))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return
+        if owner == os.getpid():
+            self.status_path.unlink(missing_ok=True)
 
     async def _close_handler(self) -> None:
         """handler 可选地实现 aclose（LLM handler 用它关上游连接）。关不掉也不该影响退出。"""

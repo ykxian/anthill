@@ -86,11 +86,14 @@ async def _send(
     identity = Address(node=config.node.name, agent=sender_name)
     mailbox = Mailbox(layout.mailbox_dir(sender_name)).ensure()
     log = EventLog(layout.log_file(sender_name), agent=sender_name, echo=False)
+    # `send` 是短命命令；本地小文件投递不进默认线程池，避免受限 sandbox
+    # 在 asyncio.run() 回收 executor 时永久挂住。常驻 agentd 仍使用线程投递。
+    transports = TransportRegistry(config, layout, threaded_local=False)
     sender = Sender(
         identity=identity,
         mailbox=mailbox,
         router=Router(config, layout),
-        transports=TransportRegistry(config, layout),
+        transports=transports,
         tracker=DeliveryTracker(),
         log=log,
     )
@@ -102,8 +105,15 @@ async def _send(
         payload=_build_payload(kind, title, text),
         thread=thread,
     )
-    results = await sender.send(env)
-    log.close()
+    try:
+        results = await sender.send(env)
+    finally:
+        # CLI 是短命进程，不能把 httpx/ssh client 和 asyncio executor 留给
+        # asyncio.run() 猜着回收；现场因此积过数十个永不退出的 `anthill send`。
+        try:
+            await transports.close()
+        finally:
+            log.close()
     if any(result.ok for result in results):
         # 面板发件会记进 chats（record_outgoing），CLI 不记的话，对话页上
         # 只见对方的回音、不见你发出去的那半句 —— 跨机联调时看着像消息丢了

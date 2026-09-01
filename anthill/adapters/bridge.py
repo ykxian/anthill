@@ -8,6 +8,7 @@
     ├── inbox/<信封id>.md    ← AntHill 写：收到的消息，你或你的 Claude Code 读
     ├── outbox/<信封id>.md   ← 你写：回复；AntHill 读走、发出、归档
     ├── pending/<信封id>.json  原始信封（内部用，用来构造回信时保住 thread 与 hops）
+    ├── prepared/<草稿名>.json 已构造的回信（失败重试时复用同一个消息 ID）
     └── done/                已处理归档
 
 和 cli_agent 适配器的**根本区别是它不阻塞**：
@@ -27,6 +28,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +38,7 @@ from typing import Any
 from anthill.agent.conversation import chat_payload, message_expects_reply, plan_reply
 from anthill.agent.handlers import HandlerContext
 from anthill.agent.memory import ThreadMemory
+from anthill.core.atomic import atomic_write
 from anthill.core.chat_log import record_outgoing
 from anthill.core.envelope import Envelope
 from anthill.core.errors import AntHillError, HopLimitExceeded
@@ -44,9 +48,10 @@ from anthill.core.router import parse_address
 from anthill.providers.base import Msg, Role
 
 BRIDGE_DIR = "bridge"
-INBOX, OUTBOX, PENDING, DONE = "inbox", "outbox", "pending", "done"
+INBOX, OUTBOX, PENDING, PREPARED, DONE = "inbox", "outbox", "pending", "prepared", "done"
 STABLE_SECONDS = 1.0
 MAX_BODY_CHARS = 30_000
+PREPARED_VERSION = 1
 FRONT_MATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", re.S)
 
 AWAITS_REPLY = frozenset({MessageType.TASK_REQUEST, MessageType.CHAT})
@@ -108,6 +113,7 @@ class BridgeNote:
     path: Path
     body: str
     headers: dict[str, str]
+    mtime_ns: int
 
     @property
     def reply_to(self) -> str:
@@ -127,7 +133,7 @@ class BridgeHandler:
         self._chat_turns = chat_turns
         # 启动就把目录建出来：人得先能告诉自己的 Claude Code「盯着这个目录」，
         # 而不是等第一条消息到了才发现目录还不存在
-        for name in (INBOX, OUTBOX, PENDING, DONE):
+        for name in (INBOX, OUTBOX, PENDING, PREPARED, DONE):
             self.dir(name)
 
     @property
@@ -170,6 +176,9 @@ class BridgeHandler:
             except AntHillError as exc:
                 ctx.log.error("bridge.send_failed", file=note.path.name, error=str(exc))
                 self._archive(note.path, suffix=".failed")
+                prepared = self._prepared_path(note)
+                if prepared.is_file():
+                    self._archive(prepared, suffix=".failed")
 
     def drafts(self) -> list[BridgeNote]:
         """读 outbox 里**写完了**的草稿。
@@ -181,7 +190,8 @@ class BridgeHandler:
         cutoff = now().timestamp() - STABLE_SECONDS
         for path in sorted(self.dir(OUTBOX).glob("*.md")):
             try:
-                if path.stat().st_mtime > cutoff:
+                info = path.stat()
+                if info.st_mtime > cutoff:
                     continue  # 还在写，下一轮再看
                 text = path.read_text(encoding="utf-8")
             except OSError:
@@ -189,16 +199,29 @@ class BridgeHandler:
             headers, body = parse_note(text)
             if not body.strip():
                 continue  # 空草稿：人还没写正文
-            out.append(BridgeNote(path=path, body=body.strip(), headers=headers))
+            out.append(
+                BridgeNote(
+                    path=path,
+                    body=body.strip(),
+                    headers=headers,
+                    mtime_ns=info.st_mtime_ns,
+                )
+            )
         return out
 
     async def _deliver(self, note: BridgeNote, ctx: HandlerContext) -> None:
         source = self._pending(note.reply_to)
         if source is not None:
             await self._send_reply(source, note, ctx)
+        elif prepared := self._load_prepared(note, ctx):
+            # 上一轮可能已经 send + settle，只在归档草稿前崩了。原始 pending
+            # 此时已经不在，但 prepared 信封仍是幂等真相；必须复用它，不能把
+            # 同一份 note 当成「主动新消息」再造一个 ID。
+            await self._resend_prepared(prepared, ctx)
         else:
             await self._send_new(note, ctx)
         self._archive(note.path)
+        self._forget_prepared(note)
 
     def _pending(self, msg_id: str) -> Envelope | None:
         if not msg_id:
@@ -212,35 +235,45 @@ class BridgeHandler:
             return None
 
     async def _send_reply(self, source: Envelope, note: BridgeNote, ctx: HandlerContext) -> None:
-        body = note.body[:MAX_BODY_CHARS]
-        recipient = source.from_
-        payload: ChatPayload | TaskResultPayload
-        if source.type is MessageType.CHAT:
-            history = self._history(ctx, source.thread)
-            plan = plan_reply(
-                source, identity=ctx.identity, history=history, budget=self._chat_turns
-            )
-            if not plan.should_reply:
-                ctx.log.info("chat.ended", msg=source.id, reason=plan.reason)
+        reply = self._load_prepared(note, ctx)
+        if reply is None:
+            body = note.body[:MAX_BODY_CHARS]
+            recipient = source.from_
+            payload: ChatPayload | TaskResultPayload
+            if source.type is MessageType.CHAT:
+                history = self._history(ctx, source.thread)
+                plan = plan_reply(
+                    source, identity=ctx.identity, history=history, budget=self._chat_turns
+                )
+                if not plan.should_reply:
+                    ctx.log.info("chat.ended", msg=source.id, reason=plan.reason)
+                    self._settle(source.id)
+                    return
+                payload = chat_payload(body, plan)
+                recipient = plan.recipient or source.from_
+                kind = MessageType.CHAT
+            else:
+                payload = TaskResultPayload(
+                    summary=body, artifacts=_artifacts(note.headers), status="ok"
+                )
+                kind = MessageType.TASK_RESULT
+
+            try:
+                reply = source.reply(
+                    type=kind, payload=payload, sender=ctx.identity, recipient=recipient
+                )
+            except HopLimitExceeded as exc:
+                ctx.log.warn("hop.limit", msg=source.id, error=str(exc))
                 self._settle(source.id)
                 return
-            payload = chat_payload(body, plan)
-            recipient = plan.recipient or source.from_
-            kind = MessageType.CHAT
-        else:
-            payload = TaskResultPayload(
-                summary=body, artifacts=_artifacts(note.headers), status="ok"
+            self._store_prepared(note, reply)
+        elif reply.reply_to != source.id:
+            raise AntHillError(
+                f"{note.path.name} 的已准备信封回复 {reply.reply_to}，但当前原信是 {source.id}"
             )
-            kind = MessageType.TASK_RESULT
 
-        try:
-            reply = source.reply(
-                type=kind, payload=payload, sender=ctx.identity, recipient=recipient
-            )
-        except HopLimitExceeded as exc:
-            ctx.log.warn("hop.limit", msg=source.id, error=str(exc))
-            self._settle(source.id)
-            return
+        body = _outgoing_body(reply)
+        recipient = reply.to
         await ctx.sender.send(reply)
         # 记进本机发件记录 —— 收件方在**另一台机器**时，对话页上没有任何
         # 别的地方能看到这半句（收件方的归档在对面）。本机投递的靠 id 去重。
@@ -252,7 +285,7 @@ class BridgeHandler:
             record_outgoing(ctx.layout, reply, body)
         except OSError as exc:
             ctx.log.warn("chat.record_failed", msg=reply.id, error=str(exc))
-        self._remember(ctx, source, body)
+        self._remember(ctx, source, reply)
         ctx.log.info("bridge.replied", msg=reply.id, to=str(recipient), thread=reply.thread)
         self._settle(source.id)
 
@@ -270,7 +303,7 @@ class BridgeHandler:
         kind = note.headers.get("type", "chat").strip().lower()
         body = note.body[:MAX_BODY_CHARS]
         mentions = _mentions(note.headers)
-        env = await ctx.sender.send_new(
+        env = ctx.sender.prepare_new(
             to=parse_address(target, default_node=ctx.identity.node),
             type=MessageType.TASK_REQUEST if kind == "task" else MessageType.CHAT,
             payload=(
@@ -278,11 +311,69 @@ class BridgeHandler:
             ),
             thread=note.headers.get("thread") or None,
         )
+        self._store_prepared(note, env)
+        await ctx.sender.send(env)
         try:
             record_outgoing(ctx.layout, env, body)
         except OSError as exc:  # 同上：显示侧失败不打断投递
             ctx.log.warn("chat.record_failed", msg=env.id, error=str(exc))
         ctx.log.info("bridge.sent", msg=env.id, to=target, kind=kind, thread=env.thread)
+
+    async def _resend_prepared(self, env: Envelope, ctx: HandlerContext) -> None:
+        """重跑 send 之后的失败路径；Envelope ID 和正文都以落盘版本为准。"""
+        body = _outgoing_body(env)
+        await ctx.sender.send(env)
+        try:
+            record_outgoing(ctx.layout, env, body)
+        except OSError as exc:
+            ctx.log.warn("chat.record_failed", msg=env.id, error=str(exc))
+        ctx.log.info("bridge.resent", msg=env.id, to=str(env.to), thread=env.thread)
+
+    def _prepared_path(self, note: BridgeNote) -> Path:
+        return self.dir(PREPARED) / f"{note.path.name}.json"
+
+    def _load_prepared(self, note: BridgeNote, ctx: HandlerContext) -> Envelope | None:
+        path = self._prepared_path(note)
+        if not path.is_file():
+            return None
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise AntHillError(f"{path.name} 的已准备发送状态损坏：{exc}") from exc
+        if not isinstance(state, dict) or state.get("version") != PREPARED_VERSION:
+            raise AntHillError(f"{path.name} 不是兼容的已准备发送状态")
+        expected = _draft_fingerprint(note)
+        if state.get("fingerprint") != expected or state.get("source_id") != (
+            note.reply_to or None
+        ):
+            raise AntHillError(
+                f"{note.path.name} 自准备信封后已被修改；拒绝把旧消息发给新草稿的收件人"
+            )
+        raw_envelope = state.get("envelope")
+        if not isinstance(raw_envelope, dict):
+            raise AntHillError(f"{path.name} 缺少已准备的信封")
+        env = Envelope.from_json_bytes(json.dumps(raw_envelope, ensure_ascii=False).encode("utf-8"))
+        if env.from_ != ctx.identity:
+            raise AntHillError(f"{path.name} 的发送者是 {env.from_}，不是当前 Agent {ctx.identity}")
+        return env
+
+    def _store_prepared(self, note: BridgeNote, env: Envelope) -> None:
+        path = self._prepared_path(note)
+        state = {
+            "version": PREPARED_VERSION,
+            "fingerprint": _draft_fingerprint(note),
+            "source_id": note.reply_to or None,
+            "envelope": env.model_dump(mode="json", by_alias=True),
+        }
+        atomic_write(
+            path.parent,
+            path.parent,
+            path.name,
+            json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+
+    def _forget_prepared(self, note: BridgeNote) -> None:
+        self._prepared_path(note).unlink(missing_ok=True)
 
     # ---------- 归档 ----------
 
@@ -306,12 +397,17 @@ class BridgeHandler:
             ThreadMemory.path_for(ctx.layout.agent_dir(ctx.identity.agent), thread)
         ).load()
 
-    def _remember(self, ctx: HandlerContext, source: Envelope, body: str) -> None:
+    def _remember(self, ctx: HandlerContext, source: Envelope, reply: Envelope) -> None:
         memory = ThreadMemory(
             ThreadMemory.path_for(ctx.layout.agent_dir(ctx.identity.agent), source.thread)
         )
-        memory.append(Msg.user(_incoming_text(source)))
-        memory.append(Msg(role=Role.ASSISTANT, content=body))
+        memory.extend_once(
+            reply.id,
+            [
+                Msg.user(_incoming_text(source)),
+                Msg(role=Role.ASSISTANT, content=_outgoing_body(reply)),
+            ],
+        )
 
 
 # ---------- 文件格式 ----------
@@ -336,6 +432,31 @@ def render_request(env: Envelope) -> str:
         body=_incoming_text(env),
         instruction=instruction,
     )
+
+
+def _outgoing_body(env: Envelope) -> str:
+    payload = env.payload
+    if isinstance(payload, ChatPayload):
+        return payload.body
+    if isinstance(payload, TaskResultPayload):
+        return payload.summary
+    # bridge 主动派出的 task.request；这里只取线协议已有的正文。
+    return str(getattr(payload, "body", ""))
+
+
+def _draft_fingerprint(note: BridgeNote) -> str:
+    normalized = json.dumps(
+        {
+            "name": note.path.name,
+            "mtime_ns": note.mtime_ns,
+            "headers": note.headers,
+            "body": note.body,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(normalized).hexdigest()
 
 
 def note_needs_reply(headers: dict[str, str]) -> bool:

@@ -26,6 +26,7 @@ THREADS_DIR = "threads"
 DEFAULT_COMPACT_THRESHOLD = 24_000
 DEFAULT_KEEP_TAIL = 6
 SUMMARY_PREFIX = "【历史摘要】"
+ONCE_KEY = "_anthill_once"
 
 SUMMARY_PROMPT = """\
 下面是一段 Agent 对话历史。请压缩成一段不超过 400 字的摘要，
@@ -69,6 +70,30 @@ class ThreadMemory:
     def extend(self, messages: list[Msg]) -> None:
         for msg in messages:
             self.append(msg)
+
+    def extend_once(self, key: str, messages: list[Msg]) -> bool:
+        """按业务消息 ID 原子追加一组历史；已经追加过则不再污染对话轮数。"""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            existing = self._path.read_bytes()
+        except FileNotFoundError:
+            existing = b""
+        for line in existing.splitlines():
+            try:
+                item = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if isinstance(item, dict) and item.get(ONCE_KEY) == key:
+                return False
+
+        prefix = existing + (b"\n" if existing and not existing.endswith(b"\n") else b"")
+        added = b"".join(
+            (json.dumps(msg.to_dict(), ensure_ascii=False) + "\n").encode("utf-8")
+            for msg in messages
+        )
+        marker = (json.dumps({ONCE_KEY: key}, ensure_ascii=False) + "\n").encode("utf-8")
+        atomic_write(self._path.parent, self._path.parent, self._path.name, prefix + added + marker)
+        return True
 
     def load(self) -> list[Msg]:
         """坏行跳过而不是抛错：一条日志损坏不该让整个 thread 不可用。"""

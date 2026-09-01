@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -93,6 +95,57 @@ def test_send_delivers_into_the_target_mailbox(workspace: Path):
     assert result.exit_code == 0, result.output
     inbox = Mailbox(NodeLayout(workspace).mailbox_dir("echo")).list_new()
     assert len(inbox) == 1
+
+
+def test_send_closes_its_short_lived_transport_registry(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import anthill.cli.msg_cmd as msg_cmd
+
+    closed: list[bool] = []
+    threaded_local: list[bool] = []
+    original = msg_cmd.TransportRegistry
+
+    class TrackedRegistry(original):
+        def __init__(self, *args, **kwargs) -> None:
+            threaded_local.append(kwargs.get("threaded_local", True))
+            super().__init__(*args, **kwargs)
+
+        async def close(self) -> None:
+            closed.append(True)
+            await super().close()
+
+    monkeypatch.setattr(msg_cmd, "TransportRegistry", TrackedRegistry)
+
+    result = runner.invoke(app, ["send", "echo", "发完就关连接", "-w", str(workspace)])
+
+    assert result.exit_code == 0, result.output
+    assert closed == [True]
+    assert threaded_local == [False]
+
+
+def test_send_process_exits_after_a_wait_zero_delivery(workspace: Path) -> None:
+    """真实短命进程不能在消息落盘后卡在 asyncio/http 客户端或线程池回收。"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "anthill",
+            "send",
+            "echo",
+            "子进程发完即退",
+            "--wait",
+            "0",
+            "-w",
+            str(workspace),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=8,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_send_to_unknown_agent_fails_with_hint(workspace: Path):

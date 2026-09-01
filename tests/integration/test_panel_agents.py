@@ -7,6 +7,9 @@
 from __future__ import annotations
 
 import json
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
@@ -17,6 +20,7 @@ from anthill.core.config import Config
 from anthill.core.errors import AntHillError
 from anthill.core.logging import EventLog
 from anthill.core.paths import NodeLayout
+from anthill.core.procs import kill_tree
 from anthill.core.workspace import create_workspace, load_or_create
 from anthill.discovery.registry import PeerRegistry
 from anthill.web.agents import (
@@ -298,9 +302,58 @@ async def test_starting_twice_is_harmless(node: Bundle) -> None:
         assert second["already"] is True
         assert second["pid"] == running_pid(layout, "echo")
     finally:
-        stop_agent(layout, "echo")
+        if pid := running_pid(layout, "echo"):
+            kill_tree(pid, force=True)
         await _wait_until(lambda: running_pid(layout, "echo") is None)
     assert first["already"] is False
+
+
+def test_two_real_concurrent_starts_converge_on_one_process(node: Bundle) -> None:
+    layout, config, _ = node
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            calls = [pool.submit(start_agent, layout, config, "echo") for _ in range(2)]
+            first, second = (call.result(timeout=8) for call in calls)
+        _wait_until_sync(lambda: running_pid(layout, "echo") is not None)
+
+        assert first["pid"] == second["pid"] == running_pid(layout, "echo")
+        assert sorted((first["already"], second["already"])) == [False, True]
+        _wait_until_sync(
+            lambda: "agentd.start" in layout.log_file("echo").read_text(encoding="utf-8")
+        )
+        events = [
+            json.loads(line)
+            for line in layout.log_file("echo").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert sum(event.get("event") == "agentd.start" for event in events) == 1
+    finally:
+        if pid := running_pid(layout, "echo"):
+            kill_tree(pid, force=True)
+        _wait_until_sync(lambda: running_pid(layout, "echo") is None)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGKILL 是 POSIX 回归")
+def test_a_killed_agentd_releases_the_lock_for_its_replacement(node: Bundle) -> None:
+    import os
+    import signal
+
+    layout, config, _ = node
+    first = start_agent(layout, config, "echo")
+    _wait_until_sync(lambda: running_pid(layout, "echo") == first["pid"])
+    lock_path = layout.agent_dir("echo") / "agentd.lock"
+    try:
+        os.kill(first["pid"], signal.SIGKILL)
+        _wait_until_sync(lambda: running_pid(layout, "echo") is None)
+
+        replacement = start_agent(layout, config, "echo")
+        _wait_until_sync(lambda: running_pid(layout, "echo") == replacement["pid"])
+        assert replacement["pid"] != first["pid"]
+        assert lock_path.is_file(), "崩溃释放的是内核锁，不依赖删除 lockfile"
+    finally:
+        if pid := running_pid(layout, "echo"):
+            kill_tree(pid, force=True)
+        _wait_until_sync(lambda: running_pid(layout, "echo") is None)
 
 
 def test_stopping_something_that_is_not_running_is_not_an_error(node: Bundle) -> None:
@@ -339,6 +392,15 @@ async def _wait_until(check: object, timeout: float = 15.0) -> None:
         if check():  # type: ignore[operator]
             return
         await asyncio.sleep(0.05)
+    raise AssertionError("等超时了")
+
+
+def _wait_until_sync(check: object, timeout: float = 15.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if check():  # type: ignore[operator]
+            return
+        time.sleep(0.05)
     raise AssertionError("等超时了")
 
 

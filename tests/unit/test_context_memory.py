@@ -191,6 +191,16 @@ def test_memory_skips_corrupt_lines_instead_of_crashing(tmp_path: Path) -> None:
     assert len(memory.load()) == 1
 
 
+def test_extend_once_does_not_duplicate_a_retried_business_message(tmp_path: Path) -> None:
+    memory = ThreadMemory(tmp_path / "t.jsonl")
+    messages = [Msg.user("问"), Msg(role=Role.ASSISTANT, content="答")]
+
+    assert memory.extend_once("01J000000000000000000000AA", messages)
+    assert not memory.extend_once("01J000000000000000000000AA", messages)
+
+    assert [msg.content for msg in memory.load()] == ["问", "答"]
+
+
 async def test_memory_compaction_replaces_old_turns_with_summary(tmp_path: Path) -> None:
     # Arrange：一段长历史 + 一个会返回摘要的假模型
     memory = ThreadMemory(tmp_path / "t.jsonl", compact_threshold=50, keep_tail=2)

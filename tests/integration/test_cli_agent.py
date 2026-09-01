@@ -294,7 +294,7 @@ async def test_chat_gets_a_chat_reply(tmp_path: Path) -> None:
 
 
 async def test_a_terminal_processes_a_final_chat_without_replying(tmp_path: Path) -> None:
-    """expects_reply=false 是「把答案记住但别再回」，不是丢掉整条来信。"""
+    """终止回答是「把答案记住但别再回」，不是丢掉整条来信。"""
     layout = NodeLayout(tmp_path).ensure_base()
     seen = tmp_path / "final-chat.txt"
     command = fake_agent(

@@ -9,6 +9,7 @@ pending 里每条消息有两个文件：`<id>.json`（信封本体）与 `<id>.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -19,12 +20,15 @@ from anthill.core.envelope import Envelope
 from anthill.core.errors import AntHillError, MailboxError
 from anthill.core.ids import now
 from anthill.core.mailbox import Mailbox
+from anthill.core.process_lock import ProcessLock
 
 MAX_ATTEMPTS = 5
 BACKOFF_BASE = timedelta(seconds=1)
 """指数退避 1s → 2s → 4s → 8s → 16s，第 5 次仍失败进 dead letter。"""
 
 META_SUFFIX = ".meta.json"
+DELIVERY_LOCK_BUCKETS = 256
+"""稳定锁桶数量。文件永久保留以保证 inode 不变，但总数严格有界。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,13 +104,74 @@ class Outbox:
         return self._mailbox.pending
 
     def enqueue(self, env: Envelope) -> OutboxEntry:
+        sent = self._mailbox.sent / f"{env.id}.json"
+        if sent.is_file():
+            return OutboxEntry(envelope=self._read_matching(sent, env))
+        dead = self._mailbox.dead / f"{env.id}.json"
+        if dead.is_file():
+            raise MailboxError(
+                f"消息 {env.id} 已在死信箱；必须显式 requeue，不能由失败动作自动复活"
+            )
+        pending = self.pending_dir / f"{env.id}.json"
+        if pending.is_file():
+            existing = self._read_matching(pending, env)
+            return self._with_meta(existing)
         entry = OutboxEntry(envelope=env)
-        self._write(entry)
+        self._write_new(entry)
         return entry
 
-    def _write(self, entry: OutboxEntry) -> None:
+    def sent_envelope(self, env: Envelope) -> Envelope | None:
+        """同 ID 已投递则返回落盘版本；ID 碰撞则拒绝，绝不拿旧状态冒充新消息。"""
+        path = self._mailbox.sent / f"{env.id}.json"
+        if not path.is_file():
+            return None
+        return self._read_matching(path, env)
+
+    def sent_path(self, msg_id: str) -> Path:
+        return self._mailbox.sent / f"{msg_id}.json"
+
+    def pending_entry(self, env: Envelope) -> OutboxEntry | None:
+        """返回同一信封当前的 pending 状态；不存在时返回空，ID 碰撞仍拒绝。"""
+        path = self.pending_dir / f"{env.id}.json"
+        if not path.is_file():
+            return None
+        return self._with_meta(self._read_matching(path, env))
+
+    def delivery_lock(self, msg_id: str) -> ProcessLock:
+        """CLI 首投与 agentd retry 争稳定的有限锁桶，进程内 set 不够。
+
+        lockfile 运行期不能 unlink，否则旧 inode 的持锁者与新 inode 的持锁者会
+        同时进入临界区。按 ID 稳定散列到固定桶，既保住 inode，又不无界吃 inode。
+        """
+        digest = hashlib.blake2s(msg_id.encode(), digest_size=2).digest()
+        bucket = int.from_bytes(digest, "big") % DELIVERY_LOCK_BUCKETS
+        return ProcessLock(
+            self._mailbox.delivery_locks / f"bucket-{bucket:03d}.lock",
+            label=f"消息 {msg_id} 的投递",
+        )
+
+    @staticmethod
+    def _read_matching(path: Path, expected: Envelope) -> Envelope:
+        try:
+            existing = Mailbox.read_envelope(path)
+        except AntHillError as exc:
+            raise MailboxError(f"已有发件状态 {path} 无法读取：{exc}") from exc
+        if existing != expected:
+            raise MailboxError(f"消息 ID {expected.id} 已被另一份不同信封占用")
+        return existing
+
+    def _write_new(self, entry: OutboxEntry) -> None:
+        """首次入队：Envelope 是业务真相，必须是第一份持久化数据。
+
+        attempts=0 由“没有 meta”表达。先清可能来自极旧崩溃/保留期后的孤儿
+        meta，再原子写 Envelope；一旦 Envelope 出现，恢复扫描就一定看得见它。
+        """
+        self._drop_meta(entry)
         name = f"{entry.msg_id}.json"
         atomic_write(self._mailbox.tmp, self.pending_dir, name, entry.envelope.to_json_bytes())
+
+    def _write_meta(self, entry: OutboxEntry) -> None:
+        """已有 pending 的失败更新只改 meta；Envelope 本体不必也不应重写。"""
         meta = {
             "attempts": entry.attempts,
             "next_attempt_at": entry.next_attempt_at.isoformat() if entry.next_attempt_at else None,
@@ -162,11 +227,12 @@ class Outbox:
         return [e for e in self.load_pending() if e.is_due(moment)]
 
     def mark_sent(self, entry: OutboxEntry) -> Path:
-        self._drop_meta(entry)
         src = self.pending_dir / f"{entry.msg_id}.json"
         dst = self._mailbox.sent / f"{entry.msg_id}.json"
         if src.is_file():
             src.replace(dst)
+        # 先移动业务真相，再删附属 meta；反过来崩溃会让 pending 重置次数。
+        self._drop_meta(entry)
         return dst
 
     def mark_failed(self, entry: OutboxEntry, error: str) -> OutboxEntry:
@@ -175,7 +241,7 @@ class Outbox:
         if updated.is_dead:
             self._to_dead(updated)
         else:
-            self._write(updated)
+            self._write_meta(updated)
         return updated
 
     def abandon(self, entry: OutboxEntry, error: str) -> OutboxEntry:
@@ -191,18 +257,24 @@ class Outbox:
     def _to_dead(self, entry: OutboxEntry) -> Path:
         dead_dir = self._mailbox.dead
         dead_dir.mkdir(parents=True, exist_ok=True)
-        self._drop_meta(entry)
         src = self.pending_dir / f"{entry.msg_id}.json"
         dst = dead_dir / f"{entry.msg_id}.json"
+        # 原因先原子落盘，再移动业务信封。中途崩溃最多留下一个不会被列出的
+        # 孤儿 sidecar；只要 dead 信封可见，它的诊断原因就已经存在。
+        atomic_write(
+            self._mailbox.tmp,
+            dead_dir,
+            f"{entry.msg_id}.error.txt",
+            (
+                f"to={entry.envelope.to}\n"
+                f"type={entry.envelope.type}\n"
+                f"attempts={entry.attempts}\n"
+                f"last_error={entry.last_error}\n"
+            ).encode(),
+        )
         if src.is_file():
             src.replace(dst)
-        (dead_dir / f"{entry.msg_id}.error.txt").write_text(
-            f"to={entry.envelope.to}\n"
-            f"type={entry.envelope.type}\n"
-            f"attempts={entry.attempts}\n"
-            f"last_error={entry.last_error}\n",
-            encoding="utf-8",
-        )
+        self._drop_meta(entry)
         return dst
 
     def _drop_meta(self, entry: OutboxEntry) -> None:
@@ -247,7 +319,7 @@ class Outbox:
             raise MailboxError(f"没有这条死信：{msg_id}")
         env = Envelope.model_validate_json(path.read_text(encoding="utf-8"))
         entry = OutboxEntry(envelope=env)
-        self._write(entry)
+        self._write_new(entry)
         path.unlink(missing_ok=True)
         (self._mailbox.dead / f"{msg_id}.error.txt").unlink(missing_ok=True)
         return entry
