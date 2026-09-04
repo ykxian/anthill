@@ -355,6 +355,46 @@ button.card-persona.configured { color: var(--accent); }
 .run-result-box > summary:hover { color: var(--ink); }
 .run-result { margin-top: 8px; font-size: 13px; }
 
+/* ---- 状态公告：摘要常驻，完整快照按需读 ---- */
+.state-agent {
+  background: var(--surface); border: 1px solid var(--line-soft);
+  border-radius: var(--r); margin-bottom: 12px; box-shadow: var(--shadow);
+}
+.state-agent > .head {
+  display: flex; align-items: baseline; gap: 8px; padding: 10px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.state-agent > .head .name { font-weight: 650; }
+.state-list { padding: 4px 0; }
+button.state-entry {
+  display: grid; grid-template-columns: minmax(130px, 0.7fr) 78px minmax(150px, 0.9fr) minmax(0, 2fr);
+  gap: 10px; align-items: baseline; width: 100%; padding: 8px 14px;
+  border: 0; border-radius: 0; background: transparent; color: var(--ink);
+  text-align: left; font-weight: 400;
+}
+button.state-entry:hover, button.state-entry.open { background: var(--surface-2); filter: none; }
+button.state-entry .key, button.state-entry .source, button.state-entry .digest {
+  font-family: var(--mono); font-size: 11.5px;
+}
+button.state-entry .source, button.state-entry .digest { color: var(--dim); }
+button.state-entry .digest { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.state-entry .summary { min-width: 0; overflow-wrap: anywhere; }
+.state-meta {
+  display: flex; gap: 8px; align-items: center; padding: 0 14px 8px;
+  color: var(--dim); font-size: 11.5px;
+}
+.state-meta .digest { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.state-detail { margin: 0 14px 12px; padding: 10px 12px; background: var(--paper); border-radius: var(--r-sm); }
+.state-detail pre {
+  max-height: 56vh; overflow: auto; margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere;
+  font: 12px/1.65 var(--mono);
+}
+.state-issue { color: var(--bad); padding: 6px 14px; font-size: 12px; }
+@media (max-width: 900px) {
+  button.state-entry { grid-template-columns: minmax(120px, 1fr) 70px minmax(0, 2fr); }
+  button.state-entry .source { grid-column: 1 / -1; }
+}
+
 /* ---- 消息流：等宽对齐的时间线，密度优先 ---- */
 #stream-body { font-family: var(--mono); font-size: 12px; line-height: 1.75; }
 .event { display: flex; gap: 12px; padding: 1px 8px; border-radius: var(--r-sm); }
@@ -687,6 +727,7 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
   <main>
     <nav class="tabs">
       <button class="tab on" type="button" data-pane="runs">任务看板</button>
+      <button class="tab" type="button" data-pane="states">状态公告</button>
       <button class="tab" type="button" data-pane="chat">对话</button>
       <button class="tab" type="button" data-pane="events">消息流</button>
       <button class="tab" type="button" data-pane="bridge" hidden>桥接</button>
@@ -703,6 +744,13 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
       </form>
       <div class="hint" id="run-hint" hidden></div>
       <div id="runs-body"></div>
+    </section>
+
+    <section class="pane hold" id="pane-states" hidden>
+      <div class="eyebrow">状态公告 <span class="count" id="states-count"></span></div>
+      <p class="why">这里只列最新副本的摘要元数据；完整 snapshot 在点开一条后才从本机磁盘读取。</p>
+      <div id="states-body"></div>
+      <div class="hint" id="states-hint" hidden></div>
     </section>
 
     <dialog id="ask">
@@ -2499,6 +2547,161 @@ $("bridge-say").addEventListener("submit", async (event) => {
   }
 });
 
+// ---- 状态公告：索引轻量常驻，snapshot 同一时刻最多展开一份 ----
+
+const stateBoard = {
+  node: "", etag: "", loading: false, data: { agents: [] },
+  open: "", detail: null, generation: 0,
+};
+
+const stateIdentity = (agent, key) => `${agent}\u0000${key}`;
+
+function resetStateBoard() {
+  stateBoard.generation += 1;  // 让仍在飞的旧节点请求失效
+  stateBoard.loading = false;  // 新节点不必等旧请求回来才能立即读取
+  stateBoard.node = "";
+  stateBoard.etag = "";
+  stateBoard.data = { agents: [] };
+  stateBoard.open = "";
+  stateBoard.detail = null;
+  if ($("states-body")) renderStates();
+}
+
+function clearStateDetail(redraw = true) {
+  stateBoard.open = "";
+  stateBoard.detail = null;  // snapshot 不在关闭后继续留在页面内存里
+  if (redraw && $("states-body")) renderStates();
+}
+
+function stateStatus(item) {
+  const labels = {
+    only_copy: ["单副本", ""],
+    in_sync: ["一致", "ok"],
+    ahead: ["较新", "warn"],
+    behind: ["落后", "warn"],
+    conflict: ["冲突", "bad"],
+  };
+  return labels[item.replica_status] || [item.replica_status || "?", ""];
+}
+
+function stateDetailHtml(agent, item) {
+  if (stateBoard.open !== stateIdentity(agent, item.key)) return "";
+  if (!stateBoard.detail) return `<div class="state-detail meta">正在按需读取完整 snapshot…</div>`;
+  if (stateBoard.detail.error) {
+    return `<div class="state-detail"><span class="pill bad">读不到</span>
+      <span class="meta">${esc(stateBoard.detail.error)}</span>
+      <button class="ghost tiny" type="button" data-state-close>关闭</button></div>`;
+  }
+  return `<div class="state-detail">
+    <div class="row"><b>完整 snapshot</b><span class="grow"></span>
+      <button class="ghost tiny" type="button" data-state-close>关闭并清除</button></div>
+    <pre id="state-detail-json"></pre>
+  </div>`;
+}
+
+function renderStates() {
+  const groups = stateBoard.data.agents || [];
+  const count = groups.reduce((n, group) => n + (group.states || []).length, 0);
+  $("states-count").textContent = `${count} 条 · ${groups.length} 个 Agent` +
+    (stateBoard.data.truncated ? "（已按安全上限截断）" : "");
+  const html = groups.length ? groups.map((group) => {
+    const states = group.states || [];
+    const issues = group.issues || [];
+    return `<section class="state-agent">
+      <div class="head"><span class="name">${esc(group.agent)}</span>
+        <span class="meta">${states.length} 条</span>
+        ${group.truncated ? `<span class="pill warn">有截断</span>` : ""}</div>
+      <div class="state-list">
+        ${states.map((item) => {
+          const [label, cls] = stateStatus(item);
+          const open = stateBoard.open === stateIdentity(group.agent, item.key);
+          return `<button class="state-entry${open ? " open" : ""}" type="button"
+                    data-state-agent="${esc(group.agent)}" data-state-key="${esc(item.key)}"
+                    data-state-etag="${esc(item.etag)}" title="${esc(item.replica_note)}">
+              <span class="key">${esc(item.key)}</span>
+              <span>r${esc(item.revision)} <span class="pill ${cls}">${esc(label)}</span></span>
+              <span class="source">${esc(item.source)}</span>
+              <span class="summary">${esc(item.summary)}</span>
+            </button>
+            <div class="state-meta">
+              <span>digest</span><code class="digest" title="${esc(item.digest)}">${esc(item.digest)}</code>
+              <span class="grow"></span>
+              <span>本机落盘 ${esc(fmtStamp(item.stored_at))}</span><span>${esc(item.size_bytes)} B</span>
+            </div>
+            ${stateDetailHtml(group.agent, item)}`;
+        }).join("") || `<div class="meta" style="padding:8px 14px">还没有状态副本</div>`}
+        ${issues.map((issue) => `<div class="state-issue">
+          ${esc(issue.entry)} · ${esc(issue.code)} · ${esc(issue.detail)}</div>`).join("")}
+      </div>
+    </section>`;
+  }).join("") : `<div class="empty">打开这个标签页后才读取状态公告索引</div>`;
+  paint($("states-body"), html);
+  const pre = $("state-detail-json");
+  if (pre && stateBoard.detail?.snapshot) {
+    // 不把不可信 JSON 拼进 innerHTML；整个详情走 textContent。
+    pre.textContent = JSON.stringify(stateBoard.detail.snapshot, null, 2);
+  }
+}
+
+async function loadStates(force = false) {
+  if (stateBoard.loading) return;
+  const wantedNode = focusedNode();
+  if (stateBoard.node && stateBoard.node !== wantedNode) resetStateBoard();
+  const generation = stateBoard.generation;
+  stateBoard.loading = true;
+  try {
+    const headers = {};
+    if (!force && stateBoard.etag) headers["If-None-Match"] = stateBoard.etag;
+    const res = await fetch(u(scoped("api/states")), { headers: authHeaders(headers) });
+    if (res.status === 304) return;
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+    if (generation !== stateBoard.generation || focusedNode() !== wantedNode) return;
+    stateBoard.node = body.node || wantedNode;
+    stateBoard.etag = res.headers.get("ETag") || "";
+    stateBoard.data = body;
+    clearStateDetail(false);  // 索引变版时旧 snapshot 身份不再可靠
+    renderStates();
+    say("states-hint", "");
+  } catch (err) {
+    say("states-hint", String(err.message || err), "bad");
+  } finally {
+    // 旧请求不能把新一代请求的 loading 提前清掉。
+    if (generation === stateBoard.generation) stateBoard.loading = false;
+  }
+}
+
+async function toggleStateDetail(agent, key, etag) {
+  const identity = stateIdentity(agent, key);
+  if (stateBoard.open === identity) {
+    clearStateDetail();
+    return;
+  }
+  stateBoard.open = identity;
+  stateBoard.detail = null;
+  renderStates();
+  const wantedNode = stateBoard.node || focusedNode();
+  try {
+    const path = scoped(`api/states/${encodeURIComponent(agent)}/${encodeURIComponent(key)}`);
+    const res = await fetch(u(path), { headers: authHeaders({ "If-Match": etag }) });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 412) {
+      stateBoard.etag = "";
+      clearStateDetail(false);
+      await loadStates(true);
+      throw new Error(body.detail || "状态公告已更新；请重新打开");
+    }
+    if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+    if (stateBoard.open !== identity || (stateBoard.node || focusedNode()) !== wantedNode) return;
+    stateBoard.detail = body;
+    renderStates();
+  } catch (err) {
+    if (stateBoard.open !== identity) return;
+    stateBoard.detail = { error: String(err.message || err) };
+    renderStates();
+  }
+}
+
 // ---- 标签页 ----
 
 // ---- 模型：面板上配 provider 与密钥 ----
@@ -2706,9 +2909,10 @@ $("ws-purge-all").addEventListener("click", () => clearWorkspaces(false, true));
 // 这个列表必须和上面的 .tab[data-pane] 一一对应 —— 漏一个的后果很隐蔽：
 // 那一页的数据照常加载、照常渲染，只是**永远不显示**（showPane 把别人藏了，
 // 却没把它放出来）。panel_check.mjs 里有一条检查专门盯这个。
-const PANES = ["runs", "chat", "events", "bridge", "setup", "config"];
+const PANES = ["runs", "states", "chat", "events", "bridge", "setup", "config"];
 
 function showPane(name) {
+  if (name !== "states" && stateBoard.open) clearStateDetail();
   for (const pane of PANES) {
     const section = $(`pane-${pane}`);
     if (section) section.hidden = pane !== name;
@@ -2716,6 +2920,7 @@ function showPane(name) {
   for (const tab of document.querySelectorAll(".tab")) {
     tab.classList.toggle("on", tab.dataset.pane === name);
   }
+  if (name === "states") loadStates();
   if (name === "chat") { syncAgentPicker(); loadChat(); }
   if (name === "bridge") loadBridge();
   if (name === "setup") refreshSetup();
@@ -2830,6 +3035,17 @@ $("crumb-up").addEventListener("click", (event) => browseTo(event.target.dataset
 
 // 拓扑与清单每次轮询都重画，所以一律用事件委托，别在渲染时挂监听（会重复挂）
 document.addEventListener("click", (event) => {
+  const stateClose = event.target.closest?.("[data-state-close]");
+  if (stateClose) { clearStateDetail(); return; }
+  const stateEntry = event.target.closest?.("[data-state-agent][data-state-key]");
+  if (stateEntry) {
+    toggleStateDetail(
+      stateEntry.dataset.stateAgent,
+      stateEntry.dataset.stateKey,
+      stateEntry.dataset.stateEtag,
+    );
+    return;
+  }
   const dir = event.target.closest?.("[data-dir]");
   if (dir) { browseTo(dir.dataset.dir); return; }
   // 「配对」「移出」按钮长在节点头部**里面** —— 头部自己也可点（切换/展开），
@@ -2894,6 +3110,7 @@ document.addEventListener("keydown", (event) => {
 function switchNode(node) {
   if (!node) return;
   local.node = node;
+  resetStateBoard();
   try { localStorage.setItem(NODE_KEY, node); } catch (err) { /* 隐私模式 */ }
   // 换了工作区，别处扒开看过的也一并收起 —— 「选中谁就只看谁」
   topoOpen.clear();
@@ -2904,6 +3121,7 @@ function switchNode(node) {
   // 切工作区之后当前这一页得立刻换成新节点的内容 —— 等下一次定时轮询
   // 意味着有几秒钟你看的是**上一个工作区**的数据，还以为是这个的
   loadChat();
+  if (!$("pane-states").hidden) loadStates();
   if (!$("pane-bridge").hidden) loadBridge();
 }
 
@@ -3473,6 +3691,7 @@ $("run-form").addEventListener("submit", async (event) => {
 pickUpToken();
 poll();
 setInterval(poll, CLUSTER_REFRESH);
+setInterval(() => { if (!$("pane-states").hidden) loadStates(); }, CLUSTER_REFRESH);
 setInterval(() => { if (!$("pane-chat").hidden) loadChat(); }, 2000);
 setInterval(() => { if (!$("pane-bridge").hidden) loadBridge(); }, 3000);
 // 归档是只增不减的，没必要跟对话页一样勤 —— 5 秒够了

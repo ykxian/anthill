@@ -15,7 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import HTTPConnection
@@ -74,6 +74,7 @@ from anthill.web.remote import read_config as remote_read_config
 from anthill.web.remote import write_config as remote_write_config
 from anthill.web.setup import browse
 from anthill.web.setup import home as setup_home
+from anthill.web.state_panel import StatePanelError, list_state_metadata, state_detail
 from anthill.web.workspaces import WorkspaceSpec
 from anthill.web.workspaces import clear as clear_workspaces
 from anthill.web.workspaces import create as create_workspace_entry
@@ -222,6 +223,52 @@ def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog, token: str 
         authorize(request, token, what="节点状态")
         ctx = _pick(nodes, node)
         return build_snapshot(ctx.layout, ctx.config, ctx.peers)
+
+    @app.get(f"{PANEL_PATH}/api/states", response_model=None)
+    async def panel_states(
+        request: Request, response: Response, node: str = ""
+    ) -> dict[str, Any] | Response:
+        """状态公告的轻量索引；完整 snapshot 只走下面的单项接口。"""
+        authorize(request, token, what="状态公告")
+        ctx = _pick(nodes, node)
+        result = list_state_metadata(ctx.layout, ctx.config)
+        headers = {"ETag": result.etag, "Cache-Control": "private, no-cache"}
+        if request.headers.get("if-none-match") == result.etag:
+            return Response(status_code=304, headers=headers)
+        response.headers.update(headers)
+        return result.body
+
+    @app.get(f"{PANEL_PATH}/api/states/{{agent}}/{{key}}", response_model=None)
+    async def panel_state_detail(
+        request: Request,
+        response: Response,
+        agent: str,
+        key: str,
+        node: str = "",
+    ) -> dict[str, Any] | Response:
+        """按需读取一个完整快照；If-Match 防止点开已经换版的索引项。"""
+        authorize(request, token, what="状态公告详情")
+        ctx = _pick(nodes, node)
+        try:
+            result = state_detail(ctx.layout, ctx.config, agent, key)
+        except StatePanelError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.detail,
+                headers={"Cache-Control": "private, no-store"},
+            ) from exc
+        headers = {"ETag": result.etag, "Cache-Control": "private, no-store"}
+        expected = request.headers.get("if-match")
+        if expected and expected != result.etag:
+            raise HTTPException(
+                status_code=412,
+                detail="状态公告已更新；请刷新索引后重新打开",
+                headers={"Cache-Control": "private, no-store"},
+            )
+        if request.headers.get("if-none-match") == result.etag:
+            return Response(status_code=304, headers=headers)
+        response.headers.update(headers)
+        return result.body
 
     @app.get(f"{PANEL_PATH}/api/cluster")
     async def panel_cluster(request: Request) -> dict[str, Any]:

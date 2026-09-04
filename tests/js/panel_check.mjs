@@ -96,9 +96,14 @@ class URL {
   toString() { return "http://panel.test/panel"; }
 }
 const location = { protocol: "http:", host: "panel.test", pathname: "/panel", href: "http://panel.test/panel" };
-const fetch = async () => {
+const fetchCalls = [];
+const fetch = async (path, options) => {
+  fetchCalls.push(path);
+  if (fetch.impl) return fetch.impl(path, options);
   throw new Error("测试里不连网");
 };
+fetch.calls = fetchCalls;
+fetch.impl = null;
 class WebSocket {
   constructor() {
     throw new Error("测试里不开 WS");
@@ -120,7 +125,7 @@ const panel = new Function(
   "setTimeout",
   // setWrite：写权限开着时拓扑会多画启停/删除按钮和「加 Agent」表单，
   // 那几处也把外部数据拼进了 HTML，必须一起验
-  `${script}\nreturn { state, local, topoOpen, draw, applyCluster, applyLocal, renderWorkspaces, renderConnect, copyText, chat, renderChat, md, plainPreview, stripScaffold, patchToml, diffLines, renderDiff, agentEndpoint, setWrite: (v) => { canWrite = v; } };`,
+  `${script}\nreturn { state, local, topoOpen, stateBoard, draw, applyCluster, applyLocal, renderWorkspaces, renderConnect, copyText, chat, renderChat, renderStates, resetStateBoard, loadStates, showPane, switchNode, md, plainPreview, stripScaffold, patchToml, diffLines, renderDiff, agentEndpoint, testFetch: fetch, fetchCalls: fetch.calls, setWrite: (v) => { canWrite = v; } };`,
 )(document, window, localStorage, history, URL, location, fetch, WebSocket, navigator, noop, noop);
 
 // ---- 数据 ----
@@ -184,6 +189,62 @@ const LOCAL_PUSH = {
 };
 
 // ---- 断言 ----
+
+// 初次加载只拉原有 cluster，不把状态公告甚至完整 snapshot 顺手塞进启动流量。
+assert.ok(!panel.fetchCalls.some((path) => path.includes("api/states")), "状态公告索引不该预取");
+panel.fetchCalls.length = 0;
+panel.showPane("states");
+assert.ok(panel.fetchCalls.some((path) => path.endsWith("/api/states")), "打开状态公告页才该取索引");
+
+// summary 仍是外部输入；详情 JSON 只能进入 textContent，不能拼进 innerHTML。
+panel.stateBoard.data = {
+  agents: [{
+    agent: "coder",
+    states: [{
+      key: "project.board", revision: 7, source: "laptop:cli",
+      digest: "a".repeat(64), summary: '<img src=x onerror="boom">',
+      stored_at: "2026-09-04T00:00:00+00:00", size_bytes: 100,
+      etag: '"state-test"', replica_status: "only_copy", replica_note: "一个副本",
+    }],
+    issues: [], truncated: false,
+  }],
+};
+panel.stateBoard.open = "coder\u0000project.board";
+panel.stateBoard.detail = { snapshot: { html: '<img src=x onerror="boom">' } };
+panel.renderStates();
+assert.ok(!$("states-body").innerHTML.includes("<img"), "状态摘要没有转义");
+assert.ok(!$("states-body").innerHTML.includes("snapshot: {"), "snapshot 被拼进公告索引 DOM");
+assert.ok($("state-detail-json").textContent.includes("<img"), "详情应以纯文本显示 JSON");
+panel.showPane("runs");
+assert.equal(panel.stateBoard.detail, null, "离开公告页后 snapshot 仍留在内存");
+
+// 旧节点索引请求仍在飞时切工作区：新请求必须立即发出，且旧响应晚到不能覆盖。
+const pendingStates = [];
+panel.testFetch.impl = (path) => {
+  if (!path.includes("api/states")) throw new Error("测试里不连其他接口");
+  return new Promise((resolve) => pendingStates.push({ path, resolve }));
+};
+panel.state.node = "laptop";
+panel.local.node = "";
+panel.resetStateBoard();
+$("pane-states").hidden = false;
+const oldStateLoad = panel.loadStates();
+assert.equal(pendingStates.length, 1, "旧节点状态请求没有发出");
+panel.switchNode("desk");
+assert.equal(pendingStates.length, 2, "切节点被旧 loading 挡住，没有立即刷新状态公告");
+assert.ok(pendingStates[1].path.includes("node=desk"), "新状态请求没有带切换后的节点");
+const stateResponse = (node) => ({
+  status: 200,
+  ok: true,
+  headers: { get: () => `\"states-${node}\"` },
+  json: async () => ({ node, agents: [], truncated: false }),
+});
+pendingStates[1].resolve(stateResponse("desk"));
+await new Promise((resolve) => setTimeout(resolve, 0));
+pendingStates[0].resolve(stateResponse("laptop"));
+await oldStateLoad;
+assert.equal(panel.stateBoard.node, "desk", "旧节点响应晚到后覆盖了新节点状态");
+panel.testFetch.impl = null;
 
 panel.applyCluster(CLUSTER);
 assert.deepEqual(
