@@ -152,7 +152,30 @@ uv run anthill runs -w ./demo               # 查看任务运行记录
 uv run anthill cost -w ./demo               # 查看 token 与费用统计
 uv run anthill log echo --follow -w ./demo  # 跟踪结构化日志
 uv run anthill dead list -w ./demo           # 查看死信
+uv run anthill state publish project.board @state.json --revision 37 --summary "当前状态" --to all -w ./demo
+uv run anthill state list --agent echo -w ./demo
+uv run anthill state show project.board --agent echo -w ./demo
 ```
+
+`state publish` 成功只表示信封已投递，不表示接收端 replica 已应用；应用结果看接收端
+accepted/rejected 回执与结构化日志。state 当前只有 core protocol/CLI，没有 Panel UI，
+现有 event/任务结果 producer 也不会自动改发 `state.update`。
+
+`state.update` 的 payload 是 `{key, revision, digest, summary, snapshot}`：`snapshot` 必须是
+完整 JSON object；`key` 最多 128 字符且匹配
+`^[a-z][a-z0-9_-]*(\.[a-z][a-z0-9_-]*)*$`；`revision >= 1`；`summary`
+为 1–500 字符；`digest` 是键递归排序、紧凑 UTF-8 JSON（禁止 NaN/Infinity）的 64 位
+小写 SHA-256，接收端会重新计算，整个 envelope 仍受 64 KiB 上限约束。runtime 在业务
+handler/bridge/模型和 thread history 前消费它，并按信封 `from` 的规范 `node:agent`
+绑定 key 的 publisher authority：新 replica 可从任意 revision 建立；同 source 的更高
+revision 直接应用，低版本记为 stale，同版本同 digest 是 duplicate，同版本异 digest
+或 source 变化是 conflict。它是完整快照，没有 gap 状态。applied/duplicate/stale 回
+accepted，conflict 零写入并回 rejected。
+广播只允许 `event` 和 `state.update`；replicated current state 使用 `state.update`，`event`
+仍是瞬时通知。旧节点不认识新消息类型，必须先整组升级 producer/recipient 再启用发布。
+
+BOARD.md 正文和 `.anthill/agents/<agent>/state/*.json` snapshot 都不会动态整份注入模型；
+上下文只带黑板短引用，具体黑板或 replica 由 Agent 按需读取。
 
 ## 安全边界
 

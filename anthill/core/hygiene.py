@@ -13,8 +13,9 @@ role=user 的信箱 **by design 没有 agentd 消费者**，落进去的信封�
 - **chats 发件记录**：thread 文件 keep_days 没动过就删 —— 它的意义是补
   对话页的发件半句，thread 冷透了记录也没意义。有意的取舍：冷 thread
   复活时自己那半边旧记录已清、只剩对方归档 —— 预期行为，不是 bug。
-- **bridge done/ 归档**：同 keep_days。读取端（bridge_history）只看最近
-  40 条本就有界，这里清的是磁盘。
+- **bridge done/ 归档与已处理 details/**：同 keep_days。读取端
+  （bridge_history）只看最近 40 条本就有界；details 只有对应 inbox 已不存在
+  才能删，未交给宿主的长通知无论多旧都保留。
 
 并发容错：两个进程同时路过（serve 与 doctor）抢到已消失的文件不抛 ——
 搬移走 Mailbox.archive（原子），删除包 FileNotFoundError。
@@ -95,17 +96,43 @@ def sweep_records(layout: NodeLayout, *, keep_days: float) -> int:
 
 
 def sweep_bridge_done(layout: NodeLayout, config: Config, *, keep_days: float) -> int:
-    """清掉桥接归档里 keep_days 之前的旧文件。"""
+    """清掉桥接的旧归档和已处理详情；未处理详情永不清。
+
+    ``details/<id>.md`` 是 ``inbox/<id>.md`` 的全文附件。只看详情自身年龄不够：
+    宿主可能长期离线，旧 inbox 仍然是待处理消息。对应 inbox 消失后，详情才算
+    已处理记录，之后再按 records_keep_days 清理。
+    """
     removed = 0
     cutoff = time.time() - keep_days * 86400
     for name, agent in config.agents.items():
         if not agent.bridge:
             continue
-        done = layout.agent_dir(name) / "bridge" / "done"
-        if not done.is_dir():
+        bridge = layout.agent_dir(name) / "bridge"
+        done = bridge / "done"
+        if done.is_dir():
+            for path in done.iterdir():
+                if not path.is_file():
+                    continue
+                with suppress(FileNotFoundError, OSError):
+                    if path.stat().st_mtime < cutoff:
+                        path.unlink()
+                        removed += 1
+
+        details = bridge / "details"
+        inbox = bridge / "inbox"
+        if not details.is_dir():
             continue
-        for path in done.iterdir():
-            if not path.is_file():
+        for path in details.glob("*.md"):
+            # 存在同名 inbox 就仍是宿主待处理的全文附件，年龄不能成为删除理由。
+            pending = inbox / path.name
+            try:
+                pending.stat()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                # 看不清 inbox 状态时宁可留着，不能把待处理正文误当垃圾。
+                continue
+            else:
                 continue
             with suppress(FileNotFoundError, OSError):
                 if path.stat().st_mtime < cutoff:

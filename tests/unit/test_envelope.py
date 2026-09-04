@@ -22,6 +22,7 @@ from anthill.core.payloads import (
     EventPayload,
     MessageType,
     ReceiptPayload,
+    StateUpdatePayload,
     TaskResultPayload,
 )
 
@@ -128,6 +129,19 @@ def test_allows_broadcast_for_event(addr):
         recipient=Address(node="testnode", agent="all"),
         type=MessageType.EVENT,
         payload=EventPayload(kind="board.updated"),
+    )
+
+    assert env.to.is_broadcast
+
+
+def test_allows_broadcast_for_state_update(addr):
+    env = Envelope.new(
+        sender=addr("alpha"),
+        recipient=Address(node="testnode", agent="all"),
+        type=MessageType.STATE_UPDATE,
+        payload=StateUpdatePayload.from_snapshot(
+            key="project.board", revision=1, summary="ready", snapshot={"ready": True}
+        ),
     )
 
     assert env.to.is_broadcast

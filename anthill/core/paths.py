@@ -50,6 +50,10 @@ class NodeLayout:
     def mailbox_dir(self, name: str) -> Path:
         return self.agent_dir(name) / "mailbox"
 
+    def state_dir(self, name: str) -> Path:
+        """该 Agent 已应用的最新完整状态副本；不与 thread/LLM 历史混放。"""
+        return self.agent_dir(name) / "state"
+
     def log_file(self, name: str) -> Path:
         return self.logs / f"agentd-{name}.jsonl"
 

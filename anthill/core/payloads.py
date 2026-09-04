@@ -7,10 +7,14 @@
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
+
+STATE_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class MessageType(StrEnum):
@@ -24,6 +28,7 @@ class MessageType(StrEnum):
     RECEIPT_EXPIRED = "receipt.expired"
     EVENT = "event"
     HEARTBEAT = "heartbeat"
+    STATE_UPDATE = "state.update"
 
     @property
     def is_receipt(self) -> bool:
@@ -90,6 +95,54 @@ class HeartbeatPayload(_Payload):
     queue_depth: int = Field(default=0, ge=0)
 
 
+class StateUpdatePayload(_Payload):
+    """一份可在 handler 之前落盘的版本化状态快照。
+
+    ``digest`` 是 ``snapshot`` 的 canonical JSON（UTF-8、键排序、无空白）的
+    SHA-256。模型层绝不负责生成或校验它；接收端状态库会独立重算。
+    """
+
+    key: str = Field(min_length=1, max_length=128)
+    revision: int = Field(ge=1)
+    digest: str
+    summary: str = Field(min_length=1, max_length=500)
+    snapshot: dict[str, JsonValue]
+
+    @field_validator("key")
+    @classmethod
+    def _check_key(cls, value: str) -> str:
+        if not STATE_KEY_RE.fullmatch(value):
+            raise ValueError("state key 只允许小写点分段：字母开头，后接小写字母、数字、_ 或 -")
+        return value
+
+    @field_validator("digest")
+    @classmethod
+    def _check_digest(cls, value: str) -> str:
+        if not SHA256_RE.fullmatch(value):
+            raise ValueError("digest 必须是 64 位小写 SHA-256 十六进制")
+        return value
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        *,
+        key: str,
+        revision: int,
+        summary: str,
+        snapshot: dict[str, JsonValue],
+    ) -> Self:
+        """构造时计算 digest；接收端仍会再次计算，不能信任线上的声明值。"""
+        from anthill.core.state_sync import snapshot_digest
+
+        return cls(
+            key=key,
+            revision=revision,
+            digest=snapshot_digest(snapshot),
+            summary=summary,
+            snapshot=snapshot,
+        )
+
+
 Payload = (
     TaskRequestPayload
     | TaskResultPayload
@@ -98,6 +151,7 @@ Payload = (
     | ReceiptPayload
     | EventPayload
     | HeartbeatPayload
+    | StateUpdatePayload
 )
 
 PAYLOAD_MODELS: dict[MessageType, type[_Payload]] = {
@@ -111,4 +165,5 @@ PAYLOAD_MODELS: dict[MessageType, type[_Payload]] = {
     MessageType.RECEIPT_EXPIRED: ReceiptPayload,
     MessageType.EVENT: EventPayload,
     MessageType.HEARTBEAT: HeartbeatPayload,
+    MessageType.STATE_UPDATE: StateUpdatePayload,
 }

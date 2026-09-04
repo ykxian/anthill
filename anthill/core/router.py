@@ -3,7 +3,7 @@
 三种寻址形式：
 - 具体名 `coder`
 - 角色 `role:reviewer` —— 节点内有多个同角色时选「负载最低」的那个
-- 广播 `all` —— 仅 event 类型允许
+- 广播 `all` —— 仅 event / state.update 类型允许
 
 跨节点地址不在这里解析，交给传输层按 peers 配置处理。
 """

@@ -8,18 +8,24 @@ doctor 报「积压」、对话页每轮都要多读。归档进 done/<日期>/ 
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from pathlib import Path
 
+import pytest
+
+from anthill.cli.serve_cmd import _hygiene_loop
 from anthill.core.config import Config
 from anthill.core.envelope import Address, Envelope
 from anthill.core.hygiene import sweep_bridge_done, sweep_records, sweep_user_mailboxes
 from anthill.core.ids import new_id, now
+from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
 from anthill.core.payloads import ChatPayload, MessageType, ReceiptPayload
 from anthill.core.traffic import conversations
+from anthill.web.context import NodeContext, NodeRegistry
 
 NODE_TOML = """
 [node]
@@ -164,6 +170,78 @@ def test_old_bridge_archives_are_pruned(tmp_path: Path) -> None:
 
     assert removed == 1
     assert not old.exists() and young.exists()
+
+
+def _bridge_detail(layout: NodeLayout, name: str, *, age_days: float) -> Path:
+    details = layout.agent_dir("cc") / "bridge" / "details"
+    details.mkdir(parents=True, exist_ok=True)
+    path = details / name
+    path.write_text("完整通知", encoding="utf-8")
+    timestamp = time.time() - age_days * 86400
+    os.utime(path, (timestamp, timestamp))
+    return path
+
+
+def test_old_processed_bridge_detail_is_pruned(tmp_path: Path) -> None:
+    layout, config = _node(tmp_path)
+    old = _bridge_detail(layout, "OLD.md", age_days=40)
+
+    removed = sweep_bridge_done(layout, config, keep_days=30.0)
+
+    assert removed == 1
+    assert not old.exists()
+
+
+def test_old_unprocessed_bridge_detail_is_kept_while_inbox_exists(tmp_path: Path) -> None:
+    layout, config = _node(tmp_path)
+    old = _bridge_detail(layout, "WAITING.md", age_days=40)
+    inbox = layout.agent_dir("cc") / "bridge" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / old.name).write_text("短索引", encoding="utf-8")
+
+    removed = sweep_bridge_done(layout, config, keep_days=30.0)
+
+    assert removed == 0
+    assert old.exists()
+
+
+def test_young_processed_bridge_detail_is_kept_until_retention_expires(tmp_path: Path) -> None:
+    layout, config = _node(tmp_path)
+    young = _bridge_detail(layout, "YOUNG.md", age_days=1)
+
+    removed = sweep_bridge_done(layout, config, keep_days=30.0)
+
+    assert removed == 0
+    assert young.exists()
+
+
+async def test_serve_hygiene_loop_uses_the_expanded_bridge_sweeper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """serve 既有的一次调用同时覆盖 done 与 details，无需另起清扫循环。"""
+    layout, config = _node(tmp_path)
+    nodes = NodeRegistry([NodeContext(layout, config)])
+    stop = asyncio.Event()
+    calls: list[tuple[NodeLayout, Config, float]] = []
+
+    monkeypatch.setattr("anthill.core.hygiene.sweep_user_mailboxes", lambda *args, **kwargs: 0)
+    monkeypatch.setattr("anthill.core.hygiene.sweep_records", lambda *args, **kwargs: 0)
+
+    def record_bridge_sweep(
+        called_layout: NodeLayout, called_config: Config, *, keep_days: float
+    ) -> int:
+        calls.append((called_layout, called_config, keep_days))
+        stop.set()
+        return 0
+
+    monkeypatch.setattr("anthill.core.hygiene.sweep_bridge_done", record_bridge_sweep)
+    log = EventLog(None, agent="serve", echo=False)
+    try:
+        await _hygiene_loop(nodes, log, stop)
+    finally:
+        log.close()
+
+    assert calls == [(layout, config, config.runtime.records_keep_days)]
 
 
 def test_a_late_delivered_old_envelope_is_not_archived_on_arrival(tmp_path: Path) -> None:

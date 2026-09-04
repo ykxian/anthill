@@ -21,6 +21,7 @@ from anthill.cli.remote_cmd import approve_command, fetch_command, pull_command
 from anthill.cli.run_cmd import run_command
 from anthill.cli.runs_cmd import runs_command
 from anthill.cli.serve_cmd import serve_command
+from anthill.cli.state_cmd import state_app
 from anthill.cli.status_cmd import status_command
 
 COMMAND_MAP = """AntHill 命令地图 —— 按「你想干什么」分组
@@ -46,6 +47,7 @@ COMMAND_MAP = """AntHill 命令地图 —— 按「你想干什么」分组
   cost      token 用量与花费
   log       结构化日志（JSON Lines）
   dead      死信：看看什么没送出去，修好之后重投
+  state     发布/读取带 owner、revision 与 digest 的状态 replica（不调用模型）
 
 跨机
   peers     对端节点与信任关系（配对用 peers pair，念六位 PIN）
@@ -114,6 +116,7 @@ app.add_typer(agent_app, name="agent")
 app.add_typer(dead_app, name="dead")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(peers_app, name="peers")
+app.add_typer(state_app, name="state")
 
 
 @app.command("version")

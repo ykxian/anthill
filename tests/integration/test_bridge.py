@@ -7,28 +7,33 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from anthill.adapters.bridge import BridgeHandler, note_needs_reply, parse_note, render_request
 from anthill.agent.conversation import message_expects_reply
 from anthill.agent.factory import build_handler
+from anthill.agent.handlers import HandlerContext
 from anthill.agent.memory import ThreadMemory
 from anthill.agent.runtime import AgentRuntime
 from anthill.agent.sender import Sender
 from anthill.core.config import Config
 from anthill.core.envelope import Address, Envelope
-from anthill.core.errors import ConfigError
+from anthill.core.errors import AntHillError, ConfigError
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
 from anthill.core.payloads import (
     ChatPayload,
     MessageType,
+    TaskErrorPayload,
     TaskRequestPayload,
     TaskResultPayload,
 )
@@ -232,6 +237,126 @@ async def test_a_task_result_reaches_the_person_instead_of_being_dropped(
 
     note = (handler.dir("inbox") / f"{env.id}.md").read_text(encoding="utf-8")
     assert "排期谈定了" in note, "正文没带上，人看见了也不知道发生了什么"
+
+
+@pytest.mark.parametrize("kind", [MessageType.TASK_RESULT, MessageType.TASK_ERROR])
+async def test_a_long_terminal_notification_is_externalized_before_reaching_the_host(
+    node: tuple[NodeLayout, Config], kind: MessageType
+) -> None:
+    layout, _ = node
+    handler = handler_for(layout)
+    marker = "只应出现在全文详情里的末尾标记"
+    full_text = "很长的通知正文" * 900 + marker
+    payload = (
+        TaskResultPayload(summary=full_text)
+        if kind is MessageType.TASK_RESULT
+        else TaskErrorPayload(error=full_text, retryable=False)
+    )
+    env = Envelope.new(
+        sender=Address(node="testnode", agent="cli"),
+        recipient=Address(node="testnode", agent="cc"),
+        type=kind,
+        payload=payload,
+    )
+    ctx = cast(
+        HandlerContext,
+        SimpleNamespace(log=EventLog(None, agent="cc", echo=False)),
+    )
+    await handler.handle(env, ctx)
+    inbox = handler.dir("inbox") / f"{env.id}.md"
+    detail = handler.dir("details") / f"{env.id}.md"
+    first_mtime = detail.stat().st_mtime_ns
+
+    # 崩溃恢复直接重入 handler 时，同一内容也不得重写详情或制造第二份文件。
+    await handler.handle(env, ctx)
+
+    short = inbox.read_text(encoding="utf-8")
+    detail_bytes = detail.read_bytes()
+    detail_line = next(line for line in short.splitlines() if line.startswith("全文："))
+    referenced_detail = Path(detail_line.removeprefix("全文："))
+    assert marker not in short
+    assert marker in detail_bytes.decode("utf-8")
+    assert referenced_detail == detail.resolve()
+    assert referenced_detail.is_file()
+    assert referenced_detail.is_relative_to(layout.workspace.resolve())
+    assert hashlib.sha256(detail_bytes).hexdigest() in short
+    assert len(short.encode("utf-8")) < 2_000
+    assert detail.stat().st_mtime_ns == first_mtime
+    assert list(handler.dir("details").glob("*.md")) == [detail]
+
+    conflicting = env.model_copy(
+        update={
+            "payload": (
+                TaskResultPayload(summary="另一份冲突正文" * 900)
+                if kind is MessageType.TASK_RESULT
+                else TaskErrorPayload(error="另一份冲突正文" * 900, retryable=False)
+            )
+        }
+    )
+    with pytest.raises(AntHillError, match="内容不同"):
+        await handler.handle(conflicting, ctx)
+    assert detail.read_bytes() == detail_bytes
+
+
+async def test_a_long_noninteractive_chat_answer_is_externalized(
+    node: tuple[NodeLayout, Config],
+) -> None:
+    layout, _ = node
+    handler = handler_for(layout)
+    marker = "长回答末尾标记"
+    env = chat_to_cc("答复正文" * 900 + marker, expects_reply=False)
+    ctx = cast(
+        HandlerContext,
+        SimpleNamespace(log=EventLog(None, agent="cc", echo=False)),
+    )
+
+    await handler.handle(env, ctx)
+
+    inbox = handler.dir("inbox") / f"{env.id}.md"
+    detail = handler.dir("details") / f"{env.id}.md"
+    short = inbox.read_text(encoding="utf-8")
+    assert marker not in short
+    assert marker in detail.read_text(encoding="utf-8")
+    assert str(detail.resolve()) in short
+    assert hashlib.sha256(detail.read_bytes()).hexdigest() in short
+
+
+@pytest.mark.parametrize(
+    ("kind", "mentions"),
+    [
+        (MessageType.TASK_REQUEST, ()),
+        (MessageType.CHAT, ()),  # unsolicited chat
+        (MessageType.CHAT, ("coder",)),  # mention/talk
+    ],
+)
+async def test_long_interactive_messages_are_never_externalized(
+    node: tuple[NodeLayout, Config], kind: MessageType, mentions: tuple[str, ...]
+) -> None:
+    layout, _ = node
+    handler = handler_for(layout)
+    long_body = "任务正文不能被裁" * 500
+    payload = (
+        TaskRequestPayload(title="长任务", body=long_body)
+        if kind is MessageType.TASK_REQUEST
+        else ChatPayload(body=long_body, mentions=mentions)
+    )
+    env = Envelope.new(
+        sender=Address(node="testnode", agent="cli"),
+        recipient=Address(node="testnode", agent="cc"),
+        type=kind,
+        payload=payload,
+        reply_to="01J00000000000000000000000" if mentions else None,
+    )
+
+    ctx = cast(
+        HandlerContext,
+        SimpleNamespace(log=EventLog(None, agent="cc", echo=False)),
+    )
+    await handler.handle(env, ctx)
+    inbox = handler.dir("inbox") / f"{env.id}.md"
+
+    assert long_body in inbox.read_text(encoding="utf-8")
+    assert not (handler.dir("details") / f"{env.id}.md").exists()
 
 
 async def test_a_task_result_is_not_marked_as_awaiting_a_reply(

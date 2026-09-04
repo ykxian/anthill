@@ -4,8 +4,15 @@ from __future__ import annotations
 
 import pytest
 
+from anthill.core.envelope import Envelope
 from anthill.core.errors import ProtocolError
-from anthill.core.payloads import MessageType, ReceiptPayload, TaskErrorPayload, TaskResultPayload
+from anthill.core.payloads import (
+    MessageType,
+    ReceiptPayload,
+    StateUpdatePayload,
+    TaskErrorPayload,
+    TaskResultPayload,
+)
 from anthill.core.states import DeliveryState, DeliveryTracker
 
 
@@ -111,3 +118,32 @@ def test_records_are_immutable(make_task):
 
     assert record.state is DeliveryState.PENDING
     assert moved.state is DeliveryState.DELIVERED
+
+
+def test_state_update_is_open_until_delivery_and_stays_closed_after_accepted(addr) -> None:
+    env = Envelope.new(
+        sender=addr("alpha"),
+        recipient=addr("beta"),
+        type=MessageType.STATE_UPDATE,
+        payload=StateUpdatePayload.from_snapshot(
+            key="project.board", revision=1, summary="ready", snapshot={"ready": True}
+        ),
+    )
+    tracker = DeliveryTracker()
+    tracker.register(env)
+
+    assert tracker.open_records()[0].state is DeliveryState.PENDING
+
+    tracker.mark(env.id, DeliveryState.DELIVERED)
+    assert tracker.open_records() == ()
+
+    accepted = env.reply(
+        type=MessageType.RECEIPT_ACCEPTED,
+        payload=ReceiptPayload(ref=env.id),
+        sender=addr("beta"),
+    )
+
+    record = tracker.on_incoming(accepted)
+
+    assert record is not None and record.state is DeliveryState.ACCEPTED
+    assert tracker.open_records() == ()

@@ -1,7 +1,8 @@
 """共享黑板 BOARD.md（02-protocol §7）。
 
-它是「团队当前在干什么」的一页纸快照，会被注进每个 Agent 的上下文，
-所以**必须短**（≤100 行）—— 长了就是每个 Agent 每一轮都在烧同样的 token。
+它是「团队当前在干什么」的一页纸快照。普通 Agent 上下文只注入它的短引用、
+digest 与大小，不再每轮展开正文；Agent 或人工需要详情时才显式读取。它仍必须短
+（≤100 行），因为人工浏览、按需读取、diff/review 和长期管理都有实际成本。
 
 单写者原则：BOARD.md 只有 coordinator 写；任务目录只有该步的 assignee 写。
 借鉴 collab-cli 的 SHARD.md，但这里的内容由状态机自动渲染，不靠 Agent 自觉维护。
@@ -62,7 +63,7 @@ class Blackboard:
         return atomic_write(self._root, self._root, BOARD_FILE, render_board(states).encode())
 
     def summary(self) -> str:
-        """注入 Agent 上下文用。读不到就返回空串 —— 黑板不是必需品。"""
+        """供 ContextBuilder 计算短引用元数据；正文不会直接注入。"""
         if not self.board_path.is_file():
             return ""
         try:

@@ -48,9 +48,18 @@ from anthill.core.router import parse_address
 from anthill.providers.base import Msg, Role
 
 BRIDGE_DIR = "bridge"
-INBOX, OUTBOX, PENDING, PREPARED, DONE = "inbox", "outbox", "pending", "prepared", "done"
+INBOX, OUTBOX, PENDING, PREPARED, DETAILS, DONE = (
+    "inbox",
+    "outbox",
+    "pending",
+    "prepared",
+    "details",
+    "done",
+)
 STABLE_SECONDS = 1.0
 MAX_BODY_CHARS = 30_000
+MAX_INLINE_NOTIFICATION_BYTES = 2_000
+NOTIFICATION_SUMMARY_CHARS = 320
 PREPARED_VERSION = 1
 FRONT_MATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", re.S)
 
@@ -122,6 +131,14 @@ class BridgeNote:
         return stem if is_valid_id(stem) else ""
 
 
+@dataclass(frozen=True, slots=True)
+class ExternalizedNotification:
+    path: Path
+    read_path: str
+    digest: str
+    summary: str
+
+
 class BridgeHandler:
     """人（或常驻会话）在回路里的 Agent。"""
 
@@ -133,7 +150,7 @@ class BridgeHandler:
         self._chat_turns = chat_turns
         # 启动就把目录建出来：人得先能告诉自己的 Claude Code「盯着这个目录」，
         # 而不是等第一条消息到了才发现目录还不存在
-        for name in (INBOX, OUTBOX, PENDING, PREPARED, DONE):
+        for name in (INBOX, OUTBOX, PENDING, PREPARED, DETAILS, DONE):
             self.dir(name)
 
     @property
@@ -152,7 +169,9 @@ class BridgeHandler:
             ctx.log.info("msg.ignored", msg=env.id, type=str(env.type))
             return
 
-        self.dir(INBOX).joinpath(f"{env.id}.md").write_text(render_request(env), encoding="utf-8")
+        detail = self._externalize_notification(env)
+        note = render_externalized_request(env, detail) if detail else render_request(env)
+        self._write_once(self.dir(INBOX) / f"{env.id}.md", note.encode("utf-8"))
         # **只有「在等你回」的才进 pending。** pending 里放的是构造回信要用的
         # 原始信封；task.result / task.error 是**别人给你的答复**，不需要你回，
         # 给它建 pending 只会让 `--ack` 和「待回复」的计数把它算进去。
@@ -165,7 +184,46 @@ class BridgeHandler:
             frm=str(env.from_),
             type=str(env.type),
             file=f"{BRIDGE_DIR}/{INBOX}/{env.id}.md",
+            externalized=bool(detail),
+            details=detail.read_path if detail else "",
         )
+
+    def _externalize_notification(self, env: Envelope) -> ExternalizedNotification | None:
+        """长非交互通知只给宿主短索引；仍需回答的消息绝不裁剪。"""
+        terminal = env.type in {MessageType.TASK_RESULT, MessageType.TASK_ERROR}
+        chat_answer = env.type is MessageType.CHAT and not message_expects_reply(env)
+        if not (terminal or chat_answer):
+            return None
+        body = _incoming_text(env)
+        if len(body.encode("utf-8")) <= MAX_INLINE_NOTIFICATION_BYTES:
+            return None
+
+        data = render_request(env).encode("utf-8")
+        digest = hashlib.sha256(data).hexdigest()
+        path = self.dir(DETAILS) / f"{env.id}.md"
+        self._write_once(path, data)
+        return ExternalizedNotification(
+            path=path,
+            # BridgeHandler 的构造边界只有 agent root，不应靠向上数目录猜
+            # workspace。绝对路径在当前 workspace 内，Codex/read_file 和人工宿主
+            # 都能直接解析，也不会被进程 cwd 影响。
+            read_path=str(path.resolve()),
+            digest=digest,
+            summary=_short_notification_summary(body),
+        )
+
+    @staticmethod
+    def _write_once(path: Path, data: bytes) -> None:
+        """崩溃重放可补齐，但同一消息 ID 永不覆写成另一份内容。"""
+        try:
+            existing = path.read_bytes()
+        except FileNotFoundError:
+            atomic_write(path.parent, path.parent, path.name, data)
+            return
+        except OSError as exc:
+            raise AntHillError(f"读取既有桥接文件 {path} 失败：{exc}") from exc
+        if existing != data:
+            raise AntHillError(f"桥接文件 {path} 已存在但内容不同，拒绝覆写")
 
     # ---------- 发：定时扫 outbox ----------
 
@@ -434,6 +492,20 @@ def render_request(env: Envelope) -> str:
     )
 
 
+def render_externalized_request(env: Envelope, detail: ExternalizedNotification) -> str:
+    """给宿主的短索引；全文只能按 ``details`` 路径显式读取。"""
+    return REQUEST_TEMPLATE.format(
+        frm=str(env.from_),
+        to=str(env.to),
+        kind=str(env.type),
+        needs_reply="false",
+        thread=env.thread,
+        msg_id=env.id,
+        body=(f"摘要：{detail.summary}\n\n全文：{detail.read_path}\nSHA-256：{detail.digest}"),
+        instruction="这是答复或通知，不要回信；需要全文时按路径读取，读完后归档即可。",
+    )
+
+
 def _outgoing_body(env: Envelope) -> str:
     payload = env.payload
     if isinstance(payload, ChatPayload):
@@ -497,10 +569,22 @@ def _incoming_text(env: Envelope) -> str:
     """
     payload: Any = env.payload
     title = str(getattr(payload, "title", "") or "").strip()
-    body = str(getattr(payload, "body", "") or getattr(payload, "summary", "") or "").strip()
+    body = str(
+        getattr(payload, "body", "")
+        or getattr(payload, "summary", "")
+        or getattr(payload, "error", "")
+        or ""
+    ).strip()
     if not title or (body and body.startswith(title.rstrip("…"))):
         return body or title
     return f"{title}\n\n{body}".strip()
+
+
+def _short_notification_summary(text: str) -> str:
+    flat = " ".join(text.split())
+    if len(flat) <= NOTIFICATION_SUMMARY_CHARS:
+        return flat
+    return flat[:NOTIFICATION_SUMMARY_CHARS] + "…"
 
 
 def _artifacts(headers: dict[str, str]) -> tuple[str, ...]:

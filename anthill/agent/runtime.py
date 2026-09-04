@@ -28,12 +28,13 @@ from anthill.core.ids import now
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
-from anthill.core.payloads import MessageType, TaskErrorPayload
+from anthill.core.payloads import MessageType, StateUpdatePayload, TaskErrorPayload
 from anthill.core.process_lock import ProcessLock
 from anthill.core.retention import SweepResult, rotate_log, sweep_archive, sweep_flat
 from anthill.core.router import Router
 from anthill.core.seen import Claim, SeenStore
 from anthill.core.spool import Spool
+from anthill.core.state_sync import StateApplyStatus, StateStore
 from anthill.core.states import DeliveryTracker
 from anthill.discovery.registry import PeerRegistry
 from anthill.providers.registry import TapeMode
@@ -98,6 +99,7 @@ class AgentRuntime:
         self.log = log or EventLog(layout.log_file(agent_name), agent=agent_name, echo=echo)
 
         self._seen: SeenStore = self.mailbox.open_seen()
+        self._state_store = StateStore(layout.state_dir(agent_name))
         self._tracker = DeliveryTracker()
         self._router = Router(config, layout)
         self._peers = PeerRegistry(layout.root, self_name=config.node.name)
@@ -133,6 +135,10 @@ class AgentRuntime:
     @property
     def tracker(self) -> DeliveryTracker:
         return self._tracker
+
+    @property
+    def state_store(self) -> StateStore:
+        return self._state_store
 
     @property
     def status_path(self) -> Path:
@@ -429,6 +435,11 @@ class AgentRuntime:
         if claim is Claim.DUPLICATE:
             # 重复消息：业务不再处理，但仍补发回执，让发送方状态机收敛
             self.log.info("msg.duplicate", msg=env.id, thread=env.thread)
+            if env.type is MessageType.STATE_UPDATE:
+                # 普通消息补 accepted 即可；状态控制面必须重新核对本地 revision。
+                # 否则一份 conflict 首次被 rejected，重投同 ID 却会被误报 accepted。
+                await self._apply_state_update(env)
+                return
             await self.sender.send_receipt(env, MessageType.RECEIPT_ACCEPTED, reason="重复消息")
             return
         if claim is Claim.RETRY:
@@ -442,8 +453,72 @@ class AgentRuntime:
         if env.type.is_receipt:
             return  # 回执只推进状态机，不再进入 handler，也不再回执
 
+        if env.type is MessageType.STATE_UPDATE:
+            # 状态同步是协议控制面：在任何 handler、bridge、CLI/Codex turn 或
+            # thread history 之前截获。可靠投递/验签/seen/回执/归档仍沿用 Maildir。
+            await self._apply_state_update(env)
+            return
+
         await self.sender.send_receipt(env, MessageType.RECEIPT_ACCEPTED)
         await self.handler.handle(env, self._ctx)
+
+    async def _apply_state_update(self, env: Envelope) -> None:
+        payload = env.payload
+        if not isinstance(payload, StateUpdatePayload):
+            # Envelope 一致性校验本应先挡住；这里保留 fail-closed 防线。
+            self.log.warn(
+                "state.update",
+                msg=env.id,
+                status=str(StateApplyStatus.CONFLICT),
+                reason="payload type mismatch",
+            )
+            await self.sender.send_receipt(
+                env, MessageType.RECEIPT_REJECTED, reason="state.update payload 类型不匹配"
+            )
+            return
+        try:
+            result = self._state_store.apply(payload, source=str(env.from_))
+        except (AntHillError, OSError, ValueError) as exc:
+            reason = f"状态持久化失败：{type(exc).__name__}: {exc}"[:2000]
+            self.log.error(
+                "state.update",
+                msg=env.id,
+                key=payload.key,
+                source=str(env.from_),
+                revision=payload.revision,
+                digest=payload.digest,
+                status=str(StateApplyStatus.CONFLICT),
+                reason=reason,
+            )
+            await self.sender.send_receipt(env, MessageType.RECEIPT_REJECTED, reason=reason)
+            return
+
+        fields = {
+            "msg": env.id,
+            "key": result.key,
+            "source": result.source,
+            "revision": result.incoming_revision,
+            "current_revision": result.current_revision,
+            "digest": result.digest,
+            "status": str(result.status),
+            "path": str(result.path),
+            "reason": result.reason,
+            "skipped_revisions": result.skipped_revisions,
+        }
+        if result.status is StateApplyStatus.CONFLICT:
+            self.log.warn("state.update", **fields)
+            await self.sender.send_receipt(
+                env,
+                MessageType.RECEIPT_REJECTED,
+                reason=f"state.update {result.status}: {result.reason}"[:2000],
+            )
+            return
+        self.log.info("state.update", **fields)
+        await self.sender.send_receipt(
+            env,
+            MessageType.RECEIPT_ACCEPTED,
+            reason=f"state.update {result.status}",
+        )
 
     async def _report_failure(self, env: Envelope, exc: Exception) -> None:
         if env.type is not MessageType.TASK_REQUEST:

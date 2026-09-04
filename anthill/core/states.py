@@ -106,6 +106,9 @@ class DeliveryRecord:
         """
         if self.state.is_terminal:
             return False
+        if self._is_fire_and_forget and self.state is DeliveryState.ACCEPTED:
+            # accepted 比 delivered 更晚；控制面回执不能把已关闭的通知重新打开。
+            return False
         return not (self._is_fire_and_forget and self.state is DeliveryState.DELIVERED)
 
     @property
@@ -115,6 +118,7 @@ class DeliveryRecord:
             MessageType.HEARTBEAT,
             MessageType.TASK_RESULT,
             MessageType.TASK_ERROR,
+            MessageType.STATE_UPDATE,
         }
 
 
