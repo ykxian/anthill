@@ -83,7 +83,8 @@ uv run anthill serve -w ./demo --panel-write
 1. 配置模型 Provider 和 API 密钥。
 2. 创建 Agent，并选择 worker、coordinator 或 bridge 角色。
 3. 根据需要填写角色卡和工具权限。
-4. 启动 Agent，发送消息或创建协作任务。
+4. 启动普通 Agent，发送消息或创建协作任务。Bridge Agent
+   不用在面板提前启动 agentd，直接按「桥接」页的说明接入会话。
 
 密钥保存在 `~/.anthill/secrets.env`，不会写入工作区的 `node.toml`。
 
@@ -117,6 +118,12 @@ AntHill 使用统一的运行时处理不同类型的 Agent：
 | Bridge Agent | 将常驻 Codex、Claude Code 会话或人工操作接入消息网络 |
 | Echo Agent | 不调用模型，用于验证工作区、路由和传输是否正常 |
 
+使用 Codex Bridge 时，先在面板创建 Bridge Agent，然后从「桥接」页复制接入命令或
+“复制给当前 Codex 的提示词”。**不要、也不需要先在面板启动 agentd**：
+`anthill codex` 会为该会话启动唯一的 agentd，会话或监听命令退出时自动关闭它。
+如果从旧版升级后提示“agentd 已有一个实例在运行”，先停止那个旧的独立 agentd，
+再重新接入；不要删除锁文件或强行启动第二个实例。
+
 角色卡是可选的项目数据，只用于描述 Agent 的职责和工作偏好。它不会授予新工具、
 提高来源信任等级，也不能绕过固定的安全规则或审批流程。
 
@@ -138,7 +145,8 @@ uv run anthill peers pair -w ./demo
 uv run anthill peers pair --to <A的节点名> --pin <六位PIN> -w ./demo
 ```
 
-请在两端核对显示的指纹。发现只代表节点可见，未配对节点不能投递消息或读取状态。
+请在两端核对显示的指纹。发现只代表节点可见，未配对节点不能投递消息；状态公告
+只存在于各自 workspace，本协议不提供跨节点读取或复制。
 需要通过 SSH 连接不能反向访问的服务器时，可使用 SFTP 投递以及 `anthill pull`、
 `anthill fetch` 拉取回信和产物，详见快速使用说明。
 
@@ -152,30 +160,40 @@ uv run anthill runs -w ./demo               # 查看任务运行记录
 uv run anthill cost -w ./demo               # 查看 token 与费用统计
 uv run anthill log echo --follow -w ./demo  # 跟踪结构化日志
 uv run anthill dead list -w ./demo           # 查看死信
-uv run anthill state publish project.board @state.json --revision 37 --summary "当前状态" --to all -w ./demo
-uv run anthill state list --agent echo -w ./demo
-uv run anthill state show project.board --agent echo -w ./demo
+uv run anthill state publish project.board @state.json --revision 37 --summary "当前状态" --from cli -w ./demo
+uv run anthill state list -w ./demo
+uv run anthill state show project.board -w ./demo
 ```
 
-`state publish` 成功只表示信封已投递，不表示接收端 replica 已应用；应用结果看接收端
-accepted/rejected 回执与结构化日志。state 当前只有 core protocol/CLI，没有 Panel UI，
-现有 event/任务结果 producer 也不会自动改发 `state.update`。
+`state publish` 直接更新当前 workspace 的
+`.anthill/blackboard/state/<key>.json`；它不会生成 Envelope、Maildir、outbox、回执、
+bridge 文件、Codex turn 或 thread memory，也不会唤醒 Agent。一个 key 绑定一个具体
+`node:agent` publisher；更高 revision 原子替换，同版同内容是 duplicate，低版是 stale，
+同版异内容或 publisher 变化是 conflict。snapshot 必须是完整 JSON object，canonical
+SHA-256 会在 Core 内重算，最终状态文件上限为 128 KiB。
 
-`state.update` 的 payload 是 `{key, revision, digest, summary, snapshot}`：`snapshot` 必须是
-完整 JSON object；`key` 最多 128 字符且匹配
-`^[a-z][a-z0-9_-]*(\.[a-z][a-z0-9_-]*)*$`；`revision >= 1`；`summary`
-为 1–500 字符；`digest` 是键递归排序、紧凑 UTF-8 JSON（禁止 NaN/Infinity）的 64 位
-小写 SHA-256，接收端会重新计算，整个 envelope 仍受 64 KiB 上限约束。runtime 在业务
-handler/bridge/模型和 thread history 前消费它，并按信封 `from` 的规范 `node:agent`
-绑定 key 的 publisher authority：新 replica 可从任意 revision 建立；同 source 的更高
-revision 直接应用，低版本记为 stale，同版本同 digest 是 duplicate，同版本异 digest
-或 source 变化是 conflict。它是完整快照，没有 gap 状态。applied/duplicate/stale 回
-accepted，conflict 零写入并回 rejected。
-广播只允许 `event` 和 `state.update`；replicated current state 使用 `state.update`，`event`
-仍是瞬时通知。旧节点不认识新消息类型，必须先整组升级 producer/recipient 再启用发布。
+这是**节点 workspace 内共享**的当前文档，不是跨节点同步、事件流或历史库。旧的
+`.anthill/agents/<agent>/state/` replica 会被忽略，若曾实际启用，应在停用旧 publisher
+后显式审计和迁移，不能自动合并。Panel 的状态页先按需读取元数据，只有点开某个 key
+才读取完整 snapshot；普通 Agent 上下文也不会自动注入状态正文。
 
-BOARD.md 正文和 `.anthill/agents/<agent>/state/*.json` snapshot 都不会动态整份注入模型；
-上下文只带黑板短引用，具体黑板或 replica 由 Agent 按需读取。
+### Context/token 止血硬门
+
+消息进入 Agent 前会执行机械限长，而不是依赖提示词自行忽略：原始正文超过 4 KiB，
+或其模型注入形态超过 2 KiB，会写入
+`.anthill/blackboard/details/<sha256>.txt`（旁有有限元数据 sidecar），信封只保留短摘要、owner、证据等级、
+是否需回复、路径和 SHA-256。相同内容按 digest 只存一份；每个 Agent 也只消费同一
+digest 一次。details 不会随信件或 thread history 自动展开，只有任务确实需要时才显式读取。
+
+工具输出在每次回喂模型前限制为 8 KiB 或 200 行（先到者生效）；普通 Agent 结果限制为
+4 KiB 或 40 行。超限内容不会伪装成完整结果：模型看到的正文带明确的
+`TRUNCATED_WITH_EVIDENCE`、details 路径和 SHA-256，完整证据文件上限 16 MiB；检测到
+明文 private key、Bearer token、API key、password 或 cookie 时拒绝落盘和投递。
+R2/R3 复核只应传新 delta/hash/失败点和冻结制品引用。
+
+回滚时先停用新 publisher/worker，保留 `blackboard/details` 供审计，再回退实现 commit；
+不要把 details 重新内联进邮箱。若确需恢复旧协议，应先排空新格式信封并确认没有活跃
+`TRUNCATED_WITH_EVIDENCE` 引用，避免旧版本把摘要误当全文。
 
 ## 安全边界
 
@@ -202,6 +220,8 @@ demo/.anthill/
 │   └── bridge/               # 可选的交互式桥接目录
 ├── blackboard/
 │   ├── BOARD.md              # 共享状态摘要
+│   ├── state/<key>.json      # 唯一共享状态文档；不广播、不进邮箱
+│   ├── details/<sha256>.txt  # 大消息/工具输出的按需证据；元数据在 .meta.json
 │   └── tasks/<task_id>/      # 任务状态与产物
 └── logs/                     # 结构化运行日志
 ```

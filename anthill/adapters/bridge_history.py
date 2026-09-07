@@ -28,7 +28,9 @@ from typing import Any
 from anthill.adapters.bridge import DONE, parse_note
 from anthill.core.envelope import Envelope
 from anthill.core.errors import AntHillError
+from anthill.core.evidence import render_reference
 from anthill.core.ids import is_valid_id
+from anthill.core.payloads import EvidenceRef
 
 DEFAULT_LIMIT = 40
 FAILED_SUFFIX = ".failed"
@@ -196,7 +198,16 @@ def _parse(path: Path) -> tuple[dict[str, str], str]:
 
 def _body_of(env: Envelope) -> str:
     payload: Any = env.payload
-    return str(getattr(payload, "body", "") or getattr(payload, "summary", "") or "").strip()
+    body = str(
+        getattr(payload, "body", "")
+        or getattr(payload, "summary", "")
+        or getattr(payload, "error", "")
+        or ""
+    ).strip()
+    details = getattr(payload, "details", None)
+    if isinstance(details, EvidenceRef):
+        return render_reference(summary=body, ref=details)
+    return body
 
 
 def _clip(text: str) -> tuple[str, bool]:

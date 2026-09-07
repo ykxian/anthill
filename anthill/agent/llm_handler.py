@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from anthill.agent.context import ContextBuilder
-from anthill.agent.conversation import chat_payload, message_expects_reply, plan_reply
+from anthill.agent.conversation import message_expects_reply, plan_reply
 from anthill.agent.handlers import HandlerContext
 from anthill.agent.loop import AgentLoop, LoopOutcome
 from anthill.agent.memory import ThreadMemory
@@ -18,8 +18,15 @@ from anthill.agent.tools.mcp_client import McpToolset
 from anthill.core.config import McpSection
 from anthill.core.envelope import Address, Envelope
 from anthill.core.errors import BudgetExceeded, HopLimitExceeded, ProviderError
+from anthill.core.evidence import (
+    MAX_AGENT_RESULT_LINES,
+    MAX_DIRECT_BODY_BYTES,
+    EvidenceStore,
+    bound_text,
+)
 from anthill.core.payloads import (
     ChatPayload,
+    EvidenceLevel,
     MessageType,
     RiskLevel,
     TaskErrorPayload,
@@ -31,9 +38,6 @@ from anthill.discovery.registry import PeerRegistry
 from anthill.providers.base import ChatProvider, Msg
 from anthill.security.policy import PolicyEngine, TrustLevel, trust_of
 from anthill.web.workspaces import paths_for_node
-
-MAX_SUMMARY_CHARS = 32_000
-MAX_MENTION_BODY = 30_000
 
 
 class EnvelopeMessenger:
@@ -50,9 +54,9 @@ class EnvelopeMessenger:
     async def send(self, *, to: str, body: str, kind: str) -> str:
         recipient = parse_address(to, default_node=self._ctx.identity.node)
         payload = (
-            TaskRequestPayload(title=_clip(body), body=body[:MAX_MENTION_BODY])
+            TaskRequestPayload(title=_clip(body), body=body)
             if kind == "task"
-            else ChatPayload(body=body[:MAX_MENTION_BODY])
+            else ChatPayload(body=body)
         )
         env = self._source.reply(
             type=MessageType.TASK_REQUEST if kind == "task" else MessageType.CHAT,
@@ -163,8 +167,13 @@ class LlmHandler:
         )
         # 先按「旧历史」组上下文，再把来件落盘 —— 顺序反了会让来件在上下文里出现两次
         history = memory.load()
-        messages = self._builder.build(env, history=history)
-        memory.append(self._builder.incoming(env))
+        builder = replace(
+            self._builder,
+            evidence_root=ctx.layout.details_dir,
+            evidence_owner=str(ctx.identity),
+        )
+        messages = builder.build(env, history=history)
+        memory.append(builder.incoming(env))
         loop = AgentLoop(
             provider=self._provider,
             tools=self._tools,
@@ -185,6 +194,7 @@ class LlmHandler:
             token_budget=self._token_budget,
             confirm=self._confirm,
             max_risk=self._max_risk,
+            evidence_owner=str(ctx.identity),
         )
 
         try:
@@ -226,7 +236,23 @@ class LlmHandler:
         outcome: LoopOutcome,
         history: list[Msg] | None = None,
     ) -> None:
-        summary = outcome.summary[:MAX_SUMMARY_CHARS] or "（无输出）"
+        raw_summary = outcome.summary or "（无输出）"
+        bounded = bound_text(
+            raw_summary,
+            store=EvidenceStore(
+                ctx.layout.details_dir,
+                reference_prefix=".anthill/blackboard/details",
+            ),
+            owner=str(ctx.identity),
+            evidence_level=EvidenceLevel.AGENT_RESULT,
+            byte_limit=MAX_DIRECT_BODY_BYTES,
+            line_limit=MAX_AGENT_RESULT_LINES,
+            label="Agent result",
+        )
+        summary = bounded.text
+        artifacts = outcome.artifacts
+        if bounded.details is not None and bounded.details.path not in artifacts:
+            artifacts = (*artifacts, bounded.details.path)
         if env.type is MessageType.CHAT:
             plan = plan_reply(
                 env,
@@ -238,7 +264,11 @@ class LlmHandler:
                 ctx.log.info("chat.ended", msg=env.id, thread=env.thread, reason=plan.reason)
                 return
             await self._send(
-                env, ctx, MessageType.CHAT, chat_payload(summary, plan), plan.recipient
+                env,
+                ctx,
+                MessageType.CHAT,
+                ChatPayload(body=summary, mentions=plan.mentions, details=bounded.details),
+                plan.recipient,
             )
             return
         status = "ok" if outcome.status == "ok" and outcome.finished else "partial"
@@ -248,14 +278,27 @@ class LlmHandler:
             MessageType.TASK_RESULT,
             TaskResultPayload(
                 summary=summary,
-                artifacts=outcome.artifacts,
+                artifacts=artifacts,
                 status=status,  # type: ignore[arg-type]
+                details=bounded.details,
             ),
         )
 
     async def _reply_error(
         self, env: Envelope, ctx: HandlerContext, error: str, *, retryable: bool
     ) -> None:
+        bounded = bound_text(
+            error,
+            store=EvidenceStore(
+                ctx.layout.details_dir,
+                reference_prefix=".anthill/blackboard/details",
+            ),
+            owner=str(ctx.identity),
+            evidence_level=EvidenceLevel.AGENT_RESULT,
+            byte_limit=MAX_DIRECT_BODY_BYTES,
+            line_limit=MAX_AGENT_RESULT_LINES,
+            label="Agent error",
+        )
         if env.type is MessageType.CHAT:
             if not message_expects_reply(env):
                 ctx.log.info("chat.ended", msg=env.id, thread=env.thread, reason="对方不等回复")
@@ -264,14 +307,18 @@ class LlmHandler:
                 env,
                 ctx,
                 MessageType.CHAT,
-                ChatPayload(body=f"处理失败：{error}"),
+                ChatPayload(body=f"处理失败：{bounded.text}", details=bounded.details),
             )
             return
         await self._send(
             env,
             ctx,
             MessageType.TASK_ERROR,
-            TaskErrorPayload(error=error[:8000], retryable=retryable),
+            TaskErrorPayload(
+                error=bounded.text,
+                retryable=retryable,
+                details=bounded.details,
+            ),
         )
 
     @staticmethod

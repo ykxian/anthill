@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -21,12 +22,18 @@ from typing import Any
 
 from anthill.agent.tools.base import Confirmer, Tool, ToolContext, ToolResult
 from anthill.core.errors import BudgetExceeded, ToolError
+from anthill.core.evidence import (
+    MAX_TOOL_RESULT_BYTES,
+    MAX_TOOL_RESULT_LINES,
+    EvidenceStore,
+    bound_text,
+)
 from anthill.core.logging import EventLog
-from anthill.core.payloads import RiskLevel
+from anthill.core.payloads import EvidenceLevel, RiskLevel
 from anthill.providers.base import ChatProvider, Msg, ToolCall, Turn, Usage, estimate_tokens
 from anthill.security.policy import RISK_ORDER, PolicyEngine, TrustLevel
 
-MAX_TOOL_RESULT_CHARS = 16_000
+MAX_TOOL_RESULT_CHARS = MAX_TOOL_RESULT_BYTES
 
 MessageSink = Callable[[Msg], None]
 """每产生一条消息就回调一次。落盘失败不该拖垮任务，所以调用点会吞掉它的异常并记日志。"""
@@ -59,6 +66,7 @@ class AgentLoop:
         token_budget: int,
         confirm: Confirmer | None = None,
         max_risk: RiskLevel = RiskLevel.HIGH,
+        evidence_owner: str = "anthill:agent-loop",
     ) -> None:
         self._provider = provider
         self._tools = {tool.name: tool for tool in tools}
@@ -78,6 +86,11 @@ class AgentLoop:
         self._token_budget = token_budget
         self._confirm = confirm
         self._max_risk = max_risk
+        self._evidence_owner = evidence_owner
+        self._evidence_store = EvidenceStore(
+            tool_ctx.blackboard / "details",
+            reference_prefix=".anthill/blackboard/details",
+        )
 
     async def run(self, messages: list[Msg], *, sink: MessageSink | None = None) -> LoopOutcome:
         """跑完一次任务。
@@ -121,12 +134,30 @@ class AgentLoop:
             finish: ToolResult | None = None
             for call in turn.tool_calls:
                 result = await self._execute(call)
-                tool_msg = Msg.tool_result(
-                    call.id, result.truncated(MAX_TOOL_RESULT_CHARS).content, name=call.name
+                bounded = bound_text(
+                    result.content,
+                    store=self._evidence_store,
+                    owner=self._evidence_owner,
+                    evidence_level=EvidenceLevel.TOOL_RESULT,
+                    byte_limit=MAX_TOOL_RESULT_BYTES,
+                    line_limit=MAX_TOOL_RESULT_LINES,
+                    label=f"tool {call.name}",
                 )
+                tool_msg = Msg.tool_result(call.id, bounded.text, name=call.name)
                 history = [*history, tool_msg]
                 transcript = [*transcript, tool_msg]
                 _emit(sink, tool_msg)
+                if bounded.details is not None:
+                    self._log.info(
+                        "tool.externalized",
+                        tool=call.name,
+                        thread=self._ctx.thread,
+                        details=bounded.details.path,
+                        sha256=bounded.details.sha256,
+                        bytes=bounded.details.bytes,
+                        lines=bounded.details.lines,
+                        status=bounded.details.status,
+                    )
                 if result.is_finish and finish is None:
                     finish = result
 
@@ -151,6 +182,14 @@ class AgentLoop:
     # ---------- 单次工具调用 ----------
 
     async def _execute(self, call: ToolCall) -> ToolResult:
+        if violation := _hard_query_violation(call):
+            self._log.warn(
+                "tool.query_scope_rejected",
+                tool=call.name,
+                thread=self._ctx.thread,
+                reason=violation,
+            )
+            return ToolResult.failed(f"HARD_QUERY_SCOPE_REQUIRED: {violation}")
         tool = self._tools.get(call.name)
         if tool is None:
             known = ", ".join(sorted(self._tools)) or "（无）"
@@ -239,3 +278,85 @@ def _usage_of(turn: Turn) -> Usage:
     if turn.usage.total > 0:
         return turn.usage
     return Usage(output_tokens=estimate_tokens(turn.text))
+
+
+def _hard_query_violation(call: ToolCall) -> str | None:
+    """Reject known context-amplifying shell queries before execution."""
+    if call.name != "run_shell":
+        return None
+    command = str(call.arguments.get("command", ""))
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return "shell command is not parseable"
+
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token and set(token) <= {";", "&", "|"}:
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    for segment in segments:
+        violation = _segment_scope_violation(segment)
+        if violation:
+            return violation
+    return None
+
+
+def _segment_scope_violation(tokens: list[str]) -> str | None:
+    for index, token in enumerate(tokens):
+        executable = token.rsplit("/", 1)[-1]
+        tail = tokens[index + 1 :]
+        if executable == "git":
+            for verb in ("status", "diff"):
+                if verb not in tail:
+                    continue
+                args = tail[tail.index(verb) + 1 :]
+                if "--" not in args or not args[args.index("--") + 1 :]:
+                    return f"git {verb} must use `-- <claimed-path> ...`"
+        if executable == "docker":
+            if tail[:1] == ["ps"] and not any(
+                arg == "--filter" or arg.startswith("--filter=") for arg in tail[1:]
+            ):
+                return "docker ps must include a container/service --filter"
+            if tail[:2] == ["compose", "ps"] and not _has_positional(tail[2:]):
+                return "docker compose ps must name a service"
+            if tail[:1] == ["logs"]:
+                return _log_scope_violation("docker logs", tail[1:])
+            if tail[:2] == ["compose", "logs"]:
+                return _log_scope_violation("docker compose logs", tail[2:])
+        if executable == "journalctl":
+            has_since = any(arg == "--since" or arg.startswith("--since=") for arg in tail)
+            has_lines = any(
+                arg in {"-n", "--lines"} or arg.startswith(("-n=", "--lines=")) for arg in tail
+            )
+            if not has_since or not has_lines:
+                return "journalctl must include both --since and -n/--lines"
+    return None
+
+
+def _log_scope_violation(command: str, args: list[str]) -> str | None:
+    has_since = any(arg == "--since" or arg.startswith("--since=") for arg in args)
+    has_tail = any(arg == "--tail" or arg.startswith("--tail=") for arg in args)
+    if not has_since or not has_tail or not _has_positional(args):
+        return f"{command} must name a target and include --since plus --tail"
+    return None
+
+
+def _has_positional(args: list[str]) -> bool:
+    options_with_value = {"--filter", "--since", "--tail", "--lines", "-n"}
+    skip = False
+    for token in args:
+        if skip:
+            skip = False
+            continue
+        if token in options_with_value:
+            skip = True
+            continue
+        if token == "--":
+            continue
+        if not token.startswith("-"):
+            return True
+    return False

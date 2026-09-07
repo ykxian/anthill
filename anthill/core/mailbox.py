@@ -17,6 +17,7 @@ from pathlib import Path
 from anthill.core.atomic import PART_SUFFIX, atomic_move, atomic_write, ensure_same_filesystem
 from anthill.core.envelope import Envelope
 from anthill.core.errors import MailboxError, ProtocolError
+from anthill.core.evidence import EvidenceStore, envelope_evidence_digest, offload_envelope
 from anthill.core.ids import now
 from anthill.core.seen import SeenStore
 
@@ -55,6 +56,14 @@ class Mailbox:
         return self.inbox / "done"
 
     @property
+    def superseded(self) -> Path:
+        return self.done / "superseded"
+
+    @property
+    def expired(self) -> Path:
+        return self.done / "expired"
+
+    @property
     def outbox(self) -> Path:
         return self.root / "outbox"
 
@@ -77,6 +86,23 @@ class Mailbox:
         return self.root / "delivery-locks"
 
     @property
+    def injected_digests(self) -> Path:
+        """Persistent per-Agent digest claims; restarts must not re-inject details."""
+        return self.root / "injected-digests"
+
+    @property
+    def evidence_store(self) -> EvidenceStore:
+        # Canonical mailbox layout is .anthill/agents/<agent>/mailbox.  The
+        # fallback keeps isolated unit-test mailboxes self-contained.
+        if self.root.name == "mailbox" and self.root.parent.parent.name == "agents":
+            anthill_root = self.root.parent.parent.parent
+            return EvidenceStore(
+                anthill_root / "blackboard" / "details",
+                reference_prefix=".anthill/blackboard/details",
+            )
+        return EvidenceStore(self.root / "details", reference_prefix="details")
+
+    @property
     def seen_db(self) -> Path:
         return self.root / "seen.db"
 
@@ -86,10 +112,13 @@ class Mailbox:
             self.new,
             self.cur,
             self.done,
+            self.superseded,
+            self.expired,
             self.pending,
             self.sent,
             self.dead,
             self.delivery_locks,
+            self.injected_digests,
         )
 
     def ensure(self) -> Mailbox:
@@ -112,7 +141,27 @@ class Mailbox:
         """把信封原子地放进 inbox/new。所有传输实现最终都调这里。"""
         if not self.exists:
             raise MailboxError(f"邮箱不存在：{self.root}（对方 agentd 没起过？）")
-        return atomic_write(self.tmp, self.new, f"{env.id}.json", env.to_json_bytes())
+        try:
+            bounded = offload_envelope(env, self.evidence_store)
+        except ProtocolError as exc:
+            raise MailboxError(f"消息 {env.id} 无法安全卸载：{exc}") from exc
+        return atomic_write(self.tmp, self.new, f"{env.id}.json", bounded.to_json_bytes())
+
+    def claim_evidence_digest(self, env: Envelope) -> bool:
+        """Return True exactly once per offloaded digest for this Agent."""
+        digest = envelope_evidence_digest(env)
+        if digest is None:
+            return True
+        path = self.injected_digests / digest
+        try:
+            with path.open("x", encoding="ascii") as fh:
+                fh.write(env.id)
+                fh.flush()
+            return True
+        except FileExistsError:
+            return False
+        except OSError as exc:
+            raise MailboxError(f"无法记录 evidence digest {digest}: {exc}") from exc
 
     # ---------- 消费（接收方视角）----------
 
@@ -138,13 +187,39 @@ class Mailbox:
         """
         if not self.cur.is_dir():
             return []
-        return [atomic_move(p, self.new / p.name) for p in sorted(self.cur.iterdir())]
+        recovered: list[Path] = []
+        for path in sorted(self.cur.iterdir()):
+            try:
+                env = self.read_envelope(path)
+            except (MailboxError, ProtocolError):
+                # Runtime will quarantine malformed input through the normal
+                # new -> cur validation path; recovery must not hide it.
+                recovered.append(atomic_move(path, self.new / path.name))
+                continue
+            if env.is_expired():
+                self.archive_terminal(path, "expired")
+                continue
+            if (self.superseded / path.name).is_file():
+                self.archive_terminal(path, "superseded")
+                continue
+            recovered.append(atomic_move(path, self.new / path.name))
+        return recovered
 
     def archive(self, path: Path) -> Path:
         """处理完归档到 done/<日期>/，便于事后重放与审计。"""
         day_dir = self.done / now().strftime("%Y-%m-%d")
         day_dir.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
         return atomic_move(path, day_dir / path.name)
+
+    def archive_terminal(self, path: Path, state: str) -> Path:
+        """Archive terminal messages outside the replayable queue."""
+        targets = {"expired": self.expired, "superseded": self.superseded}
+        try:
+            directory = targets[state]
+        except KeyError as exc:
+            raise ValueError(f"unsupported terminal mailbox state {state!r}") from exc
+        directory.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
+        return atomic_move(path, directory / path.name)
 
     def quarantine(self, path: Path, reason: str) -> Path:
         """无法解析的文件单独隔离，不能让它堵住队列，也不能悄悄删掉。"""

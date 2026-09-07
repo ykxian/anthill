@@ -102,8 +102,11 @@ def test_codex_thread_instructions_explain_auto_reply_proactive_send_and_silent_
     assert "--to <收件人> --kind chat --text-file <正文文件>" in prompt
     assert "workspace with spaces" in prompt
     assert "绝不能再礼貌确认一次" in prompt
-    assert "state list --agent codex-t1" in prompt
-    assert "replica 不会整份注入" in prompt
+    assert "state list" in prompt and "--agent" not in prompt
+    assert "不会整份注入" in prompt and "不会因更新唤醒" in prompt
+    assert "TRUNCATED_WITH_EVIDENCE" in prompt
+    assert "默认不要读取 details" in prompt
+    assert "新 delta、新 hash、新失败点" in prompt
 
 
 def test_bridge_and_codex_initial_prompts_include_the_optional_role_card(tmp_path: Path) -> None:

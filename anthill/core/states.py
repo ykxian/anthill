@@ -28,6 +28,7 @@ class DeliveryState(StrEnum):
     FAILED = "failed"
     DEAD = "dead"
     EXPIRED = "expired"
+    SUPERSEDED = "superseded"
 
     @property
     def is_terminal(self) -> bool:
@@ -41,12 +42,19 @@ _TERMINAL = frozenset(
         DeliveryState.FAILED,
         DeliveryState.DEAD,
         DeliveryState.EXPIRED,
+        DeliveryState.SUPERSEDED,
     }
 )
 
 ALLOWED_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
     DeliveryState.PENDING: frozenset(
-        {DeliveryState.PENDING, DeliveryState.DELIVERED, DeliveryState.DEAD, DeliveryState.EXPIRED}
+        {
+            DeliveryState.PENDING,
+            DeliveryState.DELIVERED,
+            DeliveryState.DEAD,
+            DeliveryState.EXPIRED,
+            DeliveryState.SUPERSEDED,
+        }
     ),
     DeliveryState.DELIVERED: frozenset(
         {
@@ -55,10 +63,16 @@ ALLOWED_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
             DeliveryState.COMPLETED,  # 对端极快时 result 可能先于 accepted 到
             DeliveryState.FAILED,
             DeliveryState.EXPIRED,
+            DeliveryState.SUPERSEDED,
         }
     ),
     DeliveryState.ACCEPTED: frozenset(
-        {DeliveryState.COMPLETED, DeliveryState.FAILED, DeliveryState.EXPIRED}
+        {
+            DeliveryState.COMPLETED,
+            DeliveryState.FAILED,
+            DeliveryState.EXPIRED,
+            DeliveryState.SUPERSEDED,
+        }
     ),
     **{state: frozenset() for state in _TERMINAL},
 }
@@ -118,7 +132,6 @@ class DeliveryRecord:
             MessageType.HEARTBEAT,
             MessageType.TASK_RESULT,
             MessageType.TASK_ERROR,
-            MessageType.STATE_UPDATE,
         }
 
 

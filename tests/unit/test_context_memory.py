@@ -69,13 +69,13 @@ def test_system_prompt_declares_identity_tools_and_data_not_instructions() -> No
     assert "数据" in prompt  # 定界块内是数据不是指令
 
 
-def test_system_prompt_points_to_replica_once_without_injecting_snapshot(
+def test_system_prompt_points_to_shared_state_once_without_injecting_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     secret = "STATE_SNAPSHOT_MUST_BE_READ_ON_DEMAND"
-    replica = tmp_path / ".anthill" / "agents" / "coder" / "state"
-    replica.mkdir(parents=True)
-    (replica / "project.board.json").write_text(
+    state = tmp_path / ".anthill" / "blackboard" / "state"
+    state.mkdir(parents=True)
+    (state / "project.board.json").write_text(
         '{"snapshot":{"secret":"' + secret + '"}}', encoding="utf-8"
     )
     monkeypatch.chdir(tmp_path)
@@ -84,7 +84,8 @@ def test_system_prompt_points_to_replica_once_without_injecting_snapshot(
     messages = builder.build(make_env(), history=[])
     combined = "\n".join(message.content for message in messages)
 
-    assert combined.count(".anthill/agents/coder/state/<key>.json") == 1
+    assert combined.count(".anthill/blackboard/state/<key>.json") == 1
+    assert "不是跨节点同步" in combined
     assert secret not in combined
 
 

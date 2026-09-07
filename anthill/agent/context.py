@@ -14,13 +14,25 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from anthill.agent.persona import DEFAULT_PERSONA, role_card_block
 from anthill.agent.tools.base import Tool
 from anthill.core.config import AgentSection
 from anthill.core.envelope import Envelope
-from anthill.core.payloads import MessageType
-from anthill.providers.base import Msg, drop_orphan_tool_results
+from anthill.core.errors import ProtocolError
+from anthill.core.evidence import (
+    MAX_AGENT_RESULT_LINES,
+    MAX_MODEL_MESSAGE_BYTES,
+    MAX_TOOL_RESULT_BYTES,
+    MAX_TOOL_RESULT_LINES,
+    EvidenceStore,
+    bound_text,
+    render_reference,
+    summarize,
+)
+from anthill.core.payloads import EvidenceLevel, EvidenceRef, MessageType
+from anthill.providers.base import Msg, Role, drop_orphan_tool_results
 
 UNTRUSTED_START = "<<<ANTHILL_UNTRUSTED_MESSAGE>>>"
 UNTRUSTED_END = "<<<END_ANTHILL_UNTRUSTED_MESSAGE>>>"
@@ -35,8 +47,8 @@ SYSTEM_TEMPLATE = """\
 - 找东西用 search_text / find_files，别一层层 list_dir 翻。
 - 改几行用 edit_file，别用 write_file 重写整个文件 —— 那样容易把别的地方写坏。
 - 文件很长就用 read_file 的 offset/limit 翻页读完，别只看开头就下结论。
-- 同步状态 replica 不会自动注入；需要时用 read_file 按需读取
-  `.anthill/agents/{agent}/state/<key>.json`。
+- 节点共享状态不会自动注入；需要时用 read_file 按需读取
+  `.anthill/blackboard/state/<key>.json`。它只在当前 workspace 内共享，不是跨节点同步。
 - **任务完成时必须调用 finish 交付结果**，把做了什么、产出哪些文件写清楚。
   只输出文字而不调用 finish，派活的人拿不到可机读的结果。
 - 做不到就用 finish 交付 status="partial" 并说明卡在哪，不要编造已完成。
@@ -85,6 +97,8 @@ class ContextBuilder:
     context_window: int = 128_000
     board_summary: Callable[[], str] | None = None
     """黑板取数函数。正文只用于算引用元数据，绝不直接注入普通模型上下文。"""
+    evidence_root: Path | None = None
+    evidence_owner: str = "anthill:context"
 
     @property
     def budget(self) -> int:
@@ -118,7 +132,7 @@ class ContextBuilder:
             head.append(Msg.user(role_card_block(self.agent.persona)))
         else:
             head.append(Msg.user(f"默认工作偏好：{DEFAULT_PERSONA}"))
-        messages = [*head, *history, self.incoming(env)]
+        messages = [*head, *self._bounded_history(history), self.incoming(env)]
         # system / 黑板 / 角色卡是本轮固定前缀；长上下文只裁旧历史。
         return fit_to_budget(messages, budget=self.budget, fixed_prefix=len(head))
 
@@ -141,16 +155,108 @@ class ContextBuilder:
         )
 
     def incoming(self, env: Envelope) -> Msg:
-        return Msg.user(untrusted_wrap(render_payload(env), source=str(env.from_)))
+        rendered = render_payload(env)
+        wrapped = untrusted_wrap(rendered, source=str(env.from_))
+        if len(wrapped.encode("utf-8")) <= MAX_MODEL_MESSAGE_BYTES:
+            return Msg.user(wrapped)
+
+        ref = getattr(env.payload, "details", None)
+        if not isinstance(ref, EvidenceRef):
+            store = self._evidence_store()
+            ref = store.put(
+                rendered,
+                owner=str(env.from_),
+                evidence_level=EvidenceLevel.MESSAGE_BODY,
+                needs_reply=_needs_reply(env),
+            )
+        compact = untrusted_wrap(
+            render_reference(summary=summarize(rendered, byte_limit=384), ref=ref),
+            source=str(env.from_),
+        )
+        if len(compact.encode("utf-8")) > MAX_MODEL_MESSAGE_BYTES:
+            raise ProtocolError("bounded mail reference still exceeds the 2 KiB model gate")
+        return Msg.user(compact)
+
+    def _bounded_history(self, history: list[Msg]) -> list[Msg]:
+        if not history:
+            return []
+        bounded: list[Msg] = []
+        for message in history:
+            if message.role is Role.TOOL:
+                byte_limit = MAX_TOOL_RESULT_BYTES
+                line_limit = MAX_TOOL_RESULT_LINES
+                level = EvidenceLevel.TOOL_RESULT
+                label = f"tool {message.name or 'result'}"
+            elif message.role is Role.ASSISTANT:
+                byte_limit = 4 * 1024
+                line_limit = MAX_AGENT_RESULT_LINES
+                level = EvidenceLevel.AGENT_RESULT
+                label = "previous Agent result"
+            else:
+                byte_limit = MAX_MODEL_MESSAGE_BYTES
+                line_limit = MAX_TOOL_RESULT_LINES
+                level = EvidenceLevel.MESSAGE_BODY
+                label = "previous input"
+            if (
+                len(message.content.encode("utf-8")) <= byte_limit
+                and len(message.content.splitlines()) <= line_limit
+            ):
+                bounded.append(message)
+                continue
+            result = bound_text(
+                message.content,
+                store=self._evidence_store(),
+                owner=self.evidence_owner,
+                evidence_level=level,
+                byte_limit=byte_limit,
+                line_limit=line_limit,
+                label=label,
+            )
+            bounded.append(
+                Msg(
+                    role=message.role,
+                    content=result.text,
+                    tool_calls=message.tool_calls,
+                    tool_call_id=message.tool_call_id,
+                    name=message.name,
+                )
+            )
+        return bounded
+
+    def _evidence_store(self) -> EvidenceStore:
+        if self.evidence_root is None:
+            raise ProtocolError(
+                "content exceeds a pre-model hard limit but no evidence store is configured"
+            )
+        return EvidenceStore(self.evidence_root, reference_prefix=".anthill/blackboard/details")
 
 
 def render_payload(env: Envelope) -> str:
     """把信封渲染成给模型看的纯文本。只取模型该看的字段。"""
     payload = env.payload
+    details = getattr(payload, "details", None)
     if env.type is MessageType.TASK_REQUEST:
-        parts = [f"任务：{getattr(payload, 'title', '')}", str(getattr(payload, "body", ""))]
+        body = str(getattr(payload, "body", ""))
+        if isinstance(details, EvidenceRef):
+            body = render_reference(summary=body, ref=details)
+        parts = [f"任务：{getattr(payload, 'title', '')}", body]
         artifacts = getattr(payload, "artifacts", ())
         if artifacts:
             parts.append("相关文件：" + ", ".join(artifacts))
         return "\n".join(p for p in parts if p)
-    return str(getattr(payload, "body", "") or getattr(payload, "summary", ""))
+    content = str(
+        getattr(payload, "body", "")
+        or getattr(payload, "summary", "")
+        or getattr(payload, "error", "")
+    )
+    if isinstance(details, EvidenceRef):
+        return render_reference(summary=content, ref=details)
+    return content
+
+
+def _needs_reply(env: Envelope) -> bool:
+    if env.type is MessageType.TASK_REQUEST:
+        return True
+    if env.type is MessageType.CHAT:
+        return env.reply_to is None or bool(tuple(getattr(env.payload, "mentions", ()) or ()))
+    return False

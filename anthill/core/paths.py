@@ -50,9 +50,15 @@ class NodeLayout:
     def mailbox_dir(self, name: str) -> Path:
         return self.agent_dir(name) / "mailbox"
 
-    def state_dir(self, name: str) -> Path:
-        """该 Agent 已应用的最新完整状态副本；不与 thread/LLM 历史混放。"""
-        return self.agent_dir(name) / "state"
+    @property
+    def state_dir(self) -> Path:
+        """节点内共享的状态公告；不属于任何 Agent 邮箱或 thread。"""
+        return self.blackboard / "state"
+
+    @property
+    def details_dir(self) -> Path:
+        """Content-addressed large-message/tool evidence; never auto-expanded."""
+        return self.blackboard / "details"
 
     def log_file(self, name: str) -> Path:
         return self.logs / f"agentd-{name}.jsonl"

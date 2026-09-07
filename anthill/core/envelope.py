@@ -27,8 +27,8 @@ from anthill.core.ids import is_valid_id, new_id, new_thread_id, now
 from anthill.core.payloads import PAYLOAD_MODELS, MessageType, Payload
 
 PROTO_VERSION = "1.0"
-MAX_PAYLOAD_BYTES = 64 * 1024
-"""大于此值请走 blackboard 产物目录，信封里只放路径引用（02-protocol §7）。"""
+MAX_PAYLOAD_BYTES = 16 * 1024 * 1024
+"""Pre-offload safety ceiling; mailbox ingress reduces model-facing bodies to hard limits."""
 
 DEFAULT_TTL_HOPS = 8
 DEFAULT_LIFETIME = timedelta(hours=1)
@@ -184,11 +184,8 @@ class Envelope(BaseModel):
             )
         if self.hops > self.ttl_hops:
             raise ValueError(f"hops={self.hops} 已超过 ttl_hops={self.ttl_hops}")
-        if self.to.is_broadcast and self.type not in {
-            MessageType.EVENT,
-            MessageType.STATE_UPDATE,
-        }:
-            raise ValueError("广播地址 all 只允许用于 event 或 state.update 类型")
+        if self.to.is_broadcast and self.type is not MessageType.EVENT:
+            raise ValueError("广播地址 all 只允许用于 event 类型")
         size = len(self.payload.model_dump_json().encode())
         if size > MAX_PAYLOAD_BYTES:
             raise EnvelopeTooLarge(
