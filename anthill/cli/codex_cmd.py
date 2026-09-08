@@ -27,10 +27,13 @@ from anthill.adapters.codex_app_server import (
     start_app_server,
     write_session,
 )
+from anthill.agent.runtime import AgentRuntime
 from anthill.cli.common import console, fail, load
+from anthill.core.config import Config
 from anthill.core.errors import AntHillError
 from anthill.core.logging import EventLog
 from anthill.core.paths import NodeLayout
+from anthill.core.procs import process_alive
 from anthill.security.secrets import sanitized_child_env
 
 
@@ -105,8 +108,10 @@ def codex_command(
             code = asyncio.run(
                 run_codex_queue_session(
                     layout=layout,
+                    config=config,
                     agent=picked,
                     thread_id=attach_thread,
+                    owner_pid=os.getppid() if attach == "current" else None,
                     sensitive_env=sensitive_env,
                 )
             )
@@ -115,6 +120,7 @@ def codex_command(
                 code = asyncio.run(
                     run_codex_session(
                         layout=layout,
+                        config=config,
                         node=config.node.name,
                         agent=picked,
                         resume=resume,
@@ -133,6 +139,7 @@ def codex_command(
                 code = asyncio.run(
                     run_codex_queue_session(
                         layout=layout,
+                        config=config,
                         agent=picked,
                         thread_id=resume,
                         sensitive_env=sensitive_env,
@@ -200,6 +207,7 @@ def is_active_writer_error(exc: CodexRpcError) -> bool:
 async def run_codex_session(
     *,
     layout: NodeLayout,
+    config: Config,
     node: str,
     agent: str,
     resume: str = "",
@@ -222,9 +230,16 @@ async def run_codex_session(
     client: CodexRpcClient | None = None
     session_path: Path | None = None
     stop = asyncio.Event()
+    runtime_task: asyncio.Task[None] | None = None
     child_env = sanitized_child_env(blocked=sensitive_env)
 
     try:
+        runtime_task = await _start_embedded_runtime(
+            layout=layout,
+            config=config,
+            agent=agent,
+            stop=stop,
+        )
         with app_server_log_path.open("a", encoding="utf-8") as app_server_log:
             server, endpoint, drain = await start_app_server(
                 codex=str(executable),
@@ -286,7 +301,14 @@ async def run_codex_session(
                 )
             except OSError as exc:
                 raise CodexAppServerError(f"启动 Codex TUI 失败：{exc}") from exc
-            code = await tui.wait()
+            tui_wait = asyncio.create_task(tui.wait(), name=f"codex-tui-{agent}")
+            done, _ = await asyncio.wait(
+                {tui_wait, runtime_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if runtime_task in done:
+                await runtime_task
+                raise CodexAppServerError("内嵌 agentd 在 Codex TUI 之前退出；已停止桥接")
+            code = await tui_wait
             stop.set()
             return code
     finally:
@@ -295,6 +317,9 @@ async def run_codex_session(
             bridge_task.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await bridge_task
+        if runtime_task is not None:
+            with suppress(asyncio.CancelledError, Exception):
+                await runtime_task
         if client is not None:
             with suppress(Exception):
                 await client.close()
@@ -323,8 +348,10 @@ async def run_codex_session(
 async def run_codex_queue_session(
     *,
     layout: NodeLayout,
+    config: Config,
     agent: str,
     thread_id: str,
+    owner_pid: int | None = None,
     codex: str = "codex",
     sensitive_env: frozenset[str] = frozenset(),
 ) -> int:
@@ -334,7 +361,6 @@ async def run_codex_queue_session(
         raise CodexAppServerError("找不到 codex CLI；先安装 Codex 并确认 `codex --version` 能运行")
 
     child_env = sanitized_child_env(blocked=sensitive_env)
-    await _require_codex_queue(str(executable), layout.workspace, env=child_env)
     bridge_root = layout.agent_dir(agent) / "bridge"
     bridge_root.mkdir(parents=True, exist_ok=True)
     app_server_log_path = bridge_root / "codex-read-app-server.log"
@@ -344,8 +370,22 @@ async def run_codex_queue_session(
     client: CodexRpcClient | None = None
     session_path: Path | None = None
     stop = asyncio.Event()
+    runtime_task: asyncio.Task[None] | None = None
+    bridge_task: asyncio.Task[None] | None = None
+    owner_task: asyncio.Task[None] | None = None
 
     try:
+        runtime_task = await _start_embedded_runtime(
+            layout=layout,
+            config=config,
+            agent=agent,
+            stop=stop,
+        )
+        if owner_pid is not None:
+            owner_task = asyncio.create_task(
+                _stop_when_owner_exits(owner_pid, stop), name=f"codex-owner-{agent}"
+            )
+        await _require_codex_queue(str(executable), layout.workspace, env=child_env)
         with app_server_log_path.open("a", encoding="utf-8") as app_server_log:
             server, endpoint, drain = await start_app_server(
                 codex=str(executable),
@@ -388,10 +428,32 @@ async def run_codex_queue_session(
                 log=event_log,
                 child_env=child_env,
             )
-            await bridge.run(stop)
+            bridge_task = asyncio.create_task(bridge.run(stop), name=f"codex-queue-{agent}")
+            waiters = {bridge_task, runtime_task}
+            if owner_task is not None:
+                waiters.add(owner_task)
+            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            if owner_task is not None and owner_task in done:
+                await owner_task
+                return 0
+            if runtime_task in done:
+                await runtime_task
+                raise CodexAppServerError("内嵌 agentd 在 Codex queue bridge 之前退出；已停止桥接")
+            await bridge_task
             return 0
     finally:
         stop.set()
+        if bridge_task is not None:
+            bridge_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await bridge_task
+        if owner_task is not None:
+            owner_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await owner_task
+        if runtime_task is not None:
+            with suppress(asyncio.CancelledError, Exception):
+                await runtime_task
         if client is not None:
             with suppress(Exception):
                 await client.close()
@@ -411,6 +473,51 @@ async def run_codex_queue_session(
             _remove_own_session(session_path)
         event_log.info("codex.queue.stopped")
         event_log.close()
+
+
+async def _stop_when_owner_exits(
+    owner_pid: int, stop: asyncio.Event, *, interval: float = 1.0
+) -> None:
+    """Tie ``--attach current`` to the Codex process that launched it."""
+    while not stop.is_set() and process_alive(owner_pid):
+        await asyncio.sleep(interval)
+    if not stop.is_set():
+        stop.set()
+
+
+async def _start_embedded_runtime(
+    *,
+    layout: NodeLayout,
+    config: Config,
+    agent: str,
+    stop: asyncio.Event,
+) -> asyncio.Task[None]:
+    """Start the one canonical agentd owned by this Codex session."""
+    runtime = AgentRuntime(layout=layout, config=config, agent_name=agent, echo=False)
+    runtime_task = asyncio.create_task(runtime.run(stop), name=f"codex-runtime-{agent}")
+    ready_wait = asyncio.create_task(runtime.ready.wait(), name=f"codex-runtime-ready-{agent}")
+    try:
+        done, _ = await asyncio.wait(
+            {runtime_task, ready_wait}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if runtime_task in done:
+            await runtime_task
+            raise CodexAppServerError("内嵌 agentd 未就绪即退出；拒绝启动 Codex bridge")
+        return runtime_task
+    except BaseException:
+        # Cancellation can arrive between create_task() and returning it to the
+        # caller.  Clean it here because the caller cannot yet see the task.
+        stop.set()
+        if not runtime_task.done():
+            runtime_task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await runtime_task
+        raise
+    finally:
+        if not ready_wait.done():
+            ready_wait.cancel()
+        with suppress(asyncio.CancelledError):
+            await ready_wait
 
 
 async def _require_codex_queue(codex: str, cwd: Path, *, env: dict[str, str]) -> None:

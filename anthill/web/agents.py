@@ -208,12 +208,22 @@ def runtime_path(layout: NodeLayout, name: str) -> Path:
 
 
 def running_pid(layout: NodeLayout, name: str) -> int | None:
-    """以内核锁为准；兼容还没升级、只会写 runtime.json 的旧 agentd。"""
+    """以内核锁为准；仅在锁文件从未出现时兼容旧版 ``runtime.json``。
+
+    新版 agentd 的锁文件会永久保留，进程退出只释放内核锁。因此「锁文件存在但
+    无人持有」明确表示它已经停止；此时再信 runtime 里的旧 PID，PID 复用后就会
+    把别人的进程误认成 agentd，停止/热重启还会尝试给它发信号。
+    """
     from anthill.cli.common import is_running
 
-    owner = locked_owner(layout.agent_dir(name) / LOCK_FILE)
+    lock_path = layout.agent_dir(name) / LOCK_FILE
+    owner = locked_owner(lock_path)
     if owner is not None:
         return owner
+    # lexists 也把悬空符号链接当成「已有新版锁路径」。.anthill 是项目数据，
+    # 恶意/损坏的锁路径不能借 exists() 对悬空链接返回假来重新启用旧 PID 回退。
+    if os.path.lexists(lock_path):
+        return None
     try:
         data = json.loads(runtime_path(layout, name).read_text(encoding="utf-8"))
         pid = int(data.get("pid", -1))
@@ -253,6 +263,11 @@ def start_agent(layout: NodeLayout, config: Config, name: str) -> dict[str, Any]
     """
     if name not in config.agents:
         raise AntHillError(f"没有叫 {name} 的 Agent")
+    if config.agents[name].bridge:
+        raise AntHillError(
+            f"{name} 是桥接 Agent，不从面板单独启动 agentd；"
+            "请在「桥接」页按对应客户端说明接入；Codex 会随会话自动启停"
+        )
     pid = running_pid(layout, name)
     if pid is not None:
         return {"ok": True, "name": name, "pid": pid, "already": True}

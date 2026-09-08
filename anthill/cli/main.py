@@ -47,7 +47,7 @@ COMMAND_MAP = """AntHill 命令地图 —— 按「你想干什么」分组
   cost      token 用量与花费
   log       结构化日志（JSON Lines）
   dead      死信：看看什么没送出去，修好之后重投
-  state     发布/读取带 owner、revision 与 digest 的状态 replica（不调用模型）
+  state     发布/读取节点内共享状态公告（不发消息、不调用模型）
 
 跨机
   peers     对端节点与信任关系（配对用 peers pair，念六位 PIN）

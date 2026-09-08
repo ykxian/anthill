@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
@@ -58,6 +59,7 @@ class FakeHostBridge(InteractiveAgentBridge):
         self.wait_calls = 0
         self.attempts: Counter[str] = Counter()
         self.delivered: list[str] = []
+        self.delivered_messages: list[InboxMessage] = []
         self.completed: list[str] = []
 
     async def wait_until_available(self, stop: asyncio.Event) -> None:
@@ -69,6 +71,7 @@ class FakeHostBridge(InteractiveAgentBridge):
     async def deliver(self, message: InboxMessage, stop: asyncio.Event) -> HostTurn | None:
         self.attempts[message.id] += 1
         self.delivered.append(message.id)
+        self.delivered_messages.append(message)
         self.delivery_started.set()
         if message.id in self.fail_ids:
             raise FakeHostError(f"{message.id} failed")
@@ -194,6 +197,37 @@ async def test_notification_is_delivered_then_acked_without_an_outbox(tmp_path: 
     assert bridge.delivered == [message_id]
     assert not (handler.dir("outbox") / source.name).exists()
     assert not source.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_long_inbox_note_reaches_the_host_as_summary_and_stable_file_reference(
+    tmp_path: Path,
+) -> None:
+    layout = NodeLayout(tmp_path).ensure_base()
+    message_id = "01KZ000000000000000000AAAA"
+    marker = "只存在于完整信件的末尾"
+    handler, source = seed_message(
+        layout,
+        message_id,
+        kind="task.result",
+        needs_reply=False,
+        body="长报告正文\n" * 2_000 + marker,
+    )
+    original = source.read_bytes()
+    digest = hashlib.sha256(original).hexdigest()
+    bridge = FakeHostBridge(layout)
+
+    async with running(bridge):
+        await wait_until(lambda: bridge.completed == [message_id])
+
+    delivered = bridge.delivered_messages[0].body
+    detail = handler.dir("details") / source.name
+    assert marker not in delivered
+    assert "TRUNCATED_WITH_EVIDENCE" in delivered
+    assert f"message_file: {detail.resolve()}" in delivered
+    assert f"sha256: {digest}" in delivered
+    assert len(delivered.encode("utf-8")) <= 2 * 1024
+    assert detail.read_bytes() == original
 
 
 @pytest.mark.asyncio

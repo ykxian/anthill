@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from anthill.core.config import Config
 from anthill.core.envelope import Address, Envelope
 from anthill.core.errors import HopLimitExceeded, UnknownRecipient
 from anthill.core.mailbox import Mailbox
@@ -89,6 +90,34 @@ def test_remote_address_is_left_for_transport_layer(config, layout, addr):
     )
 
     assert router.resolve(env) == (env,)
+
+
+def test_group_gateway_is_the_only_cross_node_sender_but_local_routing_stays_compatible(
+    layout, addr
+):
+    source = layout.node_toml.read_text(encoding="utf-8")
+    layout.node_toml.write_text(
+        source.replace('workspace = "."', 'workspace = "."\nexternal_gateway_agent = "alpha"'),
+        encoding="utf-8",
+    )
+    config = Config.load_from(layout)
+    router = Router(config, layout)
+    remote = Address(node="lab-server", agent="gateway")
+
+    allowed = Envelope.new(
+        sender=addr("alpha"),
+        recipient=remote,
+        type=MessageType.CHAT,
+        payload=ChatPayload(body="项目组正式回执"),
+    )
+    assert router.resolve(allowed) == (allowed,)
+
+    denied = allowed.model_copy(update={"from_": addr("beta")})
+    with pytest.raises(UnknownRecipient, match="外部网关"):
+        router.resolve(denied)
+
+    local = denied.model_copy(update={"to": addr("gamma")})
+    assert router.resolve(local) == (local,)
 
 
 def test_check_hops_refuses_overflow(addr):

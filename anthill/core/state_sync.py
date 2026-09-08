@@ -1,29 +1,89 @@
-"""无需唤醒模型的版本化状态同步。
+"""节点内共享、零消息投递的版本化状态公告。
 
-状态更新仍走 Maildir，可靠投递、验签、回执和归档语义都不变；区别只在消费端：
-runtime 在任何 handler / bridge / CLI 之前把快照交给本模块。这里以 revision
-选取同一 publisher 的最新完整快照，并以 canonical JSON 的 SHA-256 校验内容。
+状态公告是 workspace 文件，不是 Anthill 消息：发布者直接原子更新唯一文档，
+Agent 与 Panel 仅在需要时读取。这里不依赖 Envelope、Mailbox、Router、回执、
+bridge 或模型 runtime。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import Self
 
-from pydantic import JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from anthill.core.atomic import atomic_write
-from anthill.core.envelope import Address
 from anthill.core.errors import ProtocolError
-from anthill.core.payloads import STATE_KEY_RE, StateUpdatePayload
+from anthill.core.process_lock import ProcessLock
 
-STATE_FILE_VERSION = 1
+STATE_FILE_VERSION = 2
+STATE_SCOPE = "node-local"
+MAX_STATE_FILE_BYTES = 128 * 1024
+STATE_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_NODE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_STATE_FILE_KEYS = {
+    "version",
+    "scope",
+    "key",
+    "publisher",
+    "revision",
+    "digest",
+    "summary",
+    "snapshot",
+}
 
 
-class StateApplyStatus(StrEnum):
+class StateDocumentUpdate(BaseModel):
+    """一次完整状态文档发布；它从不成为 Envelope payload。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    key: str = Field(min_length=1, max_length=128)
+    revision: int = Field(ge=1)
+    digest: str
+    summary: str = Field(min_length=1, max_length=500)
+    snapshot: dict[str, JsonValue]
+
+    @field_validator("key")
+    @classmethod
+    def _check_key(cls, value: str) -> str:
+        if not STATE_KEY_RE.fullmatch(value):
+            raise ValueError("state key 只允许小写点分段：字母开头，后接小写字母、数字、_ 或 -")
+        return value
+
+    @field_validator("digest")
+    @classmethod
+    def _check_digest(cls, value: str) -> str:
+        if not SHA256_RE.fullmatch(value):
+            raise ValueError("digest 必须是 64 位小写 SHA-256 十六进制")
+        return value
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        *,
+        key: str,
+        revision: int,
+        summary: str,
+        snapshot: dict[str, JsonValue],
+    ) -> Self:
+        return cls(
+            key=key,
+            revision=revision,
+            digest=snapshot_digest(snapshot),
+            summary=summary,
+            snapshot=snapshot,
+        )
+
+
+class StatePublishStatus(StrEnum):
     APPLIED = "applied"
     DUPLICATE = "duplicate"
     STALE = "stale"
@@ -33,7 +93,7 @@ class StateApplyStatus(StrEnum):
 @dataclass(frozen=True, slots=True)
 class StateRecord:
     key: str
-    source: str
+    publisher: str
     revision: int
     digest: str
     summary: str
@@ -41,10 +101,10 @@ class StateRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class StateApplyResult:
-    status: StateApplyStatus
+class StatePublishResult:
+    status: StatePublishStatus
     key: str
-    source: str
+    publisher: str
     incoming_revision: int
     current_revision: int | None
     digest: str
@@ -54,7 +114,11 @@ class StateApplyResult:
 
     @property
     def applied(self) -> bool:
-        return self.status is StateApplyStatus.APPLIED
+        return self.status is StatePublishStatus.APPLIED
+
+    @property
+    def successful(self) -> bool:
+        return self.status in {StatePublishStatus.APPLIED, StatePublishStatus.DUPLICATE}
 
 
 def canonical_snapshot_bytes(snapshot: dict[str, JsonValue]) -> bytes:
@@ -76,7 +140,7 @@ def snapshot_digest(snapshot: dict[str, JsonValue]) -> str:
 
 
 class StateStore:
-    """每个 Agent 的本地状态副本；一个 key 只保存已应用的最新完整快照。"""
+    """一个节点内的共享状态文档库；每个 key 只保留当前完整快照。"""
 
     def __init__(self, root: Path) -> None:
         self._root = root
@@ -85,77 +149,45 @@ class StateStore:
     def root(self) -> Path:
         return self._root
 
+    @property
+    def lock_path(self) -> Path:
+        return self._root / ".publish.lock"
+
     def path_for(self, key: str) -> Path:
-        # 线协议已经校验；公开读 API 仍重复同一防线，不能靠调用者“记得先校验”。
         if len(key) > 128 or not STATE_KEY_RE.fullmatch(key):
             raise ValueError(f"非法 state key {key!r}")
         return self._root / f"{key}.json"
 
     def load(self, key: str) -> StateRecord | None:
+        self._check_root_for_read()
         path = self.path_for(key)
         if path.is_symlink():
-            raise ProtocolError(f"本地 state {key!r} 是符号链接，拒绝读取")
+            raise ProtocolError(f"共享 state {key!r} 是符号链接，拒绝读取")
         if not path.is_file():
             return None
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ProtocolError(f"本地 state {key!r} 无法读取：{exc}") from exc
-        if not isinstance(raw, dict) or raw.get("version") != STATE_FILE_VERSION:
-            raise ProtocolError(f"本地 state {key!r} 的版本或结构非法")
-        try:
-            source = _canonical_source(raw["source"])
-            payload = StateUpdatePayload.model_validate(
-                {
-                    "key": raw["key"],
-                    "revision": raw["revision"],
-                    "digest": raw["digest"],
-                    "summary": raw["summary"],
-                    "snapshot": raw["snapshot"],
-                }
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ProtocolError(f"本地 state {key!r} 的 schema 非法：{exc}") from exc
-        if payload.key != key:
-            raise ProtocolError(
-                f"本地 state 文件 {key!r} 内声明的 key 是 {payload.key!r}，拒绝使用"
-            )
-        calculated = snapshot_digest(payload.snapshot)
-        if calculated != payload.digest:
-            raise ProtocolError(
-                f"本地 state {key!r} digest 不匹配：声明 {payload.digest}，实际 {calculated}"
-            )
-        return StateRecord(
-            key=payload.key,
-            source=source,
-            revision=payload.revision,
-            digest=payload.digest,
-            summary=payload.summary,
-            snapshot=payload.snapshot,
-        )
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise ProtocolError(f"共享 state {key!r} 无法读取：{exc}") from exc
+        return decode_state_document(raw, expected_key=key)
 
-    def apply(self, update: StateUpdatePayload, *, source: str) -> StateApplyResult:
-        """校验并选取更新快照；所有非 APPLIED 结果都不会修改磁盘。"""
-        source = _canonical_source(source)
+    def publish(self, update: StateDocumentUpdate, *, publisher: str) -> StatePublishResult:
+        """在全店锁内校验、比较并原子发布；锁忙立即失败，不轮询。"""
+        self._ensure_root()
+        with ProcessLock(self.lock_path, label="共享状态 publisher"):
+            # 调用边界已经是强类型，锁内仍重做 exact schema 校验，保证整个
+            # validate/read/decide/write 临界区不依赖调用者的构造方式。
+            checked = StateDocumentUpdate.model_validate(update.model_dump(mode="python"))
+            return self._publish_locked(checked, publisher=canonical_publisher(publisher))
+
+    def _publish_locked(self, update: StateDocumentUpdate, *, publisher: str) -> StatePublishResult:
         path = self.path_for(update.key)
-        try:
-            actual = snapshot_digest(update.snapshot)
-        except ProtocolError as exc:
-            return StateApplyResult(
-                status=StateApplyStatus.CONFLICT,
-                key=update.key,
-                source=source,
-                incoming_revision=update.revision,
-                current_revision=None,
-                digest=update.digest,
-                path=path,
-                reason=f"snapshot invalid: {exc}",
-            )
+        actual = snapshot_digest(update.snapshot)
         if actual != update.digest:
-            return StateApplyResult(
-                status=StateApplyStatus.CONFLICT,
+            return StatePublishResult(
+                status=StatePublishStatus.CONFLICT,
                 key=update.key,
-                source=source,
+                publisher=publisher,
                 incoming_revision=update.revision,
                 current_revision=None,
                 digest=update.digest,
@@ -166,10 +198,10 @@ class StateStore:
         try:
             current = self.load(update.key)
         except ProtocolError as exc:
-            return StateApplyResult(
-                status=StateApplyStatus.CONFLICT,
+            return StatePublishResult(
+                status=StatePublishStatus.CONFLICT,
                 key=update.key,
-                source=source,
+                publisher=publisher,
                 incoming_revision=update.revision,
                 current_revision=None,
                 digest=update.digest,
@@ -178,44 +210,42 @@ class StateStore:
             )
 
         if current is not None:
-            if source != current.source:
+            if publisher != current.publisher:
                 return self._result(
-                    StateApplyStatus.CONFLICT,
+                    StatePublishStatus.CONFLICT,
                     update,
                     current,
-                    source,
-                    f"publisher authority mismatch: owner={current.source} got={source}",
+                    publisher,
+                    f"publisher authority mismatch: owner={current.publisher} got={publisher}",
                 )
             if update.revision < current.revision:
                 return self._result(
-                    StateApplyStatus.STALE, update, current, source, "旧 revision 已抑制"
+                    StatePublishStatus.STALE, update, current, publisher, "旧 revision 已抑制"
                 )
             if update.revision == current.revision:
-                if update.digest == current.digest:
+                if update.digest == current.digest and update.summary == current.summary:
                     return self._result(
-                        StateApplyStatus.DUPLICATE,
+                        StatePublishStatus.DUPLICATE,
                         update,
                         current,
-                        source,
-                        "相同 publisher、revision 和 digest",
+                        publisher,
+                        "相同 publisher、revision、digest 和 summary",
                     )
                 return self._result(
-                    StateApplyStatus.CONFLICT,
+                    StatePublishStatus.CONFLICT,
                     update,
                     current,
-                    source,
-                    "同 revision 出现不同 digest",
+                    publisher,
+                    "同 revision 出现不同内容",
                 )
 
-        # state.update 携带完整快照，不是事件流。新副本可以从任意 revision
-        # 建立，离线副本也可用一个更高 revision 直接恢复，无需补齐中间版本。
         skipped = max(0, update.revision - current.revision - 1) if current else 0
-
         data = json.dumps(
             {
                 "version": STATE_FILE_VERSION,
+                "scope": STATE_SCOPE,
                 "key": update.key,
-                "source": source,
+                "publisher": publisher,
                 "revision": update.revision,
                 "digest": update.digest,
                 "summary": update.summary,
@@ -226,12 +256,15 @@ class StateStore:
             indent=2,
             allow_nan=False,
         ).encode("utf-8")
-        self._root.mkdir(parents=True, exist_ok=True)
+        if len(data) > MAX_STATE_FILE_BYTES:
+            raise ProtocolError(
+                f"state 文档 {len(data)} 字节，超过 {MAX_STATE_FILE_BYTES} 字节上限"
+            )
         atomic_write(self._root, self._root, path.name, data)
-        return StateApplyResult(
-            status=StateApplyStatus.APPLIED,
+        return StatePublishResult(
+            status=StatePublishStatus.APPLIED,
             key=update.key,
-            source=source,
+            publisher=publisher,
             incoming_revision=update.revision,
             current_revision=current.revision if current else None,
             digest=update.digest,
@@ -241,6 +274,9 @@ class StateStore:
         )
 
     def list(self) -> tuple[StateRecord, ...]:
+        self._check_root_for_read()
+        if not self._root.exists():
+            return ()
         records: list[StateRecord] = []
         for path in sorted(self._root.glob("*.json")):
             record = self.load(path.stem)
@@ -248,18 +284,31 @@ class StateStore:
                 records.append(record)
         return tuple(records)
 
+    def _ensure_root(self) -> None:
+        if self._root.is_symlink():
+            raise ProtocolError("共享 state 目录不能是符号链接")
+        self._root.mkdir(parents=True, exist_ok=True)
+        if not self._root.is_dir() or self._root.is_symlink():
+            raise ProtocolError("共享 state 路径不是安全目录")
+
+    def _check_root_for_read(self) -> None:
+        if self._root.is_symlink():
+            raise ProtocolError("共享 state 目录不能是符号链接")
+        if self._root.exists() and not self._root.is_dir():
+            raise ProtocolError("共享 state 路径不是目录")
+
     def _result(
         self,
-        status: StateApplyStatus,
-        update: StateUpdatePayload,
+        status: StatePublishStatus,
+        update: StateDocumentUpdate,
         current: StateRecord,
-        source: str,
+        publisher: str,
         reason: str,
-    ) -> StateApplyResult:
-        return StateApplyResult(
+    ) -> StatePublishResult:
+        return StatePublishResult(
             status=status,
             key=update.key,
-            source=source,
+            publisher=publisher,
             incoming_revision=update.revision,
             current_revision=current.revision,
             digest=update.digest,
@@ -268,17 +317,59 @@ class StateStore:
         )
 
 
-def _canonical_source(value: object) -> str:
-    """publisher authority 的唯一持久化表示；role/all 不能成为状态 owner。"""
+def canonical_publisher(value: object) -> str:
+    """publisher 的唯一持久化表示；role/all 不能成为状态 owner。"""
     if not isinstance(value, str):
-        raise ValueError("state source 必须是 node:agent 字符串")
+        raise ValueError("state publisher 必须是 node:agent 字符串")
     node, separator, agent = value.partition(":")
     if not separator:
-        raise ValueError("state source 必须使用 node:agent 格式")
-    address = Address(node=node, agent=agent)
-    if address.is_role or address.is_broadcast:
-        raise ValueError("state source 必须是具体 Agent，不能是 role 或 all")
-    canonical = str(address)
-    if value != canonical:
-        raise ValueError(f"state source 不是规范形式：{value!r}")
-    return canonical
+        raise ValueError("state publisher 必须使用 node:agent 格式")
+    if not _NODE_NAME_RE.fullmatch(node) or not _AGENT_NAME_RE.fullmatch(agent):
+        raise ValueError("state publisher 必须是规范的具体 node:agent")
+    if agent == "all":
+        raise ValueError("state publisher 必须是具体 Agent，不能是 role 或 all")
+    return value
+
+
+def decode_state_document(raw_bytes: bytes, *, expected_key: str) -> StateRecord:
+    """共享给 CLI 与 Panel 的唯一磁盘 schema/digest 校验入口。"""
+    if len(raw_bytes) > MAX_STATE_FILE_BYTES:
+        raise ProtocolError(f"共享 state {expected_key!r} 超过字节上限")
+    try:
+        raw = json.loads(raw_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProtocolError(f"共享 state {expected_key!r} 不是合法 UTF-8 JSON：{exc}") from exc
+    if not isinstance(raw, dict) or set(raw) != _STATE_FILE_KEYS:
+        raise ProtocolError(f"共享 state {expected_key!r} 的 schema 非法")
+    if raw.get("version") != STATE_FILE_VERSION or raw.get("scope") != STATE_SCOPE:
+        raise ProtocolError(f"共享 state {expected_key!r} 的版本或 scope 非法")
+    try:
+        publisher = canonical_publisher(raw["publisher"])
+        update = StateDocumentUpdate.model_validate(
+            {
+                "key": raw["key"],
+                "revision": raw["revision"],
+                "digest": raw["digest"],
+                "summary": raw["summary"],
+                "snapshot": raw["snapshot"],
+            }
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProtocolError(f"共享 state {expected_key!r} 的 schema 非法：{exc}") from exc
+    if update.key != expected_key:
+        raise ProtocolError(
+            f"共享 state 文件 {expected_key!r} 内声明的 key 是 {update.key!r}，拒绝使用"
+        )
+    calculated = snapshot_digest(update.snapshot)
+    if calculated != update.digest:
+        raise ProtocolError(
+            f"共享 state {expected_key!r} digest 不匹配：声明 {update.digest}，实际 {calculated}"
+        )
+    return StateRecord(
+        key=update.key,
+        publisher=publisher,
+        revision=update.revision,
+        digest=update.digest,
+        summary=update.summary,
+        snapshot=update.snapshot,
+    )

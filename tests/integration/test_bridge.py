@@ -298,6 +298,35 @@ async def test_a_long_terminal_notification_is_externalized_before_reaching_the_
     assert detail.read_bytes() == detail_bytes
 
 
+async def test_mailbox_offloaded_report_keeps_its_evidence_reference_in_bridge_inbox(
+    node: tuple[NodeLayout, Config],
+) -> None:
+    layout, config = node
+    handler = handler_for(layout)
+    marker = "只存在于 evidence 全文中的末尾标记"
+    full_text = "很长的逐行验收报告\n" * 1_000 + marker
+    env = Envelope.new(
+        sender=Address(node="testnode", agent="cli"),
+        recipient=Address(node="testnode", agent="cc"),
+        type=MessageType.TASK_RESULT,
+        payload=TaskResultPayload(summary=full_text),
+    )
+
+    async with running(layout, config, handler):
+        Mailbox(layout.mailbox_dir("cc")).deposit(env)
+        inbox = handler.dir("inbox") / f"{env.id}.md"
+        await wait_until(inbox.is_file)
+
+    note = inbox.read_text(encoding="utf-8")
+    digest = hashlib.sha256(full_text.encode("utf-8")).hexdigest()
+    detail = layout.details_dir / f"{digest}.txt"
+    assert marker not in note
+    assert "TRUNCATED_WITH_EVIDENCE" in note
+    assert f"details: .anthill/blackboard/details/{digest}.txt" in note
+    assert f"sha256: {digest}" in note
+    assert detail.read_text(encoding="utf-8") == full_text
+
+
 async def test_a_long_noninteractive_chat_answer_is_externalized(
     node: tuple[NodeLayout, Config],
 ) -> None:

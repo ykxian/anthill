@@ -17,7 +17,7 @@ from pathlib import Path
 from anthill.core.atomic import PART_SUFFIX, atomic_move, atomic_write, ensure_same_filesystem
 from anthill.core.envelope import Envelope
 from anthill.core.errors import MailboxError, ProtocolError
-from anthill.core.evidence import EvidenceStore, envelope_evidence_digest, offload_envelope
+from anthill.core.evidence import EvidenceStore, offload_envelope
 from anthill.core.ids import now
 from anthill.core.seen import SeenStore
 
@@ -146,22 +146,6 @@ class Mailbox:
         except ProtocolError as exc:
             raise MailboxError(f"消息 {env.id} 无法安全卸载：{exc}") from exc
         return atomic_write(self.tmp, self.new, f"{env.id}.json", bounded.to_json_bytes())
-
-    def claim_evidence_digest(self, env: Envelope) -> bool:
-        """Return True exactly once per offloaded digest for this Agent."""
-        digest = envelope_evidence_digest(env)
-        if digest is None:
-            return True
-        path = self.injected_digests / digest
-        try:
-            with path.open("x", encoding="ascii") as fh:
-                fh.write(env.id)
-                fh.flush()
-            return True
-        except FileExistsError:
-            return False
-        except OSError as exc:
-            raise MailboxError(f"无法记录 evidence digest {digest}: {exc}") from exc
 
     # ---------- 消费（接收方视角）----------
 

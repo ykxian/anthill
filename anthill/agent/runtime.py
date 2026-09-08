@@ -24,7 +24,7 @@ from anthill.agent.watcher import MailboxWatcher, WatchMode
 from anthill.core.config import COORDINATOR_ROLE, Config, check_runtime
 from anthill.core.envelope import Address, Envelope
 from anthill.core.errors import AntHillError, MailboxError, ProtocolError
-from anthill.core.evidence import envelope_evidence_digest, restore_evidence_for_signature
+from anthill.core.evidence import restore_evidence_for_signature
 from anthill.core.ids import now
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
@@ -460,19 +460,8 @@ class AgentRuntime:
         if env.type.is_receipt:
             return  # 回执只推进状态机，不再进入 handler，也不再回执
 
-        digest = envelope_evidence_digest(env)
-        if not self.mailbox.claim_evidence_digest(env):
-            self.log.info(
-                "msg.duplicate_digest",
-                msg=env.id,
-                thread=env.thread,
-                digest=digest,
-            )
-            await self.sender.send_receipt(
-                env, MessageType.RECEIPT_ACCEPTED, reason="相同 evidence digest 已消费"
-            )
-            return
-
+        # Evidence hashes deduplicate stored content, not work. Different IDs may
+        # request independent work on the same body; SeenStore owns replay safety.
         await self.sender.send_receipt(env, MessageType.RECEIPT_ACCEPTED)
         await self.handler.handle(env, self._ctx)
 

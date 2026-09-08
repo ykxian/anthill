@@ -84,7 +84,7 @@ def test_100_kib_message_is_complete_on_disk_and_only_summary_reaches_model(
     assert incoming.content.count("evidence line") <= 6
 
 
-def test_same_100_kib_digest_has_one_details_file_and_one_agent_consumption(
+def test_same_content_deduplicates_storage_but_not_independent_tasks(
     layout, config, mailbox: Mailbox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     report = "same digest\n" * 9000
@@ -120,13 +120,13 @@ def test_same_100_kib_digest_has_one_details_file_and_one_agent_consumption(
     async def dispatch() -> None:
         await asyncio.wait_for(runtime._dispatch(first), timeout=2)
         await asyncio.wait_for(runtime._dispatch(second), timeout=2)
+        await asyncio.wait_for(runtime._dispatch(first), timeout=2)
         await runtime.aclose()
 
     asyncio.run(dispatch())
-    assert handled == [first.id]
+    assert handled == [first.id, second.id]
 
-    # A clean runtime/session still sees the persistent digest claim and does
-    # not inject the same report again.
+    # A new task after restart remains independent even with identical evidence.
     third = Mailbox.read_envelope(mailbox.deposit(large_task(report, suffix=" three")))
     restarted = AgentRuntime(
         layout=layout,
@@ -142,7 +142,71 @@ def test_same_100_kib_digest_has_one_details_file_and_one_agent_consumption(
         await restarted.aclose()
 
     asyncio.run(dispatch_after_restart())
-    assert handled == [first.id]
+    assert handled == [first.id, second.id, third.id]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_large_task_replays_after_restart_even_with_legacy_digest_claim(
+    layout, config, mailbox: Mailbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered = asyncio.Event()
+    completed = []
+
+    class BlockingHandler:
+        name = "blocking"
+
+        async def handle(self, env, ctx):
+            entered.set()
+            await asyncio.Event().wait()
+
+    class CompletingHandler:
+        name = "completing"
+
+        async def handle(self, env, ctx):
+            completed.append(env.id)
+
+    async def no_receipt(*args, **kwargs):
+        return None
+
+    env = large_task("crash recovery report\n" * 5000)
+    path = mailbox.deposit(env)
+    ref = Mailbox.read_envelope(path).payload.details
+    assert ref is not None
+    # Upgrading must ignore the persistent claims left by the old implementation.
+    (mailbox.injected_digests / ref.sha256).write_text(env.id)
+    first = AgentRuntime(
+        layout=layout,
+        config=config,
+        agent_name="beta",
+        handler=BlockingHandler(),
+        log=EventLog(None, echo=False),
+    )
+    monkeypatch.setattr(first.sender, "send_receipt", no_receipt)
+    task = asyncio.create_task(first._process(path))
+    await asyncio.wait_for(entered.wait(), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert (mailbox.cur / path.name).exists()
+    await first.aclose()
+
+    monkeypatch.setattr("anthill.core.seen.RUNTIME_TOKEN", "replacement-process")
+    second = AgentRuntime(
+        layout=layout,
+        config=config,
+        agent_name="beta",
+        handler=CompletingHandler(),
+        log=EventLog(None, echo=False),
+    )
+    monkeypatch.setattr(second.sender, "send_receipt", no_receipt)
+    try:
+        mailbox.recover_stale()
+        await second._process(mailbox.new / path.name)
+        await second._process(mailbox.deposit(env))
+        assert completed == [env.id]
+        assert not list(mailbox.cur.glob("*.json"))
+    finally:
+        await second.aclose()
 
 
 @pytest.mark.asyncio
@@ -209,21 +273,36 @@ async def test_20_kib_1000_line_tool_result_is_externalized_before_second_model_
     assert record["sha256"] == hashlib.sha256(original.rstrip("\n").encode()).hexdigest()
 
 
-def test_secret_bearing_large_message_is_rejected_without_plaintext_details(
-    layout, mailbox: Mailbox
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Bearer 却不补登录恢复入口。",
+        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+        "Cookie: session=example-value",
+        "api_key=sk-example12345678",
+        "password=example-password",
+        "-----BEGIN PRIVATE KEY-----",
+    ],
+)
+def test_large_message_is_offloaded_without_keyword_filtering(
+    layout, mailbox: Mailbox, text: str
 ) -> None:
-    secret = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz"
+    body = (text + "\n") * 200
     env = Envelope.new(
         sender=Address(node="testnode", agent="cli"),
         recipient=Address(node="testnode", agent="beta"),
         type=MessageType.CHAT,
-        payload=ChatPayload(body=(secret + "\n") * 200),
+        payload=ChatPayload(body=body),
     )
 
-    with pytest.raises(Exception, match="secret/token/cookie"):
-        mailbox.deposit(env)
-    assert not list(layout.details_dir.glob("*.txt"))
-    assert mailbox.list_new() == []
+    deposited = mailbox.deposit(env)
+    bounded = Mailbox.read_envelope(deposited)
+    ref = bounded.payload.details
+    assert ref is not None
+    assert mailbox.evidence_store.load(ref) == body
+    assert (layout.workspace / ref.path).read_text(encoding="utf-8") == body
+    assert len(bounded.payload.body.encode("utf-8")) <= 768
+    assert mailbox.list_new() == [deposited]
 
 
 def test_signed_large_envelope_is_reconstructed_only_for_hmac_verification(
@@ -336,7 +415,7 @@ async def test_empty_queue_for_ten_simulated_minutes_causes_zero_model_calls(
     assert model_calls == []
 
 
-def test_representative_duplicate_report_reduces_injected_bytes_and_wakes(
+def test_representative_reports_reduce_injected_bytes_without_suppressing_tasks(
     layout, config, mailbox: Mailbox
 ) -> None:
     report = "representative report\n" * 5000
@@ -351,12 +430,9 @@ def test_representative_duplicate_report_reduces_injected_bytes_and_wakes(
         evidence_root=layout.details_dir,
         evidence_owner="testnode:beta",
     )
-    after_bytes = len(builder.incoming(envs[0]).content.encode("utf-8"))
+    after_bytes = sum(len(builder.incoming(env).content.encode("utf-8")) for env in envs)
     before_bytes = len(report.encode("utf-8")) * len(envs)
-    after_wakes = sum(mailbox.claim_evidence_digest(env) for env in envs)
-
-    assert after_wakes == 1
-    assert after_bytes < before_bytes * 0.01
+    assert after_bytes < before_bytes * 0.02
     assert len(list(layout.details_dir.glob("*.txt"))) == 1
 
 

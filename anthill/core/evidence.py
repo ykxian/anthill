@@ -30,16 +30,6 @@ MAX_EVIDENCE_BYTES = 16 * 1024 * 1024
 SUMMARY_BYTES = 768
 TRUNCATED_WITH_EVIDENCE = "TRUNCATED_WITH_EVIDENCE"
 
-_SECRET_PATTERNS = (
-    re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----"),
-    re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
-    re.compile(r"(?i)\bBearer\s+[^\s\"']{8,}"),
-    re.compile(
-        r"(?i)\b(?:authorization|cookie|set-cookie|password|passwd|api[_-]?key|"
-        r"access[_-]?token|refresh[_-]?token)\b\s*[:=]\s*[\"']?[^\s\"']{8,}"
-    ),
-)
-
 
 @dataclass(frozen=True, slots=True)
 class BoundedText:
@@ -84,7 +74,6 @@ class EvidenceStore:
                 f"evidence {len(raw)} bytes exceeds hard limit {MAX_EVIDENCE_BYTES}; "
                 "content was not injected into a model"
             )
-        _reject_plaintext_secret(content)
         digest = hashlib.sha256(raw).hexdigest()
         path = self.path_for(digest)
         metadata_path = self.metadata_path_for(digest)
@@ -159,7 +148,6 @@ class EvidenceStore:
             raise ProtocolError(f"evidence metadata mismatch for {ref.path}")
         if record["bytes"] != ref.bytes or record["lines"] != ref.lines:
             raise ProtocolError(f"evidence sidecar mismatch for {ref.path}")
-        _reject_plaintext_secret(content)
         return content
 
     def _ensure_root(self) -> None:
@@ -372,8 +360,3 @@ def _bounded_owner(owner: str) -> str:
     if not tidy:
         raise ProtocolError("evidence owner must be explicit")
     return tidy
-
-
-def _reject_plaintext_secret(content: str) -> None:
-    if any(pattern.search(content) for pattern in _SECRET_PATTERNS):
-        raise ProtocolError("plaintext secret/token/cookie detected; evidence was not stored")

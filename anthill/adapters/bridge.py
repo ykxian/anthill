@@ -42,8 +42,9 @@ from anthill.core.atomic import atomic_write
 from anthill.core.chat_log import record_outgoing
 from anthill.core.envelope import Envelope
 from anthill.core.errors import AntHillError, HopLimitExceeded
+from anthill.core.evidence import render_reference
 from anthill.core.ids import is_valid_id, now
-from anthill.core.payloads import ChatPayload, MessageType, TaskResultPayload
+from anthill.core.payloads import ChatPayload, EvidenceRef, MessageType, TaskResultPayload
 from anthill.core.router import parse_address
 from anthill.providers.base import Msg, Role
 
@@ -162,6 +163,12 @@ class BridgeHandler:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def store_detail(self, msg_id: str, data: bytes) -> Path:
+        """持久化一封只应按需读取的完整桥接信件。"""
+        path = self.dir(DETAILS) / f"{msg_id}.md"
+        self._write_once(path, data)
+        return path
+
     # ---------- 收：写成文件就返回，绝不在这里等人 ----------
 
     async def handle(self, env: Envelope, ctx: HandlerContext) -> None:
@@ -200,8 +207,7 @@ class BridgeHandler:
 
         data = render_request(env).encode("utf-8")
         digest = hashlib.sha256(data).hexdigest()
-        path = self.dir(DETAILS) / f"{env.id}.md"
-        self._write_once(path, data)
+        path = self.store_detail(env.id, data)
         return ExternalizedNotification(
             path=path,
             # BridgeHandler 的构造边界只有 agent root，不应靠向上数目录猜
@@ -575,6 +581,11 @@ def _incoming_text(env: Envelope) -> str:
         or getattr(payload, "error", "")
         or ""
     ).strip()
+    details = getattr(payload, "details", None)
+    if isinstance(details, EvidenceRef):
+        # Mailbox 已把长正文卸载到 content-addressed evidence；Bridge 必须把
+        # 引用带给宿主，不能只留下摘要，也绝不能为了展示而重新读回全文。
+        body = render_reference(summary=body or title, ref=details)
     if not title or (body and body.startswith(title.rstrip("…"))):
         return body or title
     return f"{title}\n\n{body}".strip()

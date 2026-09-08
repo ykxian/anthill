@@ -547,6 +547,11 @@ async def _restart_stale_agents(
     restarted = 0
     for ctx in nodes.all():
         for name in sorted(ctx.config.agents):
+            # Bridge runtimes are owned by their interactive session.  Killing
+            # one here would also kill the Codex attachment, then incorrectly
+            # replace it with a detached, session-less agentd.
+            if ctx.config.agents[name].bridge:
+                continue
             if running_pid(ctx.layout, name) is None:
                 continue
             try:

@@ -748,7 +748,7 @@ footer { padding: 0 22px 20px; color: var(--dim); font-size: 11.5px; }
 
     <section class="pane hold" id="pane-states" hidden>
       <div class="eyebrow">状态公告 <span class="count" id="states-count"></span></div>
-      <p class="why">这里只列最新副本的摘要元数据；完整 snapshot 在点开一条后才从本机磁盘读取。</p>
+      <p class="why">这里只列当前节点共享文档的摘要元数据；完整 snapshot 在点开一条后才从本机磁盘读取，不做跨节点同步。</p>
       <div id="states-body"></div>
       <div class="hint" id="states-hint" hidden></div>
     </section>
@@ -1070,10 +1070,18 @@ function agentCard(a, node) {
          角色卡${a.has_persona ? " ✓" : ""}
        </button>`
     : "";
+  // Bridge agentd is owned by the attached interactive session.  Starting a
+  // second detached copy here races for the same mailbox lock and prevents
+  // `anthill codex --attach` from connecting.  Keep Stop as an emergency exit,
+  // but there is deliberately no Start button while it is stopped.
+  const runtimeOp = a.running
+    ? `<button class="ghost" type="button" ${where} data-op="stop">停</button>`
+    : a.provider === "bridge"
+      ? `<span class="pill" title="Codex 会随会话启停 agentd">从桥接页接入</span>`
+      : `<button class="ghost" type="button" ${where} data-op="start">启动</button>`;
   const ops = canWrite
     ? `<span class="ops">
-         <button class="ghost" type="button" ${where}
-                 data-op="${a.running ? "stop" : "start"}">${a.running ? "停" : "启动"}</button>
+         ${runtimeOp}
          ${!a.running && node.local ? `<button class="ghost danger" type="button" ${where}
                  data-op="remove">删</button>` : ""}
        </span>`
@@ -2550,18 +2558,18 @@ $("bridge-say").addEventListener("submit", async (event) => {
 // ---- 状态公告：索引轻量常驻，snapshot 同一时刻最多展开一份 ----
 
 const stateBoard = {
-  node: "", etag: "", loading: false, data: { agents: [] },
+  node: "", etag: "", loading: false, data: { states: [], issues: [] },
   open: "", detail: null, generation: 0,
 };
 
-const stateIdentity = (agent, key) => `${agent}\u0000${key}`;
+const stateIdentity = (key) => key;
 
 function resetStateBoard() {
   stateBoard.generation += 1;  // 让仍在飞的旧节点请求失效
   stateBoard.loading = false;  // 新节点不必等旧请求回来才能立即读取
   stateBoard.node = "";
   stateBoard.etag = "";
-  stateBoard.data = { agents: [] };
+  stateBoard.data = { states: [], issues: [] };
   stateBoard.open = "";
   stateBoard.detail = null;
   if ($("states-body")) renderStates();
@@ -2573,19 +2581,8 @@ function clearStateDetail(redraw = true) {
   if (redraw && $("states-body")) renderStates();
 }
 
-function stateStatus(item) {
-  const labels = {
-    only_copy: ["单副本", ""],
-    in_sync: ["一致", "ok"],
-    ahead: ["较新", "warn"],
-    behind: ["落后", "warn"],
-    conflict: ["冲突", "bad"],
-  };
-  return labels[item.replica_status] || [item.replica_status || "?", ""];
-}
-
-function stateDetailHtml(agent, item) {
-  if (stateBoard.open !== stateIdentity(agent, item.key)) return "";
+function stateDetailHtml(item) {
+  if (stateBoard.open !== stateIdentity(item.key)) return "";
   if (!stateBoard.detail) return `<div class="state-detail meta">正在按需读取完整 snapshot…</div>`;
   if (stateBoard.detail.error) {
     return `<div class="state-detail"><span class="pill bad">读不到</span>
@@ -2600,27 +2597,23 @@ function stateDetailHtml(agent, item) {
 }
 
 function renderStates() {
-  const groups = stateBoard.data.agents || [];
-  const count = groups.reduce((n, group) => n + (group.states || []).length, 0);
-  $("states-count").textContent = `${count} 条 · ${groups.length} 个 Agent` +
+  const states = stateBoard.data.states || [];
+  const issues = stateBoard.data.issues || [];
+  $("states-count").textContent = `${states.length} 条 · 节点内共享` +
     (stateBoard.data.truncated ? "（已按安全上限截断）" : "");
-  const html = groups.length ? groups.map((group) => {
-    const states = group.states || [];
-    const issues = group.issues || [];
-    return `<section class="state-agent">
-      <div class="head"><span class="name">${esc(group.agent)}</span>
+  const html = stateBoard.node ? `<section class="state-agent">
+      <div class="head"><span class="name">${esc(stateBoard.node)}</span>
+        <span class="pill">node-local</span>
         <span class="meta">${states.length} 条</span>
-        ${group.truncated ? `<span class="pill warn">有截断</span>` : ""}</div>
+        ${stateBoard.data.truncated ? `<span class="pill warn">有截断</span>` : ""}</div>
       <div class="state-list">
         ${states.map((item) => {
-          const [label, cls] = stateStatus(item);
-          const open = stateBoard.open === stateIdentity(group.agent, item.key);
+          const open = stateBoard.open === stateIdentity(item.key);
           return `<button class="state-entry${open ? " open" : ""}" type="button"
-                    data-state-agent="${esc(group.agent)}" data-state-key="${esc(item.key)}"
-                    data-state-etag="${esc(item.etag)}" title="${esc(item.replica_note)}">
+                    data-state-key="${esc(item.key)}" data-state-etag="${esc(item.etag)}">
               <span class="key">${esc(item.key)}</span>
-              <span>r${esc(item.revision)} <span class="pill ${cls}">${esc(label)}</span></span>
-              <span class="source">${esc(item.source)}</span>
+              <span>r${esc(item.revision)}</span>
+              <span class="source">${esc(item.publisher)}</span>
               <span class="summary">${esc(item.summary)}</span>
             </button>
             <div class="state-meta">
@@ -2628,13 +2621,12 @@ function renderStates() {
               <span class="grow"></span>
               <span>本机落盘 ${esc(fmtStamp(item.stored_at))}</span><span>${esc(item.size_bytes)} B</span>
             </div>
-            ${stateDetailHtml(group.agent, item)}`;
-        }).join("") || `<div class="meta" style="padding:8px 14px">还没有状态副本</div>`}
+            ${stateDetailHtml(item)}`;
+        }).join("") || `<div class="meta" style="padding:8px 14px">还没有共享状态公告</div>`}
         ${issues.map((issue) => `<div class="state-issue">
           ${esc(issue.entry)} · ${esc(issue.code)} · ${esc(issue.detail)}</div>`).join("")}
       </div>
-    </section>`;
-  }).join("") : `<div class="empty">打开这个标签页后才读取状态公告索引</div>`;
+    </section>` : `<div class="empty">打开这个标签页后才读取状态公告索引</div>`;
   paint($("states-body"), html);
   const pre = $("state-detail-json");
   if (pre && stateBoard.detail?.snapshot) {
@@ -2671,8 +2663,8 @@ async function loadStates(force = false) {
   }
 }
 
-async function toggleStateDetail(agent, key, etag) {
-  const identity = stateIdentity(agent, key);
+async function toggleStateDetail(key, etag) {
+  const identity = stateIdentity(key);
   if (stateBoard.open === identity) {
     clearStateDetail();
     return;
@@ -2682,7 +2674,7 @@ async function toggleStateDetail(agent, key, etag) {
   renderStates();
   const wantedNode = stateBoard.node || focusedNode();
   try {
-    const path = scoped(`api/states/${encodeURIComponent(agent)}/${encodeURIComponent(key)}`);
+    const path = scoped(`api/states/${encodeURIComponent(key)}`);
     const res = await fetch(u(path), { headers: authHeaders({ "If-Match": etag }) });
     const body = await res.json().catch(() => ({}));
     if (res.status === 412) {
@@ -2693,7 +2685,7 @@ async function toggleStateDetail(agent, key, etag) {
     }
     if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
     if (stateBoard.open !== identity || (stateBoard.node || focusedNode()) !== wantedNode) return;
-    stateBoard.detail = body;
+    stateBoard.detail = body.state || body;
     renderStates();
   } catch (err) {
     if (stateBoard.open !== identity) return;
@@ -3037,10 +3029,9 @@ $("crumb-up").addEventListener("click", (event) => browseTo(event.target.dataset
 document.addEventListener("click", (event) => {
   const stateClose = event.target.closest?.("[data-state-close]");
   if (stateClose) { clearStateDetail(); return; }
-  const stateEntry = event.target.closest?.("[data-state-agent][data-state-key]");
+  const stateEntry = event.target.closest?.("[data-state-key]");
   if (stateEntry) {
     toggleStateDetail(
-      stateEntry.dataset.stateAgent,
       stateEntry.dataset.stateKey,
       stateEntry.dataset.stateEtag,
     );

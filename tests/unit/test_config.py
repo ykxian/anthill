@@ -68,6 +68,31 @@ provider = "ghost"
         Config.load_from(layout)
 
 
+def test_external_gateway_agent_must_reference_one_configured_agent(tmp_path: Path) -> None:
+    layout = write_config(
+        tmp_path,
+        """
+[node]
+name = "n1"
+external_gateway_agent = "gateway"
+[agents.gateway]
+role = "coordinator"
+[agents.worker]
+role = "worker"
+""",
+    )
+
+    assert Config.load_from(layout).node.external_gateway_agent == "gateway"
+
+    layout.node_toml.write_text(
+        '[node]\nname = "n1"\nexternal_gateway_agent = "ghost"\n'
+        '[agents.gateway]\nrole = "coordinator"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match=r"external_gateway_agent.*ghost"):
+        Config.load_from(layout)
+
+
 def test_unknown_section_is_rejected(tmp_path: Path):
     layout = write_config(tmp_path, '[node]\nname = "n1"\n[nonsense]\nx = 1\n')
 

@@ -238,11 +238,10 @@ def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog, token: str 
         response.headers.update(headers)
         return result.body
 
-    @app.get(f"{PANEL_PATH}/api/states/{{agent}}/{{key}}", response_model=None)
+    @app.get(f"{PANEL_PATH}/api/states/{{key}}", response_model=None)
     async def panel_state_detail(
         request: Request,
         response: Response,
-        agent: str,
         key: str,
         node: str = "",
     ) -> dict[str, Any] | Response:
@@ -250,7 +249,7 @@ def mount_panel(app: FastAPI, *, nodes: NodeRegistry, log: EventLog, token: str 
         authorize(request, token, what="状态公告详情")
         ctx = _pick(nodes, node)
         try:
-            result = state_detail(ctx.layout, ctx.config, agent, key)
+            result = state_detail(ctx.layout, ctx.config, key)
         except StatePanelError as exc:
             raise HTTPException(
                 status_code=exc.status_code,

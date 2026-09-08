@@ -9,7 +9,8 @@ agentd 完全不需要知道这条消息是从网线上来的。
 1. 能不能解析成合法信封（400）
 2. 发件节点在不在信任列表里（403）—— 发现 ≠ 可通信
 3. 签名与时间窗对不对（401）
-4. 收件人是不是本机的某个已存在 Agent（421 / 404）
+4. group-gateway 模式下是不是发给唯一外部网关（404）
+5. 收件人是不是本机的某个已存在 Agent（421 / 404）
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from base64 import b64decode, b64encode
 from binascii import Error as BinasciiError
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +44,7 @@ from anthill.core.errors import (
 from anthill.core.logging import EventLog
 from anthill.core.mailbox import Mailbox
 from anthill.core.paths import NodeLayout
+from anthill.core.state_sync import STATE_SCOPE, StateRecord, StateStore
 from anthill.discovery.registry import PeerRecord, PeerRegistry
 from anthill.security.keys import PairingToken, fingerprint
 from anthill.security.pairing import (
@@ -80,6 +83,7 @@ from anthill.web.panel_routes import mount_panel, mount_panel_actions
 
 PANEL_HTML = Path(__file__).parent / "static" / "panel.html"
 PANEL_REFRESH = 2.0
+STATE_PATH = "/node/state"
 
 
 def create_app(
@@ -129,14 +133,14 @@ def create_app(
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        """给对端探活用。只暴露公开信息：节点名与 Agent 名单，绝不含密钥或路径。"""
+        """给对端探活用；group-gateway 节点只公开唯一外部地址。"""
         ready()
         return {
             "node": nodes.primary_name,
             "nodes": [
-                {"node": ctx.name, "agents": sorted(ctx.config.agents)} for ctx in nodes.all()
+                {"node": ctx.name, "agents": _external_agents(ctx.config)} for ctx in nodes.all()
             ],
-            "agents": sorted(nodes.primary.config.agents),
+            "agents": _external_agents(nodes.primary.config),
             "proto": Envelope.model_fields["proto"].default,
         }
 
@@ -194,6 +198,82 @@ def create_app(
     ) -> dict[str, Any]:
         """一台机器可以照看好几个节点，所以要能指名道姓地问。"""
         return _summary(request, name, (x_anthill_node, x_anthill_ts, x_anthill_sig))
+
+    def _state_read(
+        request: Request,
+        name: str,
+        key: str | None,
+        headers: tuple[str, str, str],
+    ) -> dict[str, Any]:
+        """已信任 peer 按需读取公告；只读文件，不经过消息与模型运行面。"""
+        if not summary:
+            raise HTTPException(status_code=404, detail="本节点没有开放状态共享")
+        ctx = target(name)
+        _signed(request, ctx, *headers)
+        store = StateStore(ctx.layout.state_dir)
+        try:
+            if key is None:
+                return {
+                    "scope": STATE_SCOPE,
+                    "node": ctx.name,
+                    "states": [_state_metadata(store, record) for record in store.list()],
+                }
+            record = store.load(key)
+            if record is None:
+                raise HTTPException(status_code=404, detail=f"本节点没有 state key {key!r}")
+            return {
+                "scope": STATE_SCOPE,
+                "node": ctx.name,
+                "state": {**_state_metadata(store, record), "snapshot": record.snapshot},
+            }
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (AntHillError, OSError) as exc:
+            log.error("state.read_failed", node=ctx.name, key=key or "*", error=str(exc))
+            raise HTTPException(status_code=503, detail="状态公告暂不可用") from exc
+
+    @app.get(STATE_PATH)
+    async def node_state(
+        request: Request,
+        x_anthill_node: str = Header(default=""),
+        x_anthill_ts: str = Header(default=""),
+        x_anthill_sig: str = Header(default=""),
+    ) -> dict[str, Any]:
+        """列出主节点的公告元数据；snapshot 必须再按 key 显式读取。"""
+        return _state_read(request, "", None, (x_anthill_node, x_anthill_ts, x_anthill_sig))
+
+    @app.get("/node/{name}/state")
+    async def node_state_named(
+        request: Request,
+        name: str,
+        x_anthill_node: str = Header(default=""),
+        x_anthill_ts: str = Header(default=""),
+        x_anthill_sig: str = Header(default=""),
+    ) -> dict[str, Any]:
+        return _state_read(request, name, None, (x_anthill_node, x_anthill_ts, x_anthill_sig))
+
+    @app.get(f"{STATE_PATH}/{{key}}")
+    async def node_state_detail(
+        request: Request,
+        key: str,
+        x_anthill_node: str = Header(default=""),
+        x_anthill_ts: str = Header(default=""),
+        x_anthill_sig: str = Header(default=""),
+    ) -> dict[str, Any]:
+        return _state_read(request, "", key, (x_anthill_node, x_anthill_ts, x_anthill_sig))
+
+    @app.get("/node/{name}/state/{key}")
+    async def node_state_detail_named(
+        request: Request,
+        name: str,
+        key: str,
+        x_anthill_node: str = Header(default=""),
+        x_anthill_ts: str = Header(default=""),
+        x_anthill_sig: str = Header(default=""),
+    ) -> dict[str, Any]:
+        return _state_read(request, name, key, (x_anthill_node, x_anthill_ts, x_anthill_sig))
 
     def _config_read(request: Request, name: str, headers: tuple[str, str, str]) -> dict[str, Any]:
         ctx = target(name)
@@ -509,11 +589,35 @@ def _verify(env: Envelope, key: bytes, log: EventLog) -> None:
 
 def _check_recipient(env: Envelope, config: Config, log: EventLog) -> None:
     """收件节点在分派那一步已经定了，这里只管「那个节点上有没有这个 Agent」。"""
+    gateway = config.node.external_gateway_agent
+    if gateway is not None and env.to.agent != gateway:
+        # 必须放在验签之后调用：陌生人不能拿 role/all/猜名字探测内部成员。
+        log.warn("lan.rejected", msg=env.id, reason="external_gateway_only")
+        raise HTTPException(status_code=404, detail="本节点没有开放这个外部收件地址")
     if env.to.is_role or env.to.is_broadcast:
         return  # 角色/广播地址由本机路由层解析，端点这里不展开
     if env.to.agent not in config.agents:
         log.warn("lan.rejected", msg=env.id, to=str(env.to), reason="unknown_agent")
         raise HTTPException(status_code=404, detail=f"本节点没有 Agent {env.to.agent!r}")
+
+
+def _external_agents(config: Config) -> list[str]:
+    gateway = config.node.external_gateway_agent
+    return [gateway] if gateway is not None else sorted(config.agents)
+
+
+def _state_metadata(store: StateStore, record: StateRecord) -> dict[str, object]:
+    updated_at = datetime.fromtimestamp(
+        store.path_for(record.key).stat().st_mtime, tz=UTC
+    ).isoformat()
+    return {
+        "key": record.key,
+        "revision": record.revision,
+        "digest": record.digest,
+        "publisher": record.publisher,
+        "updated_at": updated_at,
+        "summary": record.summary,
+    }
 
 
 def _learn_return_path(peers: PeerRegistry, peer: PeerRecord, endpoint: str, log: EventLog) -> None:

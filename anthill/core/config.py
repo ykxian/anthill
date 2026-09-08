@@ -60,6 +60,12 @@ class NodeSection(_Section):
     workspace: str = "."
     endpoint: str = ""
     """本机对外地址（如 http://10.0.8.9:45778）。投递时随请求带给对方，让对方知道回信往哪发。"""
+    external_gateway_agent: str | None = Field(default=None, min_length=1, max_length=32)
+    """项目组唯一的跨节点消息网关。
+
+    留空保持传统的「每个 Agent 都能跨节点收发」行为；设置后，LAN 入站只投给
+    这个具体 Agent，本站跨节点出站也只能由它发起。本地路由不受影响。
+    """
 
     @model_validator(mode="after")
     def _check_name(self) -> Self:
@@ -410,6 +416,17 @@ class Config(_Section):
 
     @model_validator(mode="after")
     def _check_references(self) -> Self:
+        gateway = self.node.external_gateway_agent
+        if gateway is not None:
+            if not AGENT_NAME_RE.match(gateway):
+                raise ValueError(
+                    f"非法 external_gateway_agent {gateway!r}：只允许小写字母开头的 Agent name"
+                )
+            if gateway not in self.agents:
+                known = ", ".join(sorted(self.agents)) or "（未配置任何 Agent）"
+                raise ValueError(
+                    f"external_gateway_agent 引用了不存在的 Agent {gateway!r}；已有：{known}"
+                )
         for name, agent in self.agents.items():
             if not AGENT_NAME_RE.match(name):
                 raise ValueError(f"非法 Agent 名 {name!r}：只允许小写字母开头的 name")
@@ -593,6 +610,7 @@ def default_node_toml(node_name: str) -> str:
 name = "{node_name}"
 workspace = "."
 # endpoint = "http://10.0.8.9:45778"   # 本机对外地址，跨机通信时告诉对方回信往哪发
+# external_gateway_agent = "coordinator"  # 可选：项目组唯一跨节点收发 Agent；不改变组内路由
 
 [discovery]
 enabled = true             # 同网段的 anthill 节点能互相看见（广播包里只有节点名/Agent 名单/地址）

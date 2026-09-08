@@ -3,7 +3,7 @@
 三种寻址形式：
 - 具体名 `coder`
 - 角色 `role:reviewer` —— 节点内有多个同角色时选「负载最低」的那个
-- 广播 `all` —— 仅 event / state.update 类型允许
+- 广播 `all` —— 仅 event 类型允许
 
 跨节点地址不在这里解析，交给传输层按 peers 配置处理。
 """
@@ -94,6 +94,7 @@ class Router:
         self._fresh_config()
         target = env.to
         if not self.is_local(target):
+            self._check_external_sender(env)
             return (env,)  # 跨节点：由传输层按 peer 配置投递，不在本地展开
 
         names = self._resolve_names(env)
@@ -133,6 +134,18 @@ class Router:
                 + f"。要发给别的节点上的 Agent，写完整地址：<节点名>:{target.agent}"
             )
         return [target.agent]
+
+    def _check_external_sender(self, env: Envelope) -> None:
+        """group-gateway 模式下，跨节点出口只有一个稳定身份。
+
+        同节点的 Agent 仍按原规则互投；它们需要对外通信时把材料交给网关汇总。
+        同时核对 node，避免把一封第三方来信当作本站网关信件继续转发。
+        """
+        gateway = self._config.node.external_gateway_agent
+        if gateway is None:
+            return
+        if env.from_.node != self.node_name or env.from_.agent != gateway:
+            raise UnknownRecipient("group-gateway 模式下，跨节点投递只能由本站外部网关发起")
 
     def _queue_depth(self, name: str) -> int:
         """用 inbox/new 里的积压条数近似「负载」。够用且零额外状态。"""

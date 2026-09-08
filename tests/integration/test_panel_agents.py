@@ -293,6 +293,21 @@ async def test_an_agent_can_be_started_and_stopped_from_the_panel(node: Bundle) 
     assert running_pid(layout, "echo") is None
 
 
+async def test_a_bridge_agent_cannot_be_started_separately_from_the_panel(node: Bundle) -> None:
+    layout, _, peers = node
+    async with client_for(node) as client:
+        added = await client.post("/panel/api/agents", json={"name": "codex-t3", "brain": "bridge"})
+    assert added.status_code == 201, added.text
+
+    fresh = Config.load_from(layout)
+    async with client_for((layout, fresh, peers)) as client:
+        started = await client.post("/panel/api/agents/codex-t3/start")
+
+    assert started.status_code == 400
+    assert "Codex 会随会话自动启停" in started.text
+    assert running_pid(layout, "codex-t3") is None
+
+
 async def test_starting_twice_is_harmless(node: Bundle) -> None:
     layout, config, _ = node
     try:
@@ -370,6 +385,39 @@ def test_a_stale_pid_is_not_mistaken_for_a_running_agent(node: Bundle) -> None:
     path.write_text(json.dumps({"agent": "echo", "pid": 2**22}), encoding="utf-8")
 
     assert running_pid(layout, "echo") is None
+
+
+def test_an_unlocked_modern_lock_wins_over_a_reused_runtime_pid(
+    node: Bundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """新版锁已存在却无人持有时，runtime PID 即使碰巧活着也不是 agentd。"""
+    layout, _, _ = node
+    agent_dir = layout.agent_dir("echo")
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "agentd.lock").touch()
+    (agent_dir / "runtime.json").write_text(
+        json.dumps({"agent": "echo", "pid": 3718126}), encoding="utf-8"
+    )
+    monkeypatch.setattr("anthill.cli.common.is_running", lambda _pid: True)
+    monkeypatch.setattr(
+        "anthill.web.agents.os.kill",
+        lambda *_args: pytest.fail("不得给 runtime 里的复用 PID 发信号"),
+    )
+
+    assert running_pid(layout, "echo") is None
+    assert stop_agent(layout, "echo")["already"] is True
+
+
+def test_a_legacy_agent_without_a_lock_file_still_uses_its_runtime_pid(
+    node: Bundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout, _, _ = node
+    path = layout.agent_dir("echo") / "runtime.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"agent": "echo", "pid": 4242}), encoding="utf-8")
+    monkeypatch.setattr("anthill.cli.common.is_running", lambda pid: pid == 4242)
+
+    assert running_pid(layout, "echo") == 4242
 
 
 async def test_starting_an_unknown_agent_is_refused(node: Bundle) -> None:

@@ -12,6 +12,7 @@ Claude Code、Codex 以及后续接入的终端 Agent，区别在于怎样唤醒
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from abc import ABC, abstractmethod
 from contextlib import suppress
 from dataclasses import dataclass
@@ -27,12 +28,18 @@ from anthill.adapters.bridge import (
     parse_note,
 )
 from anthill.core.errors import AntHillError
+from anthill.core.evidence import (
+    MAX_MODEL_MESSAGE_BYTES,
+    TRUNCATED_WITH_EVIDENCE,
+    summarize,
+)
 from anthill.core.logging import EventLog
 from anthill.core.paths import NodeLayout
 
 DEFAULT_POLL_INTERVAL = 0.5
 MAX_REPLY_CHARS = 30_000
 NO_REPLY_SENTINEL = "ANTHILL_NO_REPLY"
+MAX_HOST_MESSAGE_BYTES = MAX_MODEL_MESSAGE_BYTES
 
 
 class InteractiveAgentBridgeError(AntHillError):
@@ -136,14 +143,22 @@ class InteractiveAgentBridge(ABC):
 
     async def _process(self, path: Path, stop: asyncio.Event) -> None:
         try:
-            headers, body = parse_note(path.read_text(encoding="utf-8"))
-        except OSError as exc:
+            raw_text = path.read_text(encoding="utf-8")
+            headers, body = parse_note(raw_text)
+        except (OSError, UnicodeDecodeError) as exc:
             raise InteractiveAgentBridgeError(f"读不了来信 {path}：{exc}") from exc
+        needs_reply = note_needs_reply(headers)
+        body = self._bounded_host_body(
+            path=path,
+            raw_text=raw_text,
+            body=body,
+            needs_reply=needs_reply,
+        )
         message = InboxMessage(
             path=path,
             headers=headers,
             body=body,
-            needs_reply=note_needs_reply(headers),
+            needs_reply=needs_reply,
         )
         turn = await self.deliver(message, stop)
         if turn is None:
@@ -166,6 +181,42 @@ class InteractiveAgentBridge(ABC):
             self._ack(path)
             self.log.info(f"{self.event_prefix}.acked", file=path.name, turn=turn.id)
         self.after_delivery(message, turn)
+
+    def _bounded_host_body(
+        self,
+        *,
+        path: Path,
+        raw_text: str,
+        body: str,
+        needs_reply: bool,
+    ) -> str:
+        """宿主模型只看短索引；原始信件留在稳定 details 路径供按需读取。"""
+        body_bytes = body.encode("utf-8")
+        if len(body_bytes) <= MAX_HOST_MESSAGE_BYTES:
+            return body
+
+        raw = raw_text.encode("utf-8")
+        detail = self.handler.store_detail(path.stem, raw)
+        digest = hashlib.sha256(raw).hexdigest()
+        compact = (
+            f"{TRUNCATED_WITH_EVIDENCE}\n"
+            f"summary: {summarize(body, byte_limit=384)}\n"
+            f"message_file: {detail.resolve()}\n"
+            f"sha256: {digest}\n"
+            f"bytes: {len(raw)}\n"
+            f"lines: {len(raw_text.splitlines())}\n"
+            f"needs_reply: {'yes' if needs_reply else 'no'}"
+        )
+        if len(compact.encode("utf-8")) > MAX_HOST_MESSAGE_BYTES:
+            raise InteractiveAgentBridgeError("长信件索引仍超过宿主模型的 2 KiB 上限")
+        self.log.info(
+            f"{self.event_prefix}.externalized",
+            file=path.name,
+            details=str(detail),
+            sha256=digest,
+            bytes=len(raw),
+        )
+        return compact
 
     def _write_reply(self, source: Path, text: str) -> None:
         target = self.handler.dir(OUTBOX) / source.name

@@ -146,9 +146,36 @@ uv run anthill peers pair --to <A的节点名> --pin <六位PIN> -w ./demo
 ```
 
 请在两端核对显示的指纹。发现只代表节点可见，未配对节点不能投递消息；状态公告
-只存在于各自 workspace，本协议不提供跨节点读取或复制。
+的权威副本仍只存在于发布方 workspace；已配对节点可通过签名只读接口按需查询，
+但协议不会广播或自动复制状态。
 需要通过 SSH 连接不能反向访问的服务器时，可使用 SFTP 投递以及 `anthill pull`、
 `anthill fetch` 拉取回信和产物，详见快速使用说明。
+
+### 项目组单一外部网关（可选）
+
+生产项目组可以在 `[node]` 指定一个唯一的跨节点邮箱：
+
+```toml
+[node]
+name = "data-system"
+external_gateway_agent = "main_control"
+```
+
+`external_gateway_agent` 必须引用 `[agents.*]` 中已存在的具体 Agent，否则配置拒绝加载。
+启用后，远端 LAN 来信只能投给这个精确名字，`role:*`、`all` 和其他 Agent 均拒收；
+本站的跨节点出站也只能由该 Agent 发起。节点内 mailbox、bridge、角色/具名路由和
+Agent 生命周期完全不变；未设置该字段时也保留原有的多 Agent 跨节点行为。
+
+这个开关本身**不是组内通信替代品**。如果 jia、design、osdk 等角色是各自独立的
+常驻 TUI，在新的 local team control plane 尚未部署并完成双向投递、恢复和终态回报验证
+之前，必须继续保留它们现有的 Anthill mailbox、bridge 和内部路由。只有替代平面验证后，
+才能另行迁移组内流量；不能因为启用了外部网关就停 worker、删邮箱或宣称已绕过 Bridge。
+
+这不会删除 Anthill 状态公告。消息邮箱与状态板是两条独立通道：已信任 peer 使用同一
+HMAC 请求签名按需读取 `GET /node/state`（只含 key、revision、digest、publisher、
+updated_at、summary），需要正文时再显式读取 `GET /node/state/<key>`。多 workspace
+serve 对应使用 `/node/<node>/state` 和 `/node/<node>/state/<key>`。读取不生成信封、
+队列、回执或 Agent 唤醒，也不调用模型；关闭 `--summary` 会同时关闭这些只读接口。
 
 ## 常用命令
 
@@ -172,7 +199,9 @@ bridge 文件、Codex turn 或 thread memory，也不会唤醒 Agent。一个 ke
 同版异内容或 publisher 变化是 conflict。snapshot 必须是完整 JSON object，canonical
 SHA-256 会在 Core 内重算，最终状态文件上限为 128 KiB。
 
-这是**节点 workspace 内共享**的当前文档，不是跨节点同步、事件流或历史库。旧的
+这是**以节点 workspace 为唯一权威副本**的当前文档，不是自动跨节点同步、事件流或
+历史库。已信任 peer 可以通过上述签名接口按需读取元数据或单个完整 snapshot，但不会
+在读方创建 replica。旧的
 `.anthill/agents/<agent>/state/` replica 会被忽略，若曾实际启用，应在停用旧 publisher
 后显式审计和迁移，不能自动合并。Panel 的状态页先按需读取元数据，只有点开某个 key
 才读取完整 snapshot；普通 Agent 上下文也不会自动注入状态正文。
@@ -182,14 +211,18 @@ SHA-256 会在 Core 内重算，最终状态文件上限为 128 KiB。
 消息进入 Agent 前会执行机械限长，而不是依赖提示词自行忽略：原始正文超过 4 KiB，
 或其模型注入形态超过 2 KiB，会写入
 `.anthill/blackboard/details/<sha256>.txt`（旁有有限元数据 sidecar），信封只保留短摘要、owner、证据等级、
-是否需回复、路径和 SHA-256。相同内容按 digest 只存一份；每个 Agent 也只消费同一
-digest 一次。details 不会随信件或 thread history 自动展开，只有任务确实需要时才显式读取。
+是否需回复、路径和 SHA-256。相同内容按 digest 只存一份；任务处理按消息 ID 和完成状态
+去重，相同正文的新任务仍会处理。details 不会随信件或 thread history 自动展开，只有任务确实需要时才显式读取。
 
 工具输出在每次回喂模型前限制为 8 KiB 或 200 行（先到者生效）；普通 Agent 结果限制为
 4 KiB 或 40 行。超限内容不会伪装成完整结果：模型看到的正文带明确的
-`TRUNCATED_WITH_EVIDENCE`、details 路径和 SHA-256，完整证据文件上限 16 MiB；检测到
-明文 private key、Bearer token、API key、password 或 cookie 时拒绝落盘和投递。
+`TRUNCATED_WITH_EVIDENCE`、details 路径和 SHA-256，完整证据文件上限 16 MiB。
+附件存取不按正文关键词拦截；Bearer、Cookie 等技术说明按普通内容保存和投递。
 R2/R3 复核只应传新 delta/hash/失败点和冻结制品引用。
+
+Codex queue 桥接先持久化提交意图，再调用外部入队命令。恢复时通过消息标记查找对应
+turn，不会自动重投提交结果不确定的消息；此时日志会说明原因，原信及提交记录保留供核对。
+状态文件损坏也会停止该信件的自动提交，避免把已有任务误当成新任务。
 
 回滚时先停用新 publisher/worker，保留 `blackboard/details` 供审计，再回退实现 commit；
 不要把 details 重新内联进邮箱。若确需恢复旧协议，应先排空新格式信封并确认没有活跃

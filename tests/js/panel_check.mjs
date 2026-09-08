@@ -125,7 +125,7 @@ const panel = new Function(
   "setTimeout",
   // setWrite：写权限开着时拓扑会多画启停/删除按钮和「加 Agent」表单，
   // 那几处也把外部数据拼进了 HTML，必须一起验
-  `${script}\nreturn { state, local, topoOpen, stateBoard, draw, applyCluster, applyLocal, renderWorkspaces, renderConnect, copyText, chat, renderChat, renderStates, resetStateBoard, loadStates, showPane, switchNode, md, plainPreview, stripScaffold, patchToml, diffLines, renderDiff, agentEndpoint, testFetch: fetch, fetchCalls: fetch.calls, setWrite: (v) => { canWrite = v; } };`,
+  `${script}\nreturn { state, local, topoOpen, stateBoard, draw, applyCluster, applyLocal, renderWorkspaces, renderConnect, copyText, chat, renderChat, renderStates, resetStateBoard, loadStates, toggleStateDetail, showPane, switchNode, md, plainPreview, stripScaffold, patchToml, diffLines, renderDiff, agentEndpoint, testFetch: fetch, fetchCalls: fetch.calls, setWrite: (v) => { canWrite = v; } };`,
 )(document, window, localStorage, history, URL, location, fetch, WebSocket, navigator, noop, noop);
 
 // ---- 数据 ----
@@ -198,23 +198,43 @@ assert.ok(panel.fetchCalls.some((path) => path.endsWith("/api/states")), "打开
 
 // summary 仍是外部输入；详情 JSON 只能进入 textContent，不能拼进 innerHTML。
 panel.stateBoard.data = {
-  agents: [{
-    agent: "coder",
-    states: [{
-      key: "project.board", revision: 7, source: "laptop:cli",
+  node: "laptop", scope: "node-local",
+  states: [{
+      key: "project.board", revision: 7, publisher: "laptop:cli",
       digest: "a".repeat(64), summary: '<img src=x onerror="boom">',
       stored_at: "2026-09-04T00:00:00+00:00", size_bytes: 100,
-      etag: '"state-test"', replica_status: "only_copy", replica_note: "一个副本",
-    }],
-    issues: [], truncated: false,
+      etag: '"state-test"',
   }],
+  issues: [], truncated: false,
 };
-panel.stateBoard.open = "coder\u0000project.board";
+panel.stateBoard.node = "laptop";
+panel.stateBoard.open = "project.board";
 panel.stateBoard.detail = { snapshot: { html: '<img src=x onerror="boom">' } };
 panel.renderStates();
 assert.ok(!$("states-body").innerHTML.includes("<img"), "状态摘要没有转义");
 assert.ok(!$("states-body").innerHTML.includes("snapshot: {"), "snapshot 被拼进公告索引 DOM");
 assert.ok($("state-detail-json").textContent.includes("<img"), "详情应以纯文本显示 JSON");
+panel.stateBoard.open = "";
+panel.stateBoard.detail = null;
+let detailPath = "";
+panel.testFetch.impl = async (path) => {
+  detailPath = path;
+  return {
+    status: 200,
+    ok: true,
+    headers: { get: () => '"state-test"' },
+    json: async () => ({
+      node: "laptop",
+      scope: "node-local",
+      state: { snapshot: { loaded: "on-click" } },
+    }),
+  };
+};
+await panel.toggleStateDetail("project.board", '"state-test"');
+assert.ok(detailPath.includes("api/states/project.board"), "详情没有按 key 懒读取");
+assert.ok(!detailPath.includes("/coder/"), "详情路径仍携带 Agent replica 维度");
+assert.equal(panel.stateBoard.detail.snapshot.loaded, "on-click");
+panel.testFetch.impl = null;
 panel.showPane("runs");
 assert.equal(panel.stateBoard.detail, null, "离开公告页后 snapshot 仍留在内存");
 
@@ -237,7 +257,7 @@ const stateResponse = (node) => ({
   status: 200,
   ok: true,
   headers: { get: () => `\"states-${node}\"` },
-  json: async () => ({ node, agents: [], truncated: false }),
+  json: async () => ({ node, scope: "node-local", states: [], issues: [], truncated: false }),
 });
 pendingStates[1].resolve(stateResponse("desk"));
 await new Promise((resolve) => setTimeout(resolve, 0));
@@ -472,6 +492,27 @@ assert.match(
   /<div class="detail">[\s\S]*data-op="persona"[\s\S]*<\/div>/,
   "角色卡入口没有放在元信息行，会重新挤乱 Agent 名称和运行状态",
 );
+
+panel.applyCluster({
+  node: "bridge-runtime",
+  nodes: [{
+    node: "bridge-runtime", local: true, reachable: true,
+    agents: [{ ...agent("codex-t3"), provider: "bridge", running: false }],
+    runs: [], events: [],
+  }],
+});
+const bridgeTopo = $("topo-body").innerHTML;
+assert.ok(!bridgeTopo.includes('data-op="start"'), "桥接 Agent 仍能从面板启动独立 agentd");
+assert.ok(bridgeTopo.includes("从桥接页接入"), "桥接 Agent 没有说明新的启动方式");
+
+panel.applyCluster({
+  node: "normal-runtime",
+  nodes: [{
+    node: "normal-runtime", local: true, reachable: true,
+    agents: [{ ...agent("echo"), running: false }], runs: [], events: [],
+  }],
+});
+assert.ok($("topo-body").innerHTML.includes('data-op="start"'), "普通 Agent 不能再从面板启动");
 
 panel.applyCluster({
   node: "x",

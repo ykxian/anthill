@@ -117,6 +117,10 @@ uv run anthill codex codex-t1 --attach THREAD_ID \
 
 这条路径用 Codex 原生 `queue` 唤醒已有 writer，来信、Working 状态和回答都
 显示在原来的 TUI；独立的只读 app-server 只负责取得最终回答并送回发件人。
+`--attach` 只连接已经运行的前台，模型、sandbox、审批和 TUI 设置都由该前台决定；
+attach 命令不得再附加 `--model`、`--sandbox`、`--ask-for-approval`、
+`--approve-for-me`、`--yolo` 或 `--no-alt-screen`。若命令是在目标 Codex 会话环境中
+生成，可用 `--attach current`，避免把易变 thread ID 写死在脚本里。
 已有脚本继续使用 `--resume <thread-id>` 也可以：遇到 active writer 时会自动
 降级为 queue attach。当前 Codex CLI 必须提供 `codex queue`。
 attach 命令是这条映射的常驻监听器，请让它保持运行；原 Codex TUI 仍照常使用。

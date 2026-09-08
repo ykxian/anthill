@@ -72,6 +72,42 @@ async def test_only_running_stale_agents_are_selected(
 
 
 @pytest.mark.asyncio
+async def test_session_owned_bridge_is_never_auto_restarted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, ctx = registry(tmp_path)
+    ctx.layout.node_toml.write_text(
+        ctx.layout.node_toml.read_text(encoding="utf-8")
+        + '\n[agents.codex-t3]\nrole = "worker"\nbridge = true\n',
+        encoding="utf-8",
+    )
+    ctx = NodeContext(ctx.layout)
+    nodes = NodeRegistry([ctx])
+    status = runtime_path(ctx.layout, "codex-t3")
+    status.parent.mkdir(parents=True, exist_ok=True)
+    status.write_text(
+        json.dumps({"pid": 43, "started_at": "2020-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    restarted: list[str] = []
+    monkeypatch.setattr(serve_cmd, "running_pid", lambda _layout, _name: 43)
+
+    async def fake_restart(
+        _ctx: NodeContext, name: str, _log: EventLog, *, exit_poll: float
+    ) -> bool:
+        restarted.append(name)
+        return True
+
+    monkeypatch.setattr(serve_cmd, "_restart_stale_agent", fake_restart)
+    count = await serve_cmd._restart_stale_agents(
+        nodes, EventLog(None, echo=False), code_mtime=time.time(), exit_poll=0
+    )
+
+    assert count == 0
+    assert restarted == []
+
+
+@pytest.mark.asyncio
 async def test_restart_waits_for_current_message_then_stops_and_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

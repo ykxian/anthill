@@ -42,7 +42,9 @@ from anthill.adapters.interactive_agent import (
     wait_or_stop,
 )
 from anthill.agent.context import untrusted_wrap
+from anthill.core.atomic import atomic_write
 from anthill.core.errors import AntHillError
+from anthill.core.evidence import MAX_MODEL_MESSAGE_BYTES
 from anthill.core.logging import EventLog
 from anthill.core.paths import NodeLayout
 from anthill.security.secrets import sanitized_child_env
@@ -52,6 +54,11 @@ RPC_TIMEOUT = 30.0
 POLL_INTERVAL = 0.5
 SESSION_FILE = "codex-session.json"
 QUEUE_STATE_FILE = "codex-queue-state.json"
+QUEUE_SEARCH_PAGE_SIZE = 16
+QUEUE_SEARCH_MAX_PAGES = 8
+QUEUE_TURN_PAGE_SIZE = 8
+QUEUE_TURN_MAX_PAGES = 16
+MAX_CODEX_PROMPT_BYTES = 16 * 1024
 ENDPOINT_RE = re.compile(r"listening on:\s+(ws://\S+)")
 QUEUE_ID_RE = re.compile(r"\bQueued message\s+(\S+)")
 
@@ -92,8 +99,8 @@ class CodexRpcClient:
                 self.endpoint,
                 open_timeout=RPC_TIMEOUT,
                 close_timeout=3,
-                # thread/read(includeTurns=true) 会返回整段长会话；默认/过小的
-                # WebSocket 上限会让正常的大 thread 被误判为连接断开。
+                # 给其余 app-server 响应留出余量；queue bridge 自身只用
+                # searchOccurrences 和有硬上限的分页读取，不再传整段 thread。
                 max_size=64 * 1024 * 1024,
             )
         except Exception as exc:
@@ -106,7 +113,10 @@ class CodexRpcClient:
                     "name": "anthill",
                     "title": "AntHill Codex bridge",
                     "version": __version__,
-                }
+                },
+                # 0.153.4 的精确 thread/searchOccurrences 属于协商能力；
+                # 不支持它的旧 server 会由 queue bridge 回退到有界分页。
+                "capabilities": {"experimentalApi": True},
             },
         )
         await self.notify("initialized", {})
@@ -223,6 +233,12 @@ class CodexRpcClient:
 class TurnResult:
     status: str
     answer: str
+
+
+@dataclass(frozen=True, slots=True)
+class TurnReference:
+    id: str
+    cursor: str
 
 
 class CodexInboxBridge(InteractiveAgentBridge):
@@ -369,8 +385,8 @@ QueueSubmitter = Callable[[str], Awaitable[str]]
 class CodexQueueBridge(InteractiveAgentBridge):
     """把 Anthill 来信排进一个已经运行、已经持有 writer 的 Codex thread。
 
-    ``codex queue`` 负责唤醒现有 TUI；本类持有的 app-server 连接只调用
-    ``thread/read``，不会 resume thread，也就不会和前台争 writer。
+    ``codex queue`` 负责唤醒现有 TUI；本类持有的 app-server 连接只搜索并
+    分页读取目标 turn，不会 resume thread，也就不会和前台争 writer。
     """
 
     def __init__(
@@ -399,12 +415,24 @@ class CodexQueueBridge(InteractiveAgentBridge):
         self.state_path = self.handler.root / QUEUE_STATE_FILE
         self._submit = submit or self._submit_with_codex
         self._child_env = child_env or sanitized_child_env()
+        self._search_occurrences_available: bool | None = None
 
     async def deliver(self, message: InboxMessage, stop: asyncio.Event) -> HostTurn | None:
-        outcome = await self._find_turn(message.id)
         state = self._read_state()
         queued = state.get("queued", {})
-        if outcome is None and message.id not in queued:
+        outcome: tuple[str, TurnResult] | None = None
+        if message.id in queued:
+            # 只有已经持久化为 submitted 的消息才需要恢复/查重。全新消息的 marker
+            # 按定义尚未进入 thread；先扫长历史既没有去重价值，还会在旧协议的
+            # 128-turn 有界回退上限处把新消息误判成失败。
+            outcome = await self._find_turn(message.id)
+            saved = self._read_state()["queued"].get(message.id, {})
+            if saved.get("phase") == "submitting" and outcome is None and not saved.get("turn_id"):
+                raise CodexAppServerError(
+                    f"消息 {message.id} 的 queue 提交结果不确定，尚未找到对应 turn；"
+                    "原信和提交记录已保留，不会自动重复提交，请核对原前台的入队状态"
+                )
+        else:
             # attach 到别的前台持有的 thread 时不能改 developer instructions。
             # 兼容规则只随第一封 queue 消息注入一次，随后留在 thread 历史里；
             # 状态持久化后，桥接重启也不会逐封重复整段说明。
@@ -424,13 +452,18 @@ class CodexQueueBridge(InteractiveAgentBridge):
                 source="Codex 原生 queue",
                 session_instructions=session_instructions,
             )
-            queue_id = await self._submit(prompt)
-            queued[message.id] = {"queue_id": queue_id, "queued_at": time.time()}
+            # queue has no caller-provided idempotency key. Persist intent before
+            # the external side effect: ambiguous recovery must never re-submit.
+            queued[message.id] = {"phase": "submitting", "queued_at": time.time()}
             state = {
                 "thread_id": self.thread_id,
-                "instructions_injected": True,
+                "instructions_injected": state.get("instructions_injected", False),
                 "queued": queued,
             }
+            self._write_state(state)
+            queue_id = await self._submit(prompt)
+            queued[message.id] = {**queued[message.id], "phase": "submitted", "queue_id": queue_id}
+            state["instructions_injected"] = True
             self._write_state(state)
             self.log.info(
                 "codex.queue.submitted",
@@ -455,27 +488,181 @@ class CodexQueueBridge(InteractiveAgentBridge):
         self._forget(message.id)
 
     async def _find_turn(self, message_id: str) -> tuple[str, TurnResult] | None:
-        result = await self.client.request(
-            "thread/read", {"threadId": self.thread_id, "includeTurns": True}
-        )
-        thread = result.get("thread", {}) if isinstance(result, dict) else {}
-        turns = thread.get("turns", []) if isinstance(thread, dict) else []
-        if not isinstance(turns, list):
-            return None
         marker = delivery_marker(message_id)
-        for turn in reversed(turns):
-            if not isinstance(turn, dict) or not _turn_has_marker(turn, marker):
+        state = self._read_state()
+        queued = state.get("queued", {})
+        saved = queued.get(message_id) if isinstance(queued, dict) else None
+        saved_id = str(saved.get("turn_id", "")) if isinstance(saved, dict) else ""
+        saved_cursor = str(saved.get("turn_cursor", "")) if isinstance(saved, dict) else ""
+
+        if saved_id and saved_cursor:
+            turn = await self._read_turn(TurnReference(saved_id, saved_cursor))
+            if turn is not None:
+                return _turn_outcome(turn)
+
+        known_submission = isinstance(saved, dict)
+        references = await self._search_turns(marker, bounded_absence_ok=known_submission)
+        if references is None:
+            return await self._find_turn_in_pages(
+                message_id=message_id,
+                marker=marker,
+                expected_turn_id=saved_id,
+                bounded_absence_ok=known_submission,
+            )
+        for reference in reversed(references):
+            turn = await self._read_turn(reference)
+            if turn is None or not _turn_has_marker(turn, marker):
                 continue
-            turn_id = str(turn.get("id", ""))
-            status = str(turn.get("status", "unknown"))
-            # 另一个进程持有 writer 时，只读 app-server 是从仍在增长的
-            # rollout 重建 thread。读到文件当前 EOF 会暂时把尚未结束的 turn
-            # 表示成 ``interrupted``，但此时没有 completedAt；真实的完成、
-            # 失败或人为中断都有结束时间。不能把这个瞬时快照当成失败。
-            if status in {"inProgress", "pending"} or turn.get("completedAt") is None:
-                return None
-            return turn_id, TurnResult(status=status, answer=_final_answer(turn))
+            self._remember_turn(message_id, reference)
+            return _turn_outcome(turn)
         return None
+
+    async def _search_turns(
+        self, marker: str, *, bounded_absence_ok: bool
+    ) -> list[TurnReference] | None:
+        """Find exact marker occurrences without hydrating unrelated turn history."""
+        if self._search_occurrences_available is False:
+            return None
+        cursor = ""
+        seen_cursors: set[str] = set()
+        references: dict[str, TurnReference] = {}
+        for _page in range(QUEUE_SEARCH_MAX_PAGES):
+            params: dict[str, Any] = {
+                "threadId": self.thread_id,
+                "searchTerm": marker,
+                "limit": QUEUE_SEARCH_PAGE_SIZE,
+            }
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                result = await self.client.request("thread/searchOccurrences", params)
+            except CodexRpcError as exc:
+                if not _rpc_method_unavailable(exc):
+                    raise
+                self._search_occurrences_available = False
+                return None
+            self._search_occurrences_available = True
+            if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+                raise CodexAppServerError(
+                    "Codex app-server thread/searchOccurrences 返回了无效分页结果"
+                )
+            for occurrence in result["data"]:
+                if not isinstance(occurrence, dict) or marker not in str(
+                    occurrence.get("snippet", "")
+                ):
+                    continue
+                turn_id = str(occurrence.get("turnId", ""))
+                turn_cursor = str(occurrence.get("turnCursor", ""))
+                if turn_id and turn_cursor:
+                    # 结果是时间正序；同一 turn 的 user/final 命中只保留最后一个引用。
+                    references[turn_id] = TurnReference(turn_id, turn_cursor)
+            next_cursor = str(result.get("nextCursor") or "")
+            if not next_cursor:
+                return list(references.values())
+            if next_cursor == cursor or next_cursor in seen_cursors:
+                raise CodexAppServerError(
+                    "Codex app-server thread/searchOccurrences 返回了循环 cursor"
+                )
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        if bounded_absence_ok:
+            # 已知 submitted 的消息不能因为暂时尚未出现在有界搜索结果里就失败；
+            # 调用方会继续轮询。这里仍不加载整个 thread。
+            return list(references.values())
+        raise CodexAppServerError(
+            f"Codex queue thread {self.thread_id} 的 marker {marker} 搜索超过 "
+            f"{QUEUE_SEARCH_MAX_PAGES} 页"
+            f"（每页 {QUEUE_SEARCH_PAGE_SIZE} 条）；拒绝加载整个 thread"
+        )
+
+    async def _read_turn(self, reference: TurnReference) -> dict[str, Any] | None:
+        result = await self.client.request(
+            "thread/turns/list",
+            {
+                "threadId": self.thread_id,
+                "cursor": reference.cursor,
+                "limit": 1,
+                "sortDirection": "desc",
+                "itemsView": "summary",
+            },
+        )
+        turns = result.get("data", []) if isinstance(result, dict) else []
+        if not isinstance(turns, list):
+            raise CodexAppServerError("Codex app-server thread/turns/list 返回了无效分页结果")
+        return next(
+            (
+                turn
+                for turn in turns
+                if isinstance(turn, dict) and str(turn.get("id", "")) == reference.id
+            ),
+            None,
+        )
+
+    async def _find_turn_in_pages(
+        self,
+        *,
+        message_id: str,
+        marker: str,
+        expected_turn_id: str,
+        bounded_absence_ok: bool,
+    ) -> tuple[str, TurnResult] | None:
+        """Compatibility fallback for servers without ``thread/searchOccurrences``."""
+        cursor = ""
+        seen_cursors: set[str] = set()
+        for _page in range(QUEUE_TURN_MAX_PAGES):
+            params: dict[str, Any] = {
+                "threadId": self.thread_id,
+                "limit": QUEUE_TURN_PAGE_SIZE,
+                "sortDirection": "desc",
+                "itemsView": "summary",
+            }
+            if cursor:
+                params["cursor"] = cursor
+            result = await self.client.request("thread/turns/list", params)
+            if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+                raise CodexAppServerError("Codex app-server thread/turns/list 返回了无效分页结果")
+            for turn in result["data"]:
+                if not isinstance(turn, dict):
+                    continue
+                turn_id = str(turn.get("id", ""))
+                if (expected_turn_id and turn_id == expected_turn_id) or _turn_has_marker(
+                    turn, marker
+                ):
+                    if turn_id:
+                        self._remember_turn(message_id, TurnReference(turn_id, ""))
+                    return _turn_outcome(turn)
+            next_cursor = str(result.get("nextCursor") or "")
+            if not next_cursor:
+                return None
+            if next_cursor == cursor or next_cursor in seen_cursors:
+                raise CodexAppServerError("Codex app-server thread/turns/list 返回了循环 cursor")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        if bounded_absence_ok:
+            # queue 已经持久化，找不到只表示 writer 尚未把它变成 turn。返回 None
+            # 继续轮询，绝不能因此隔离 inbox 文件或再次 queue。
+            return None
+        raise CodexAppServerError(
+            f"Codex queue thread {self.thread_id} 的 marker {marker} 在最近 "
+            f"{QUEUE_TURN_PAGE_SIZE * QUEUE_TURN_MAX_PAGES} 个 turn 内未找到；"
+            "拒绝加载整个 thread"
+        )
+
+    def _remember_turn(self, message_id: str, reference: TurnReference) -> None:
+        state = self._read_state()
+        queued = state.get("queued", {})
+        saved = queued.get(message_id) if isinstance(queued, dict) else None
+        if not isinstance(saved, dict):
+            return
+        if saved.get("turn_id") == reference.id and saved.get("turn_cursor") == reference.cursor:
+            return
+        saved = {**saved, "turn_id": reference.id, "phase": "submitted"}
+        if reference.cursor:
+            saved["turn_cursor"] = reference.cursor
+        queued[message_id] = saved
+        state["queued"] = queued
+        state["instructions_injected"] = True
+        self._write_state(state)
 
     async def _submit_with_codex(self, prompt: str) -> str:
         try:
@@ -510,25 +697,34 @@ class CodexQueueBridge(InteractiveAgentBridge):
     def _read_state(self) -> dict[str, Any]:
         try:
             state = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             return {"thread_id": self.thread_id, "queued": {}}
-        if not isinstance(state, dict) or state.get("thread_id") != self.thread_id:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CodexAppServerError("queue 状态无法读取；拒绝将旧消息当成新消息重投") from exc
+        if not isinstance(state, dict):
+            raise CodexAppServerError("queue 状态格式错误；拒绝重投")
+        if state.get("thread_id") != self.thread_id:
             return {
                 "thread_id": self.thread_id,
                 "instructions_injected": False,
                 "queued": {},
             }
         if not isinstance(state.get("queued"), dict):
-            state["queued"] = {}
+            raise CodexAppServerError("queue 提交记录格式错误；拒绝重投")
+        if any(not isinstance(item, dict) for item in state["queued"].values()):
+            raise CodexAppServerError("queue 提交记录格式错误；拒绝重投")
         if not isinstance(state.get("instructions_injected"), bool):
             # 旧版已经排队的 prompt 本身带着整段规则；迁移时视为已注入。
             state["instructions_injected"] = bool(state["queued"])
         return state
 
     def _write_state(self, state: dict[str, Any]) -> None:
-        temporary = self.state_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(self.state_path)
+        atomic_write(
+            self.state_path.parent,
+            self.state_path.parent,
+            self.state_path.name,
+            json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
 
     def _forget(self, message_id: str) -> None:
         state = self._read_state()
@@ -543,6 +739,27 @@ class CodexQueueBridge(InteractiveAgentBridge):
 
 def delivery_marker(message_id: str) -> str:
     return f"ANTHILL_DELIVERY_ID::{message_id}"
+
+
+def _rpc_method_unavailable(error: CodexRpcError) -> bool:
+    detail = error.error
+    if isinstance(detail, dict):
+        if detail.get("code") == -32601:
+            return True
+        detail = detail.get("message", detail)
+    lowered = str(detail).lower()
+    return "method not found" in lowered or "unknown method" in lowered
+
+
+def _turn_outcome(turn: dict[str, Any]) -> tuple[str, TurnResult] | None:
+    turn_id = str(turn.get("id", ""))
+    status = str(turn.get("status", "unknown"))
+    # 另一个进程持有 writer 时，只读 app-server 是从仍在增长的 rollout
+    # 重建 thread。读到文件当前 EOF 会暂时把尚未结束的 turn 表示成
+    # ``interrupted``，但此时没有 completedAt；不能把瞬时快照当成失败。
+    if not turn_id or status in {"inProgress", "pending"} or turn.get("completedAt") is None:
+        return None
+    return turn_id, TurnResult(status=status, answer=_final_answer(turn))
 
 
 def _turn_has_marker(turn: dict[str, Any], marker: str) -> bool:
@@ -588,15 +805,27 @@ def render_incoming_prompt(
     session_instructions: str = "",
 ) -> str:
     """Codex 看到的来信 turn；稳定规则在 thread developer instructions 里。"""
+    body_bytes = len(body.encode("utf-8"))
+    if body_bytes > MAX_MODEL_MESSAGE_BYTES:
+        raise CodexAppServerError(
+            f"拒绝把 {body_bytes} 字节正文直接注入 Codex；上限是 "
+            f"{MAX_MODEL_MESSAGE_BYTES} 字节，请改用摘要和信件路径"
+        )
     prefix = f"{session_instructions.strip()}\n\n" if session_instructions.strip() else ""
     reply = "yes" if needs_reply else "no"
-    return (
+    prompt = (
         f"{prefix}"
         f"[AntHill via {source} · agent={agent} · {headers.get('type', 'chat')} · "
         f"from={headers.get('from', '')} · thread={headers.get('thread', '')} · reply={reply}]\n"
         f"{delivery_marker(message_id)}\n"
         f"{untrusted_wrap(body.strip(), source=headers.get('from', '') or source)}"
     )
+    prompt_bytes = len(prompt.encode("utf-8"))
+    if prompt_bytes > MAX_CODEX_PROMPT_BYTES:
+        raise CodexAppServerError(
+            f"拒绝把 {prompt_bytes} 字节 prompt 注入 Codex；总上限是 {MAX_CODEX_PROMPT_BYTES} 字节"
+        )
+    return prompt
 
 
 async def start_app_server(
